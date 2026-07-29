@@ -228,20 +228,28 @@ async fn attempt_loop(
                         return (StatusCode::OK, Json(client_body)).into_response();
                     }
                     result => {
-                        let msg = match result {
-                            Err(msg) => msg,
-                            Ok(_) => "upstream returned a response body that does not match its protocol"
-                                .to_string(),
+                        // 审计/服务端日志带截断的上游响应体(便于排查
+                        // MiniMax 这类 200+错误信封的上游),客户端只收通用文案。
+                        let (msg, detail) = match &result {
+                            Err(msg) => (msg.clone(), msg.clone()),
+                            Ok(resp_body) => (
+                                "upstream returned a response body that does not match its protocol"
+                                    .to_string(),
+                                format!(
+                                    "upstream returned a response body that does not match its protocol: {}",
+                                    truncate_json(resp_body)
+                                ),
+                            ),
                         };
                         warn!(
                             "Upstream 200 from provider {} but body unusable: {} — failing over",
-                            provider.name, msg
+                            provider.name, detail
                         );
                         spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold);
                         spawn_request_log(
                             &state.pool, user_id.clone(), api_key_id.clone(),
                             Some(provider.id.clone()), model.clone(), client_protocol,
-                            0, 0, 0, latency as i32, 502, false, Some(msg.clone()),
+                            0, 0, 0, latency as i32, 502, false, Some(detail),
                         );
                         last_error = Some((
                             json!({"error": {"message": msg, "type": "upstream_error"}}),
@@ -261,19 +269,26 @@ async fn attempt_loop(
                 .map(|v| v.to_ascii_lowercase().contains("text/event-stream"))
                 .unwrap_or(false);
             if !is_sse {
-                let msg = match read_json_limited(resp).await {
-                    Ok(_) => "upstream answered a stream request with a non-SSE body".to_string(),
-                    Err(m) => m,
+                // 同上:日志带截断的上游响应体,客户端只收通用文案。
+                let (msg, detail) = match read_json_limited(resp).await {
+                    Ok(resp_body) => (
+                        "upstream answered a stream request with a non-SSE body".to_string(),
+                        format!(
+                            "upstream answered a stream request with a non-SSE body: {}",
+                            truncate_json(&resp_body)
+                        ),
+                    ),
+                    Err(m) => (m.clone(), m),
                 };
                 warn!(
                     "Upstream 200 from provider {} but not an SSE stream: {} — failing over",
-                    provider.name, msg
+                    provider.name, detail
                 );
                 spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold);
                 spawn_request_log(
                     &state.pool, user_id.clone(), api_key_id.clone(),
                     Some(provider.id.clone()), model.clone(), client_protocol,
-                    0, 0, 0, latency as i32, 502, false, Some(msg.clone()),
+                    0, 0, 0, latency as i32, 502, false, Some(detail),
                 );
                 last_error = Some((
                     json!({"error": {"message": msg, "type": "upstream_error"}}),
@@ -682,6 +697,12 @@ async fn read_json_limited(resp: reqwest::Response) -> Result<Value, String> {
         buf.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&buf).map_err(|e| format!("failed to parse upstream response: {}", e))
+}
+
+/// 截断 JSON 值用于日志/审计:上游错误信封可能很大,只保留前 200 字符。
+fn truncate_json(v: &Value) -> String {
+    let s = serde_json::to_string(v).unwrap_or_default();
+    s.chars().take(200).collect()
 }
 
 /// 流中途失败时发给客户端的协议对应错误事件。

@@ -57,6 +57,7 @@ async function loadProviders() {
                   <button class="btn-outline btn-sm" data-action="edit-provider" data-id="${esc(p.id)}">编辑</button>
                   <button class="btn-outline btn-sm" data-action="duplicate-provider" data-id="${esc(p.id)}">复制</button>
                   <button class="btn-outline btn-sm" data-action="test-provider" data-id="${esc(p.id)}">测试</button>
+                  <button class="${p.is_active ? 'btn-outline' : 'btn-primary'} btn-sm" data-action="toggle-provider" data-id="${esc(p.id)}" data-active="${p.is_active}">${p.is_active ? '禁用' : '启用'}</button>
                   <button class="btn-danger btn-sm" data-action="delete-provider" data-id="${esc(p.id)}">删除</button>
                 </td>
               </tr>
@@ -247,6 +248,12 @@ async function showProviderModal(id) {
       btn.disabled = false;
     }
   };
+}
+
+async function toggleProvider(id, active) {
+  const r = await api('PATCH', `/api/admin/providers/${id}`, { is_active: active });
+  if (r.ok) { toast(active ? '渠道已启用' : '渠道已禁用'); await loadProviders(); }
+  else toast(r.data.message || r.data.error || '操作失败', 'error');
 }
 
 async function duplicateProvider(id) {

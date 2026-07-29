@@ -231,6 +231,7 @@ const listActions = {
   'edit-provider':      (id) => showProviderModal(id),
   'duplicate-provider': (id) => duplicateProvider(id),
   'test-provider':      (id, btn) => testProvider(id, btn),
+  'toggle-provider':    (id, btn) => toggleProvider(id, btn.dataset.active !== 'true'),
   'delete-provider':    (id) => deleteProvider(id),
   'edit-user':          (id) => showUserModal(id),
   'toggle-user':        (id, btn) => toggleUser(id, btn.dataset.active === 'true'),
