@@ -1,0 +1,48 @@
+[package]
+name = "aikun"
+version = "0.1.0"
+edition = "2024"
+description = "A lightweight AI gateway with multi-provider aggregation, failover, and routing optimization"
+
+[dependencies]
+# Web framework
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+
+# Database
+rusqlite = { version = "0.34", features = ["bundled"] }
+
+# Auth
+jsonwebtoken = "9"
+argon2 = "0.5"
+rand = "0.9"
+
+# HTTP client(rustls 替代系统 OpenSSL,便于静态构建)
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "socks", "rustls-tls"] }
+
+# 哈希(api key 存储等)
+sha2 = "0.10"
+
+# Streaming (SSE)
+futures-util = "0.3"
+async-stream = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Config
+dotenvy = "0.15"
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
