@@ -53,13 +53,14 @@ docker logs aikun   # 首次启动查看随机 admin 密码
 
 # 方式二:纯 docker
 docker run -d --name aikun --restart unless-stopped \
-  -p 3000:3000 \
+  --user 1000:1000 \
+  -p 3001:3000 \
   -e AIKUN_JWT_SECRET=$(openssl rand -hex 32) \
-  -v aikun-data:/data \
+  -v "$(pwd)"/data:/data \
   ghcr.io/zumpyx/aikun:latest
 ```
 
-容器内配置通过 `AIKUN_*` 环境变量注入(见下方配置表),SQLite 数据持久化在 `aikun-data` 卷。容器默认监听 `0.0.0.0:3000`,端口映射改 `docker-compose.yml` 左侧即可。本地构建镜像:`docker compose build`。
+容器内配置通过 `AIKUN_*` 环境变量注入(见下方配置表),SQLite 数据库直接落在 `./data/aikun.db`(bind 挂载,备份即复制该文件),容器默认监听 `0.0.0.0:3000`,宿主机端口改 `docker-compose.yml` 端口映射左侧即可。`--user`/compose 的 `user:` 用于让容器以宿主机用户身份写入 `./data`,uid 非 1000 时请对应修改。本地构建镜像:`docker compose build`。
 
 ### 4. 从源码构建(可选)
 

@@ -10,25 +10,26 @@ services:
     build: .
     container_name: aikun
     restart: unless-stopped
+    # bind 挂载 ./data 需要宿主机目录可写:以宿主机用户身份运行,
+    # 数据库文件归属当前用户。uid/gid 非 1000 时改成你的(id -u / id -g)
+    user: "1000:1000"
     ports:
-      # 宿主机端口:容器端口;宿主机 3000 被占用时改左边
-      - "3000:3000"
+      # 宿主机端口:容器端口;宿主机端口被占用时改左边
+      - "3001:3000"
     environment:
       # compose 自动读取同目录 .env;:? 表示未设置时直接报错拒绝启动
       AIKUN_JWT_SECRET: ${AIKUN_JWT_SECRET:?请在 .env 中设置 AIKUN_JWT_SECRET}
-      # 其余配置项见 .env.example(全部 AIKUN_ 前缀),按需取消注释:
+      # 其余配置项见 env.example(全部 AIKUN_ 前缀),按需取消注释:
       # AIKUN_LOG_RETENTION_DAYS: "30"
       # AIKUN_REQUEST_TIMEOUT_SECS: "120"
       # AIKUN_CORS_ALLOWED_ORIGINS: https://your-domain.example
       # AIKUN_TRUST_X_FORWARDED_FOR: "1"   # 仅当位于反向代理之后
     volumes:
-      - aikun-data:/data
+      # SQLite 数据库直接落在项目目录 ./data/aikun.db,备份即复制该文件
+      - ./data:/data
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-
-volumes:
-  aikun-data:
