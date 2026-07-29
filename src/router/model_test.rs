@@ -280,6 +280,8 @@ pub async fn probe_model(
 }
 
 /// Persist a probe outcome for one (channel, model) pair.
+/// 模型测试是真实推理请求,延迟有代表性:顺带按代理转发路径同款口径
+/// 更新渠道的 latency_ms / error_rate EMA(失败不会触发自动禁用)。
 pub fn record_model_health(pool: &DbPool, provider_id: &str, model: &str, probe: &ModelProbe) {
     if let Ok(conn) = pool.conn.lock() {
         let _ = conn.execute(
@@ -297,6 +299,7 @@ pub fn record_model_health(pool: &DbPool, provider_id: &str, model: &str, probe:
             ],
         );
     }
+    crate::router::selector::record_request_result(pool, provider_id, probe.latency_ms, probe.ok);
 }
 
 /// Background loop: every MODEL_TEST_INTERVAL_SECS, probe every active
@@ -333,7 +336,7 @@ async fn run_model_test_round(
             }
         };
         let mut stmt = match conn.prepare(
-            "SELECT id, name, provider_type, base_url, api_key, models, priority, weight,
+            "SELECT id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models, priority, weight,
                     is_active, health_status, latency_ms, error_rate, last_health_check,
                     max_retries, timeout_secs, created_at, updated_at, proxy_url,
                     model_mapping, consecutive_failures, disabled_reason,

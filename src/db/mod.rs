@@ -69,7 +69,8 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             name            TEXT NOT NULL,
             provider_type   TEXT NOT NULL DEFAULT 'openai'
                 CHECK(provider_type IN ('openai', 'anthropic', 'azure', 'custom')),
-            base_url        TEXT NOT NULL,
+            openai_base_url     TEXT NOT NULL,
+            anthropic_base_url  TEXT NOT NULL DEFAULT '',
             api_key         TEXT NOT NULL,
             models          TEXT NOT NULL,
             priority        INTEGER NOT NULL DEFAULT 0,
@@ -153,6 +154,24 @@ fn ensure_column(
     Ok(())
 }
 
+/// providers.base_url → openai_base_url(列重命名,幂等)。
+/// 仅当旧列存在且新列不存在时执行。
+fn rename_base_url_column(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let mut stmt = conn.prepare("PRAGMA table_info(providers)")?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if columns.iter().any(|c| c == "base_url") && !columns.iter().any(|c| c == "openai_base_url") {
+        conn.execute(
+            "ALTER TABLE providers RENAME COLUMN base_url TO openai_base_url",
+            [],
+        )?;
+        tracing::info!("Migrated providers table: renamed base_url to openai_base_url");
+    }
+    Ok(())
+}
+
 fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_column(conn, "providers", "proxy_url", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "providers", "model_mapping", "TEXT NOT NULL DEFAULT ''")?;
@@ -175,6 +194,17 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             [],
         )?;
         conn.execute_batch("PRAGMA user_version = 1")?;
+    }
+    // v2: base_url 拆分为按协议的两个地址。旧值回填给 anthropic_base_url,
+    // 拆分后行为与之前一致(两种协议仍打同一个上游地址)。
+    if user_version < 2 {
+        rename_base_url_column(conn)?;
+        ensure_column(conn, "providers", "anthropic_base_url", "TEXT NOT NULL DEFAULT ''")?;
+        conn.execute(
+            "UPDATE providers SET anthropic_base_url = openai_base_url WHERE anthropic_base_url = ''",
+            [],
+        )?;
+        conn.execute_batch("PRAGMA user_version = 2")?;
     }
     ensure_column(conn, "api_keys", "expires_at", "TEXT")?;
     ensure_column(conn, "api_keys", "models", "TEXT NOT NULL DEFAULT ''")?;

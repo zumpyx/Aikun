@@ -1,14 +1,13 @@
-// ============ Chat ============
 // ============ Chat / Test ============
-// Admin view: a channel × model matrix — one cell per (channel, model) pair,
-// gray by default, click to run a live test, green/red by result. Below it,
-// the raw chat playground that hits the gateway directly.
+// Admin view: a per-channel model test list — one row per channel, each model
+// a fixed-size box, gray by default, click to run a live test, green/red by
+// result. Below it, the raw chat playground that hits the gateway directly.
 async function renderChat(container) {
   if (!container) return;
   const isAdmin = state.user && state.user.role === 'admin';
   const savedMsg = localStorage.getItem('test-message') || 'Say OK';
   container.innerHTML = `
-    <div class="page-head"><h2>测试</h2><p>验证各渠道模型的连通性，或直接向网关发送测试请求</p></div>
+    <div class="page-head"><h2>模型测试</h2><p>验证各渠道模型的连通性，或直接向网关发送测试请求</p></div>
     ${isAdmin ? `
     <div class="card" style="margin-bottom:16px">
       <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
@@ -191,10 +190,11 @@ function provHealthBadge(p) {
   return `<span class="badge ${cls}">${esc(p.health_status)}</span>`;
 }
 
-// Build the channel × model matrix: rows are channels, columns are the union
-// of all models; a cell exists only where the channel supports the model.
-// Cells start from the last measured model_health result (gray when never
-// tested); clicking re-tests live and re-persists that result server-side.
+// Build the per-channel model test list: one row per channel, each model a
+// fixed-size box showing up to 12 chars (centered). Colors come from the last
+// measured model_health result (gray when never tested); clicking re-tests
+// live and re-persists that result server-side. Hover shows the full model
+// name, status, latency and error.
 async function loadTestMatrix() {
   const host = document.getElementById('mt-matrix');
   if (!host) return;
@@ -214,49 +214,41 @@ async function loadTestMatrix() {
     host.innerHTML = '<div class="empty"><p>暂无配置了模型的渠道，请先在渠道页添加</p></div>';
     return;
   }
-  const allModels = [...new Set(provs.flatMap(p => p.models))].sort();
 
-  // Initial cell from the last recorded probe for this (channel, model).
-  const cellOf = (p, m) => {
+  // 方框统一大小,最多显示 12 个字符,超长截断补 ..
+  const truncModel = m => m.length > 12 ? m.slice(0, 10) + '..' : m;
+
+  // Initial box from the last recorded probe for this (channel, model).
+  const boxOf = (p, m) => {
     const h = healthMap[p.id + '|' + m];
-    let cls = 'mcell-gray';
-    let tip = `${p.name} / ${m} — 未测试，点击测试`;
+    let cls = 'mbox-gray';
+    let tip = `${m} — 未测试，点击测试`;
     if (h) {
-      cls = h.status === 'healthy' ? 'mcell-green' : h.status === 'unhealthy' ? 'mcell-red' : 'mcell-gray';
-      tip = `${p.name} / ${m} — ${h.status === 'healthy' ? '✓' : h.status === 'unhealthy' ? '✗' : '?'} ` +
+      cls = h.status === 'healthy' ? 'mbox-green' : h.status === 'unhealthy' ? 'mbox-red' : 'mbox-gray';
+      tip = `${m} — ${h.status === 'healthy' ? '✓' : h.status === 'unhealthy' ? '✗' : '?'} ` +
         `${h.checked_at || ''}${h.latency_ms > 0 ? ' · ' + Math.round(h.latency_ms) + 'ms' : ''}${h.error ? ' · ' + h.error : ''}`.trim();
     }
-    return `<td><span class="mcell ${cls} mt-cell" data-pid="${esc(p.id)}" data-model="${esc(m)}" title="${esc(tip)}"></span></td>`;
+    return `<span class="mbox ${cls} mt-cell" data-pid="${esc(p.id)}" data-model="${esc(m)}" title="${esc(tip)}">${esc(truncModel(m))}</span>`;
   };
 
   host.innerHTML = `
-    <div class="table-wrap" style="margin:0">
-      <table>
-        <thead><tr>
-          <th style="min-width:130px">渠道</th>
-          ${allModels.map(m => `<th style="text-transform:none;letter-spacing:0">${esc(m)}</th>`).join('')}
-        </tr></thead>
-        <tbody>
-          ${provs.map(p => `
-            <tr>
-              <td><strong>${esc(p.name)}</strong> ${provHealthBadge(p)}</td>
-              ${allModels.map(m => p.models.includes(m)
-                ? cellOf(p, m)
-                : '<td><span style="color:var(--border-strong)">·</span></td>').join('')}
-            </tr>`).join('')}
-        </tbody>
-      </table>
+    <div class="mt-rows">
+      ${provs.map(p => `
+        <div class="mt-row">
+          <div class="mt-row-name" title="${esc(p.name)}"><strong>${esc(p.name)}</strong> ${provHealthBadge(p)}</div>
+          <div class="mt-row-models">${p.models.map(m => boxOf(p, m)).join('')}</div>
+        </div>`).join('')}
     </div>
     <div class="legend" style="margin:10px 0 0">
       <span><span class="mcell mcell-gray"></span>未测试</span>
       <span><span class="mcell mcell-green"></span>通过</span>
       <span><span class="mcell mcell-red"></span>失败</span>
-      <span style="margin-left:auto">每 30 分钟自动测试更新，点击方块单独测试</span>
+      <span style="margin-left:auto">每 30 分钟自动测试更新，点击方框单独测试</span>
     </div>`;
 
-  host.querySelector('tbody').onclick = (e) => {
+  host.querySelector('.mt-rows').onclick = (e) => {
     const cell = e.target.closest('.mt-cell');
-    if (cell && !cell.classList.contains('mcell-testing')) runCellTest(cell);
+    if (cell && !cell.classList.contains('mbox-testing')) runCellTest(cell);
   };
 
   // 加载完成前用户可能已切走页面,按钮已不在 DOM 中
@@ -272,8 +264,8 @@ async function loadTestMatrix() {
       const queue = [...cells];
       const worker = async () => { while (queue.length > 0) await runCellTest(queue.shift()); };
       await Promise.all([worker(), worker(), worker(), worker()]);
-      // 图例方块不含 mt-cell，只统计矩阵里的测试格
-      const failed = host.querySelectorAll('.mt-cell.mcell-red').length;
+      // 图例方块不含 mt-cell，只统计列表里的测试格
+      const failed = host.querySelectorAll('.mt-cell.mbox-red').length;
       toast(failed === 0 ? '全部测试通过' : `测试完成，${failed} 个失败`, failed === 0 ? 'success' : 'error');
     } finally {
       allBtn.disabled = false; allBtn.textContent = '一键测试全部';
@@ -281,25 +273,27 @@ async function loadTestMatrix() {
   };
 }
 
-// Run one cell's live test and repaint it by result; details go to the tooltip.
+// Run one box's live test and repaint it by result; details go to the tooltip.
 async function runCellTest(cell) {
-  cell.className = 'mcell mcell-testing mt-cell';
+  cell.className = 'mbox mbox-testing mt-cell';
   const model = cell.dataset.model;
+  const label = cell.textContent;
   try {
     const message = document.getElementById('mt-message')?.value.trim() || 'Say OK';
     const r = await api('POST', `/api/admin/providers/${cell.dataset.pid}/test-model`, { model, message });
     if (r.ok && r.data.ok) {
-      cell.className = 'mcell mcell-green mt-cell';
+      cell.className = 'mbox mbox-green mt-cell';
       cell.title = `${model} ✓ ${Math.round(r.data.latency_ms)}ms${r.data.snippet ? ' · ' + r.data.snippet : ''}`;
     } else {
       const err = String(r.data.error || r.data.message || '请求失败').slice(0, 120);
-      cell.className = 'mcell mcell-red mt-cell';
+      cell.className = 'mbox mbox-red mt-cell';
       cell.title = `${model} ✗${r.data.status ? ' [' + r.data.status + ']' : ''} ${err}`;
     }
   } catch {
-    cell.className = 'mcell mcell-red mt-cell';
+    cell.className = 'mbox mbox-red mt-cell';
     cell.title = `${model} ✗ 网络错误`;
   }
+  cell.textContent = label;
 }
 
 

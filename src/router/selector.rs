@@ -140,7 +140,7 @@ pub fn select_provider(
 fn find_providers_for_model(conn: &Connection, model: &str) -> Option<Vec<Provider>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, provider_type, base_url, api_key, models, priority, weight,
+            "SELECT id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models, priority, weight,
                     is_active, health_status, latency_ms, error_rate, last_health_check,
                     max_retries, timeout_secs, created_at, updated_at, proxy_url,
                     model_mapping, consecutive_failures, disabled_reason,
@@ -329,7 +329,8 @@ mod tests {
             id: "p".into(),
             name: "p".into(),
             provider_type: "openai".into(),
-            base_url: "http://x".into(),
+            openai_base_url: "http://x".into(),
+            anthropic_base_url: "http://x".into(),
             api_key: "k".into(),
             models: models.into(),
             priority: 0,

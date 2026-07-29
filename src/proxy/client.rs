@@ -141,7 +141,10 @@ fn apply_auth(
     protocol: &str,
 ) -> reqwest::RequestBuilder {
     if protocol == PROTOCOL_ANTHROPIC {
+        // 同时携带 x-api-key 与 Authorization Bearer:Anthropic 官方两种都认,
+        // 而部分 Anthropic 兼容上游(如 SenseNova)只检查 Authorization。
         req.header("x-api-key", &provider.api_key)
+            .header("Authorization", format!("Bearer {}", provider.api_key))
             .header("anthropic-version", "2023-06-01")
     } else {
         req.header("Authorization", format!("Bearer {}", provider.api_key))
@@ -183,7 +186,7 @@ pub async fn send_request(
     } else {
         "/chat/completions"
     };
-    let url = build_api_url(&provider.base_url, path);
+    let url = build_api_url(crate::models::base_url_for(provider, protocol), path);
 
     // 同 chat.rs:转发日志是每请求热路径,降级 debug。
     debug!(

@@ -37,7 +37,9 @@ async function loadProviders() {
                   `<span class="badge ${t === p.default_protocol ? 'badge-blue' : 'badge-gray'}" title="${t === p.default_protocol ? '默认协议' : '支持协议'}">${esc(t)}</span>`
                 ).join(' ')}</td>
                 <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-                  ${esc(p.base_url)}
+                  <div title="OpenAI 地址">${esc(p.openai_base_url || '-')}</div>
+                  ${p.anthropic_base_url && p.anthropic_base_url !== p.openai_base_url
+                    ? `<div style="font-size:11.5px;color:var(--muted)" title="Anthropic 地址">${esc(p.anthropic_base_url)}</div>` : ''}
                   ${p.proxy_url ? `<span class="badge badge-violet" title="${esc(p.proxy_url)}">代理</span>` : ''}
                 </td>
                 <td>${esc((p.models || []).slice(0, 2).join(', '))}${p.models?.length > 2 ? ` <span class="badge badge-gray">+${p.models.length - 2}</span>` : ''}</td>
@@ -87,7 +89,10 @@ async function showProviderModal(id) {
           </div>
         </div>
       </div>
-      <div class="form-group"><label>Base URL</label><input id="pf-url" value="${esc(provider?.base_url || '')}" placeholder="https://api.openai.com"></div>
+      <div class="form-row">
+        <div class="form-group"><label>OpenAI Base URL</label><input id="pf-url-openai" value="${esc(provider?.openai_base_url || '')}" placeholder="https://api.openai.com"></div>
+        <div class="form-group"><label>Anthropic Base URL(留空同 OpenAI)</label><input id="pf-url-anthropic" value="${esc(provider?.anthropic_base_url || '')}" placeholder="https://api.anthropic.com"></div>
+      </div>
       <div class="form-group"><label>API Key${provider ? '（留空不修改）' : ''}</label><input id="pf-key" value="${esc(provider?.api_key || '')}" placeholder="sk-..." type="password" ${provider ? '' : 'required'}></div>
       <div class="form-group"><label>模型（逗号分隔）</label>
         <div style="display:flex;gap:8px">
@@ -128,6 +133,13 @@ async function showProviderModal(id) {
   protoBoxes.forEach(b => { b.onchange = syncDefaultProtocol; });
   syncDefaultProtocol();
 
+  // 按协议取对应的上游地址;留空的一路回退到另一个,与后端 base_url_for 一致。
+  const urlFor = (proto) => {
+    const o = document.getElementById('pf-url-openai').value.trim();
+    const a = document.getElementById('pf-url-anthropic').value.trim();
+    return proto === 'anthropic' ? (a || o) : (o || a);
+  };
+
   document.getElementById('pf-cancel').onclick = () => overlay.remove();
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 
@@ -138,10 +150,11 @@ async function showProviderModal(id) {
     const btn = document.getElementById('pf-fetch-models');
     btn.disabled = true; btn.textContent = '获取中…';
     try {
+      const proto = document.getElementById('pf-default-protocol').value || 'openai';
       const r = await api('POST', '/api/admin/providers/fetch-models', {
-        base_url: document.getElementById('pf-url').value.trim(),
+        base_url: urlFor(proto),
         api_key: document.getElementById('pf-key').value,
-        protocol: document.getElementById('pf-default-protocol').value || 'openai',
+        protocol: proto,
         proxy_url: document.getElementById('pf-proxy').value.trim(),
         provider_id: provider?.id || null,
       });
@@ -168,7 +181,8 @@ async function showProviderModal(id) {
       name: document.getElementById('pf-name').value,
       protocols,
       default_protocol: defaultProtoSel.value || protocols[0],
-      base_url: document.getElementById('pf-url').value,
+      openai_base_url: document.getElementById('pf-url-openai').value.trim(),
+      anthropic_base_url: document.getElementById('pf-url-anthropic').value.trim(),
       api_key: document.getElementById('pf-key').value,
       models: document.getElementById('pf-models').value.split(',').map(s => s.trim()).filter(Boolean),
       priority: toInt(document.getElementById('pf-priority').value, 0),
@@ -184,7 +198,7 @@ async function showProviderModal(id) {
     } else {
       body.model_mapping = {};
     }
-    if (!body.name || !body.base_url || (!provider && !body.api_key)) return toast('请填写名称、地址和 API Key', 'error');
+    if (!body.name || (!body.openai_base_url && !body.anthropic_base_url) || (!provider && !body.api_key)) return toast('请填写名称、至少一个协议地址和 API Key', 'error');
 
     if (provider) {
       // Only send changed fields

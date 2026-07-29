@@ -46,8 +46,8 @@ async function renderLogs(container) {
     <div id="logs-stats" style="margin-bottom:14px"></div>
     <div id="logs-list"><div class="empty"><div class="spinner"></div><p>加载中...</p></div></div>`;
 
-  document.getElementById('log-refresh').onclick = () => { loadLogStats(); loadLogs(isAdmin); };
-  document.getElementById('log-filter-btn').onclick = () => loadLogs(isAdmin);
+  document.getElementById('log-refresh').onclick = () => { loadLogStats(isAdmin); loadLogs(isAdmin); };
+  document.getElementById('log-filter-btn').onclick = () => { loadLogStats(isAdmin); loadLogs(isAdmin); };
 
   const modelsR = await api('GET', '/v1/models');
   if (modelsR.ok && modelsR.data.data) {
@@ -73,13 +73,39 @@ async function renderLogs(container) {
     }
   }
 
-  await loadLogStats();
+  await loadLogStats(isAdmin);
   await loadLogs(isAdmin);
 }
 
-// 统计 chips 渲染，初始加载与手动刷新共用
-async function loadLogStats() {
-  const statsR = await api('GET', '/api/logs/stats');
+// 当前筛选条件拼成查询串(不带前导 ?/&),日志列表与统计共用,
+// 保证统计数字始终跟随筛选变化。
+function logFilterQuery(isAdmin) {
+  const model = document.getElementById('log-filter-model')?.value;
+  const status = document.getElementById('log-filter-status')?.value;
+  const user = document.getElementById('log-filter-user')?.value;
+  const time = document.getElementById('log-filter-time')?.value;
+
+  let q = '';
+  if (model) q += '&model=' + encodeURIComponent(model);
+  if (status) q += '&success=' + status;
+  if (isAdmin && user) q += '&user_id=' + encodeURIComponent(user);
+  if (time) {
+    let ms = 0;
+    if (time === '1h') ms = 3600000;
+    else if (time === '24h') ms = 86400000;
+    else if (time === '7d') ms = 604800000;
+    else if (time === '30d') ms = 2592000000;
+    if (ms > 0) q += '&since=' + encodeURIComponent(new Date(Date.now() - ms).toISOString());
+  }
+  return q;
+}
+
+// 统计 chips 渲染,初始加载、筛选与手动刷新共用
+let loadLogStatsSeq = 0;
+async function loadLogStats(isAdmin) {
+  const seq = ++loadLogStatsSeq;
+  const statsR = await api('GET', '/api/logs/stats?' + logFilterQuery(isAdmin));
+  if (seq !== loadLogStatsSeq) return; // 有更新的请求在途,丢弃旧响应
   if (!statsR.ok) return;
   const s = statsR.data;
   const chip = (label, value) =>
@@ -88,8 +114,8 @@ async function loadLogStats() {
   if (!statsEl) return;
   statsEl.innerHTML = `
     <div style="display:flex;gap:10px;flex-wrap:wrap">
-      ${chip('总请求', s.total_requests ?? 0)}
-      ${chip('总 Token', s.total_tokens ?? 0)}
+      ${chip('请求数量', fmtNum(s.total_requests ?? 0))}
+      ${chip('消耗 Token', fmtNum(s.total_tokens ?? 0))}
       ${chip('平均延迟', Math.round(s.avg_latency_ms ?? 0) + 'ms')}
       ${chip('成功率', (s.success_rate ?? 0).toFixed(1) + '%')}
     </div>`;
@@ -104,28 +130,7 @@ async function loadLogs(isAdmin) {
   if (!list) return;
   const seq = ++loadLogsSeq;
 
-  let url = '/api/logs?limit=200';
-
-  const model = document.getElementById('log-filter-model')?.value;
-  const status = document.getElementById('log-filter-status')?.value;
-  const user = document.getElementById('log-filter-user')?.value;
-  const time = document.getElementById('log-filter-time')?.value;
-
-  if (model) url += '&model=' + encodeURIComponent(model);
-  if (status) url += '&success=' + status;
-  if (isAdmin && user) url += '&user_id=' + encodeURIComponent(user);
-  if (time) {
-    const now = Date.now();
-    let ms = 0;
-    if (time === '1h') ms = 3600000;
-    else if (time === '24h') ms = 86400000;
-    else if (time === '7d') ms = 604800000;
-    else if (time === '30d') ms = 2592000000;
-    if (ms > 0) {
-      const since = new Date(now - ms).toISOString();
-      url += '&since=' + encodeURIComponent(since);
-    }
-  }
+  const url = '/api/logs?limit=200' + logFilterQuery(isAdmin);
 
   const r = await api('GET', url);
   if (seq !== loadLogsSeq) return; // a newer request is in flight — drop stale response
@@ -158,7 +163,7 @@ async function loadLogs(isAdmin) {
                 <td style="font-size:12.5px;white-space:nowrap;color:var(--muted)">${esc(l.created_at)}</td>
                 ${isAdmin ? '<td style="font-size:12.5px">' + (l.user_id ? esc(l.user_id.substring(0, 8)) + '...' : '-') + '</td>' : ''}
                 <td><code style="font-size:12.5px">${esc(l.model)}</code></td>
-                <td>${l.total_tokens}</td>
+                <td>${fmtNum(l.total_tokens)}</td>
                 <td>${l.latency_ms}ms</td>
                 <td><span class="badge ${l.success ? 'badge-green' : 'badge-red'}">${l.success ? '成功' : '失败'}</span></td>
                 <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:12.5px;color:var(--danger)">${esc(l.error_message || '-')}</td>

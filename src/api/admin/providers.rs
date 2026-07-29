@@ -24,7 +24,7 @@ pub async fn list_providers(
     };
 
     let mut stmt = match conn.prepare(
-        "SELECT id, name, provider_type, base_url, api_key, models, priority, weight,
+        "SELECT id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models, priority, weight,
                 is_active, health_status, latency_ms, error_rate, last_health_check,
                 max_retries, timeout_secs, created_at, updated_at, proxy_url,
                 model_mapping, consecutive_failures, disabled_reason,
@@ -132,11 +132,23 @@ pub async fn create_provider(
             "message": "name 不能为空"
         })));
     }
-    let base_url = req.base_url.trim().trim_end_matches('/').to_string();
-    if base_url.is_empty() {
+    // 两种协议的上游地址独立配置;至少填一个,留空的一路回退到另一个。
+    let openai_base_url = req
+        .openai_base_url
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    let anthropic_base_url = req
+        .anthropic_base_url
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    if openai_base_url.is_empty() && anthropic_base_url.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({
             "error": "invalid_base_url",
-            "message": "base_url 不能为空"
+            "message": "openai_base_url 和 anthropic_base_url 至少填写一个"
         })));
     }
     if !valid_provider_type(&provider_type) {
@@ -174,11 +186,13 @@ pub async fn create_provider(
         .unwrap_or_else(|_| "{}".to_string());
 
     match conn.execute(
-        "INSERT INTO providers (id, name, provider_type, base_url, api_key, models, priority, weight,
+        "INSERT INTO providers (id, name, provider_type, openai_base_url, anthropic_base_url,
+                                api_key, models, priority, weight,
                                 max_retries, timeout_secs, proxy_url, model_mapping,
                                 protocols, default_protocol)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-        params![id, name, provider_type, base_url, req.api_key, models_json,
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![id, name, provider_type, openai_base_url, anthropic_base_url,
+                 req.api_key, models_json,
                  priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
                  protocols_json, default_protocol],
     ) {
@@ -186,7 +200,8 @@ pub async fn create_provider(
             id,
             name,
             provider_type,
-            base_url,
+            openai_base_url,
+            anthropic_base_url,
             models: req.models,
             priority,
             weight,
@@ -225,7 +240,7 @@ pub async fn get_provider(
     };
 
     let provider = conn.query_row(
-        "SELECT id, name, provider_type, base_url, api_key, models, priority, weight,
+        "SELECT id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models, priority, weight,
                 is_active, health_status, latency_ms, error_rate, last_health_check,
                 max_retries, timeout_secs, created_at, updated_at, proxy_url,
                 model_mapping, consecutive_failures, disabled_reason,
@@ -280,15 +295,15 @@ pub async fn update_provider(
         updates.push("provider_type = ?");
         params_vec.push(Box::new(p_type.clone()));
     }
-    if let Some(url) = &req.base_url {
+    // 两个地址都允许更新;置空即回退到另一路(见 models::base_url_for)。
+    if let Some(url) = &req.openai_base_url {
         let url = url.trim().trim_end_matches('/').to_string();
-        if url.is_empty() {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_base_url",
-                "message": "base_url 不能为空"
-            })));
-        }
-        updates.push("base_url = ?");
+        updates.push("openai_base_url = ?");
+        params_vec.push(Box::new(url));
+    }
+    if let Some(url) = &req.anthropic_base_url {
+        let url = url.trim().trim_end_matches('/').to_string();
+        updates.push("anthropic_base_url = ?");
         params_vec.push(Box::new(url));
     }
     if let Some(key) = &req.api_key {
@@ -458,7 +473,7 @@ pub async fn delete_provider(
     }
 }
 
-/// Create a copy of an existing provider. Configuration (base_url, api_key,
+/// Create a copy of an existing provider. Configuration (base URLs, api_key,
 /// models, priority, weight, retries, timeout, proxy) is copied; runtime
 /// state (health, latency, error rate) is reset. Useful for managing multiple
 /// accounts of the same provider.
@@ -472,8 +487,8 @@ pub async fn duplicate_provider(
     };
 
     let source = conn.query_row(
-        "SELECT name, provider_type, base_url, api_key, models, priority, weight,
-                max_retries, timeout_secs, proxy_url, model_mapping,
+        "SELECT name, provider_type, openai_base_url, anthropic_base_url, api_key, models,
+                priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
                 protocols, default_protocol
          FROM providers WHERE id = ?1",
         params![provider_id],
@@ -484,20 +499,21 @@ pub async fn duplicate_provider(
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
-                row.get::<_, i32>(5)?,
-                row.get::<_, f64>(6)?,
-                row.get::<_, i32>(7)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i32>(6)?,
+                row.get::<_, f64>(7)?,
                 row.get::<_, i32>(8)?,
-                row.get::<_, String>(9)?,
+                row.get::<_, i32>(9)?,
                 row.get::<_, String>(10)?,
                 row.get::<_, String>(11)?,
                 row.get::<_, String>(12)?,
+                row.get::<_, String>(13)?,
             ))
         },
     );
 
-    let (name, provider_type, base_url, api_key, models, priority, weight,
-         max_retries, timeout_secs, proxy_url, model_mapping,
+    let (name, provider_type, openai_base_url, anthropic_base_url, api_key, models,
+         priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
          protocols, default_protocol) = match source {
         Ok(s) => s,
         Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
@@ -507,13 +523,14 @@ pub async fn duplicate_provider(
     let new_name = format!("{} (副本)", name);
 
     match conn.execute(
-        "INSERT INTO providers (id, name, provider_type, base_url, api_key, models, priority, weight,
+        "INSERT INTO providers (id, name, provider_type, openai_base_url, anthropic_base_url,
+                                api_key, models, priority, weight,
                                 max_retries, timeout_secs, proxy_url, model_mapping,
                                 protocols, default_protocol)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-        params![new_id, new_name, provider_type, base_url, api_key, models,
-                priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
-                protocols, default_protocol],
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![new_id, new_name, provider_type, openai_base_url, anthropic_base_url,
+                api_key, models, priority, weight, max_retries, timeout_secs,
+                proxy_url, model_mapping, protocols, default_protocol],
     ) {
         Ok(_) => {
             let models_parsed: Vec<String> =
@@ -522,7 +539,8 @@ pub async fn duplicate_provider(
                 id: new_id,
                 name: new_name,
                 provider_type,
-                base_url,
+                openai_base_url,
+                anthropic_base_url,
                 models: models_parsed,
                 priority,
                 weight,
@@ -564,7 +582,7 @@ pub async fn test_provider(
         };
 
         match conn.query_row(
-            "SELECT id, name, base_url, api_key,
+            "SELECT id, name, openai_base_url, anthropic_base_url, api_key,
                     COALESCE(NULLIF(default_protocol, ''), provider_type),
                     timeout_secs, proxy_url FROM providers WHERE id = ?1",
             params![provider_id],
@@ -575,8 +593,9 @@ pub async fn test_provider(
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, i32>(5)?,
-                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i32>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             },
         ) {
@@ -585,10 +604,19 @@ pub async fn test_provider(
         }
     }; // MutexGuard dropped here
 
-    let (id, name, base_url, api_key, protocol, timeout, proxy_url) = provider_info;
+    let (id, name, openai_url, anthropic_url, api_key, protocol, timeout, proxy_url) = provider_info;
+
+    // 按渠道的默认协议选对应的上游地址;留空的一路回退到另一个。
+    let base_url = if protocol == "anthropic" {
+        if anthropic_url.is_empty() { &openai_url } else { &anthropic_url }
+    } else if openai_url.is_empty() {
+        &anthropic_url
+    } else {
+        &openai_url
+    };
 
     // Step 2: Make health check request (async, no lock held)
-    let (status, latency) = check_provider_health(&state.clients, &base_url, &api_key, &protocol, timeout.clamp(1, 600) as u64, &proxy_url).await;
+    let (status, latency) = check_provider_health(&state.clients, base_url, &api_key, &protocol, timeout.clamp(1, 600) as u64, &proxy_url).await;
 
     // Step 3: Re-lock DB to update status
     {
@@ -740,8 +768,11 @@ pub async fn fetch_upstream_models(
     let url = crate::router::health::build_health_url(&base_url);
     let upstream_req = client.get(&url);
     let upstream_req = match protocol.as_str() {
+        // 与 proxy/client.rs 的 apply_auth 保持一致:同时携带 x-api-key 与
+        // Authorization Bearer,兼容只检查 Authorization 的 Anthropic 上游。
         "anthropic" => upstream_req
             .header("x-api-key", &api_key)
+            .header("Authorization", format!("Bearer {}", api_key))
             .header("anthropic-version", "2023-06-01"),
         _ => upstream_req.header("Authorization", format!("Bearer {}", api_key)),
     };
@@ -845,7 +876,7 @@ pub async fn test_provider_model(
             }
         };
         match conn.query_row(
-            "SELECT id, name, provider_type, base_url, api_key, models, priority, weight,
+            "SELECT id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models, priority, weight,
                     is_active, health_status, latency_ms, error_rate, last_health_check,
                     max_retries, timeout_secs, created_at, updated_at, proxy_url,
                     model_mapping, consecutive_failures, disabled_reason,

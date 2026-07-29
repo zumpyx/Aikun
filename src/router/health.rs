@@ -33,8 +33,11 @@ pub async fn check_provider_health(
 
     let req = client.get(&url);
     let req = match provider_type {
+        // 同 proxy/client.rs 的 apply_auth:同时携带 x-api-key 与 Authorization
+        // Bearer,兼容只检查 Authorization 的 Anthropic 上游。
         "anthropic" => req
             .header("x-api-key", api_key)
+            .header("Authorization", format!("Bearer {}", api_key))
             .header("anthropic-version", "2023-06-01"),
         _ => req.header("Authorization", format!("Bearer {}", api_key)),
     };
@@ -131,7 +134,7 @@ pub async fn run_health_check_loop(
             };
 
             let mut stmt = match conn.prepare(
-                "SELECT id, base_url, api_key,
+                "SELECT id, openai_base_url, anthropic_base_url, api_key,
                         COALESCE(NULLIF(default_protocol, ''), provider_type),
                         timeout_secs, proxy_url FROM providers WHERE is_active = 1"
             ) {
@@ -142,14 +145,15 @@ pub async fn run_health_check_loop(
                 }
             };
 
-            let result: Vec<(String, String, String, String, i32, String)> = match stmt.query_map([], |row| {
+            let result: Vec<(String, String, String, String, String, i32, String)> = match stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, i32>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i32>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             }) {
                 Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
@@ -167,16 +171,24 @@ pub async fn run_health_check_loop(
         // whole round — a timed-out probe simply counts as unhealthy and is
         // persisted like any other result.
         let probes = join_all(providers.iter().map(
-            |(id, base_url, api_key, provider_type, timeout, proxy_url)| {
+            |(id, openai_url, anthropic_url, api_key, protocol, timeout, proxy_url)| {
                 let clients = clients.clone();
                 async move {
                     // Clamp defensively: timeout_secs is validated 1..=600 at the
                     // API layer, but old rows may hold out-of-range values.
                     let probe_timeout = (*timeout).clamp(1, 600).min(60) as u64;
+                    // 按默认协议选对应的上游地址,留空的一路回退到另一个。
+                    let base_url = if protocol == "anthropic" {
+                        if anthropic_url.is_empty() { openai_url } else { anthropic_url }
+                    } else if openai_url.is_empty() {
+                        anthropic_url
+                    } else {
+                        openai_url
+                    };
                     let (status, latency) = match tokio::time::timeout(
                         std::time::Duration::from_secs(probe_timeout),
                         check_provider_health(
-                            &clients, base_url, api_key, provider_type, probe_timeout, proxy_url,
+                            &clients, base_url, api_key, protocol, probe_timeout, proxy_url,
                         ),
                     )
                     .await

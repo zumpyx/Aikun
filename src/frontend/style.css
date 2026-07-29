@@ -75,6 +75,7 @@ code { font-family: 'SFMono-Regular', 'JetBrains Mono', Consolas, monospace; }
 .user-meta strong { display: block; color: #e8eaf6; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #logout-link { color: var(--faint); font-size: 12.5px; white-space: nowrap; transition: color .15s; }
 #logout-link:hover { color: #fda4af; }
+.sidebar-version { margin: 10px 12px 0; text-align: center; font-size: 11px; color: var(--faint); letter-spacing: .3px; }
 .main { flex: 1; padding: 30px 34px; overflow-y: auto; min-width: 0; }
 
 /* ============ Login ============ */
@@ -131,6 +132,10 @@ code { font-family: 'SFMono-Regular', 'JetBrains Mono', Consolas, monospace; }
 }
 .stat-card .value { font-size: 23px; font-weight: 700; letter-spacing: -.4px; line-height: 1.2; }
 .stat-card .label { font-size: 12.5px; color: var(--muted); margin-top: 1px; }
+
+/* Dashboard usage charts */
+.usage-grid { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; margin-bottom: 18px; }
+@media (max-width: 1100px) { .usage-grid { grid-template-columns: 1fr; } }
 
 /* ============ Forms ============ */
 .form-group { margin-bottom: 14px; }
@@ -257,6 +262,27 @@ td .btn-sm { margin: 1px 2px; }
 .mcell-gray { background: #cbd2dc; }
 .mt-cell { cursor: pointer; }
 .mcell-testing { background: var(--primary); animation: mtPulse .8s ease-in-out infinite; }
+
+/* 模型测试一维列表:每渠道一行,模型为统一尺寸的方框 */
+.mt-rows { display: flex; flex-direction: column; gap: 10px; }
+.mt-row { display: flex; align-items: flex-start; gap: 14px; }
+.mt-row-name {
+  width: 170px; flex-shrink: 0; padding-top: 5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mt-row-models { display: flex; flex-wrap: wrap; gap: 8px; }
+.mbox {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 128px; height: 30px; padding: 0 6px; box-sizing: border-box;
+  border-radius: 7px; font-size: 12px; color: #fff; text-align: center;
+  overflow: hidden; white-space: nowrap;
+  transition: transform .12s, box-shadow .12s;
+}
+.mbox:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); }
+.mbox-green { background: var(--success); box-shadow: 0 0 0 1px rgba(16,185,129,.25); }
+.mbox-red { background: var(--danger); box-shadow: 0 0 0 1px rgba(239,68,68,.25); }
+.mbox-gray { background: #cbd2dc; color: #4b5563; }
+.mbox-testing { background: var(--primary); animation: mtPulse .8s ease-in-out infinite; }
 @keyframes mtPulse { 50% { opacity: .3; } }
 .legend {
   display: flex; gap: 16px; align-items: center; flex-wrap: wrap;

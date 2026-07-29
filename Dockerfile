@@ -1,7 +1,7 @@
 # ---- 构建阶段 --------------------------------------------------------------
 # 在构建机架构(BUILDPLATFORM)上运行,zigbuild 原生交叉编译出静态 musl 二进制,
 # 多架构镜像不需要 QEMU 模拟。与 .github/workflows/release.yml 同一工具链。
-FROM --platform=$BUILDPLATFORM ghcr.io/rust-cross/cargo-zigbuild:0.23.0 AS builder
+FROM --platform=$BUILDPLATFORM ghcr.io/rust-cross/cargo-zigbuild:latest AS builder
 WORKDIR /app
 COPY . .
 
@@ -19,7 +19,7 @@ RUN case "$TARGETPLATFORM" in \
 # ---- 运行阶段 --------------------------------------------------------------
 # 二进制全静态(rusqlite bundled SQLite + rustls webpki-roots 证书),
 # 不依赖任何系统库;alpine 仅提供 shell 便于 exec 排查,总体积约 20MB。
-FROM alpine:3.21
+FROM alpine:latest
 RUN adduser -D -u 10001 aikun \
     && mkdir -p /data \
     && chown aikun:aikun /data

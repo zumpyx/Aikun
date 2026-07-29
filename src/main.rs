@@ -104,6 +104,7 @@ async fn main() {
     // --- Protected routes (auth required) ---
     let protected_routes = Router::new()
         .route("/api/me", get(api::auth::get_current_user))
+        .route("/api/version", get(version))
         .route("/api/api-keys", get(api::auth::list_api_keys))
         .route("/api/api-keys", post(api::auth::create_api_key))
         .route("/api/api-keys/{id}", delete(api::auth::delete_api_key))
@@ -133,6 +134,7 @@ async fn main() {
         .route("/api/admin/providers/{id}/test-model", post(api::admin::providers::test_provider_model))
         .route("/api/admin/providers/{id}/duplicate", post(api::admin::providers::duplicate_provider))
         .route("/api/admin/model-health", get(api::admin::providers::list_model_health))
+        .route("/api/admin/usage-stats", get(api::logs::usage_stats))
         .layer(middleware::from_fn(require_admin))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
@@ -255,6 +257,11 @@ async fn health_check() -> impl IntoResponse {
         "status": "ok",
         "timestamp": chrono::Utc::now().to_rfc3339()
     }))
+}
+
+/// 服务版本号。挂在受保护路由下:除 /api/health 外的接口一律需要授权。
+async fn version() -> impl IntoResponse {
+    Json(json!({ "version": env!("CARGO_PKG_VERSION") }))
 }
 
 async fn serve_frontend() -> impl IntoResponse {

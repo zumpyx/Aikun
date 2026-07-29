@@ -5,7 +5,11 @@ pub struct Provider {
     pub id: String,
     pub name: String,
     pub provider_type: String,
-    pub base_url: String,
+    /// OpenAI 协议上游地址。
+    pub openai_base_url: String,
+    /// Anthropic 协议上游地址;为空时回退 openai_base_url(见 base_url_for)。
+    #[serde(default)]
+    pub anthropic_base_url: String,
     #[serde(skip_serializing)]
     pub api_key: String,
     pub models: String,  // JSON array
@@ -44,7 +48,8 @@ impl std::fmt::Debug for Provider {
             .field("id", &self.id)
             .field("name", &self.name)
             .field("provider_type", &self.provider_type)
-            .field("base_url", &self.base_url)
+            .field("openai_base_url", &self.openai_base_url)
+            .field("anthropic_base_url", &self.anthropic_base_url)
             .field("api_key", &"***")
             .field("models", &self.models)
             .field("priority", &self.priority)
@@ -87,6 +92,23 @@ pub fn channel_protocol(p: &Provider) -> &'static str {
     }
 }
 
+/// 按上游协议选择对应的 base URL:有些供应商对 OpenAI / Anthropic 两种协议
+/// 提供不同路由。协议专属地址为空时回退另一个,保证只配了一个地址的
+/// 渠道照常工作。
+pub fn base_url_for<'a>(p: &'a Provider, protocol: &str) -> &'a str {
+    if protocol == crate::proxy::convert::PROTOCOL_ANTHROPIC {
+        if p.anthropic_base_url.is_empty() {
+            &p.openai_base_url
+        } else {
+            &p.anthropic_base_url
+        }
+    } else if p.openai_base_url.is_empty() {
+        &p.anthropic_base_url
+    } else {
+        &p.openai_base_url
+    }
+}
+
 /// Parse the channel's supported protocol list, with the legacy
 /// provider_type fallback for unmigrated rows.
 pub fn channel_protocols(p: &Provider) -> Vec<String> {
@@ -98,36 +120,37 @@ pub fn channel_protocols(p: &Provider) -> Vec<String> {
 }
 
 /// Map a row of the standard providers-table select order (id, name,
-/// provider_type, base_url, api_key, models, priority, weight, is_active,
-/// health_status, latency_ms, error_rate, last_health_check, max_retries,
-/// timeout_secs, created_at, updated_at, proxy_url, model_mapping,
-/// consecutive_failures, disabled_reason, protocols, default_protocol) to a
-/// Provider.
+/// provider_type, openai_base_url, anthropic_base_url, api_key, models,
+/// priority, weight, is_active, health_status, latency_ms, error_rate,
+/// last_health_check, max_retries, timeout_secs, created_at, updated_at,
+/// proxy_url, model_mapping, consecutive_failures, disabled_reason,
+/// protocols, default_protocol) to a Provider.
 pub fn row_to_provider(row: &rusqlite::Row) -> rusqlite::Result<Provider> {
     Ok(Provider {
         id: row.get(0)?,
         name: row.get(1)?,
         provider_type: row.get(2)?,
-        base_url: row.get(3)?,
-        api_key: row.get(4)?,
-        models: row.get(5)?,
-        priority: row.get(6)?,
-        weight: row.get(7)?,
-        is_active: row.get(8)?,
-        health_status: row.get(9)?,
-        latency_ms: row.get(10)?,
-        error_rate: row.get(11)?,
-        last_health_check: row.get(12)?,
-        max_retries: row.get(13)?,
-        timeout_secs: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
-        proxy_url: row.get(17)?,
-        model_mapping: row.get(18)?,
-        consecutive_failures: row.get(19)?,
-        disabled_reason: row.get(20)?,
-        protocols: row.get(21)?,
-        default_protocol: row.get(22)?,
+        openai_base_url: row.get(3)?,
+        anthropic_base_url: row.get(4)?,
+        api_key: row.get(5)?,
+        models: row.get(6)?,
+        priority: row.get(7)?,
+        weight: row.get(8)?,
+        is_active: row.get(9)?,
+        health_status: row.get(10)?,
+        latency_ms: row.get(11)?,
+        error_rate: row.get(12)?,
+        last_health_check: row.get(13)?,
+        max_retries: row.get(14)?,
+        timeout_secs: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
+        proxy_url: row.get(18)?,
+        model_mapping: row.get(19)?,
+        consecutive_failures: row.get(20)?,
+        disabled_reason: row.get(21)?,
+        protocols: row.get(22)?,
+        default_protocol: row.get(23)?,
     })
 }
 
@@ -135,7 +158,8 @@ pub fn row_to_provider(row: &rusqlite::Row) -> rusqlite::Result<Provider> {
 pub struct CreateProviderRequest {
     pub name: String,
     pub provider_type: Option<String>,
-    pub base_url: String,
+    pub openai_base_url: Option<String>,
+    pub anthropic_base_url: Option<String>,
     #[serde(default)]
     pub api_key: String,
     pub models: Vec<String>,
@@ -153,7 +177,8 @@ pub struct CreateProviderRequest {
 pub struct UpdateProviderRequest {
     pub name: Option<String>,
     pub provider_type: Option<String>,
-    pub base_url: Option<String>,
+    pub openai_base_url: Option<String>,
+    pub anthropic_base_url: Option<String>,
     pub api_key: Option<String>,
     pub models: Option<Vec<String>>,
     pub priority: Option<i32>,
@@ -172,7 +197,8 @@ pub struct ProviderResponse {
     pub id: String,
     pub name: String,
     pub provider_type: String,
-    pub base_url: String,
+    pub openai_base_url: String,
+    pub anthropic_base_url: String,
     pub models: Vec<String>,
     pub priority: i32,
     pub weight: f64,
@@ -203,7 +229,8 @@ impl From<Provider> for ProviderResponse {
             id: p.id,
             name: p.name,
             provider_type: p.provider_type,
-            base_url: p.base_url,
+            openai_base_url: p.openai_base_url,
+            anthropic_base_url: p.anthropic_base_url,
             models,
             priority: p.priority,
             weight: p.weight,
@@ -233,7 +260,8 @@ mod tests {
             id: "p".into(),
             name: "p".into(),
             provider_type: "openai".into(),
-            base_url: "http://x".into(),
+            openai_base_url: "http://x".into(),
+            anthropic_base_url: String::new(),
             api_key: "k".into(),
             models: "[]".into(),
             priority: 0,
@@ -265,6 +293,21 @@ mod tests {
             "anthropic".to_string()
         ]));
         assert!(!valid_protocol_list(&["azure".to_string()]));
+    }
+
+    #[test]
+    fn base_url_for_picks_protocol_url_with_fallback() {
+        let mut p = bare_provider();
+        // 未配 anthropic 地址时两种协议都落到 openai 地址
+        assert_eq!(base_url_for(&p, "openai"), "http://x");
+        assert_eq!(base_url_for(&p, "anthropic"), "http://x");
+        // 配了独立的 anthropic 地址后按协议分开
+        p.anthropic_base_url = "http://y".into();
+        assert_eq!(base_url_for(&p, "anthropic"), "http://y");
+        assert_eq!(base_url_for(&p, "openai"), "http://x");
+        // openai 地址为空时回退 anthropic 地址(anthropic-only 渠道)
+        p.openai_base_url = String::new();
+        assert_eq!(base_url_for(&p, "openai"), "http://y");
     }
 
     #[test]

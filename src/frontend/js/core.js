@@ -4,10 +4,13 @@ const state = {
   user: null,
   view: null,
   apiKeys: [],
+  version: null,
 };
 
 // ============ Utils ============
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// 千分位数字:1234567 → 1,234,567
+const fmtNum = n => Number(n ?? 0).toLocaleString('en-US');
 // Truncate a string to at most `max` UTF-8 bytes without cutting a
 // multi-byte character in half (sidebar nickname is capped at 8 bytes).
 const truncBytes = (s, max) => {
@@ -71,6 +74,12 @@ function toast(msg, type = 'success') {
   setTimeout(() => t.remove(), 3000);
 }
 
+// 版本号接口需要授权,登录态就绪后调用;结果存入 state.version 供侧栏展示
+async function loadVersion() {
+  const r = await api('GET', '/api/version');
+  if (r.ok && r.data.version) state.version = r.data.version;
+}
+
 // ============ Icons ============
 const I = (p, filled) => `<svg width="18" height="18" viewBox="0 0 24 24" fill="${filled ? 'currentColor' : 'none'}" stroke="${filled ? 'none' : 'currentColor'}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
 const icons = {
@@ -130,6 +139,7 @@ function renderLogin(container) {
         state.token = r.data.token;
         state.user = r.data.user;
         localStorage.setItem('token', state.token);
+        await loadVersion();
         toast('登录成功');
         render();
       } else {
@@ -178,6 +188,7 @@ function renderApp(container) {
           </div>
           <a href="#" id="logout-link" title="退出登录">退出</a>
         </div>
+        ${state.version ? `<div class="sidebar-version">v${esc(state.version)}</div>` : ''}
       </div>
       <div class="main" id="main-content"></div>
     </div>`;
