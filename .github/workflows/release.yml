@@ -121,7 +121,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # GHCR 镜像名必须全小写,仓库名 Aikun 在此显式转为 aikun
+          # metadata-action 会自动将镜像名转为小写(GHCR 要求)
           images: ghcr.io/${{ github.repository_owner }}/aikun
           flavor: |
             latest=true
@@ -129,18 +129,14 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      - name: Lowercase image refs
-        id: lower
-        run: |
-          echo "tags=$(echo '${{ steps.meta.outputs.tags }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.lower.outputs.tags }}
+          # tags/labels 均为多行输出,build-push-action 原生支持按行解析
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
