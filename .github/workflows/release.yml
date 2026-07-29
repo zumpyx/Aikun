@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BIN_NAME: aikun
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # 官方 cargo-zigbuild 镜像:自带 Rust / zig / cargo-zigbuild
+    container: ghcr.io/rust-cross/cargo-zigbuild:0.23.0
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+          - target: aarch64-unknown-linux-musl
+          - target: x86_64-pc-windows-gnullvm
+          - target: aarch64-pc-windows-gnullvm
+          - target: x86_64-apple-darwin
+          - target: aarch64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add rust target
+        run: rustup target add ${{ matrix.target }}
+
+      # macOS 目标需要 Apple SDK(chrono → iana-time-zone 链接 CoreFoundation),
+      # 通过 SDKROOT 提供给 zig;Linux/Windows 目标不需要。
+      - name: Fetch macOS SDK
+        if: contains(matrix.target, 'apple-darwin')
+        run: |
+          curl -L -o /tmp/macosx-sdk.tar.xz \
+            https://github.com/joseluisq/macosx-sdks/releases/download/12.3/MacOSX12.3.sdk.tar.xz
+          mkdir -p "$HOME/macos-sdks"
+          tar -xf /tmp/macosx-sdk.tar.xz -C "$HOME/macos-sdks"
+          echo "SDKROOT=$HOME/macos-sdks/MacOSX12.3.sdk" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      # 原始二进制直接上传,统一在 release job 里打包(容器内无 zip)。
+      - name: Upload binary (unix)
+        if: ${{ !contains(matrix.target, 'windows') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ env.BIN_NAME }}
+          if-no-files-found: error
+
+      - name: Upload binary (windows)
+        if: ${{ contains(matrix.target, 'windows') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ env.BIN_NAME }}.exe
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist
+
+      - name: Package
+        run: |
+          mkdir -p pkg
+          for d in dist/bin-*; do
+            target="${d#dist/bin-}"
+            if [[ "$target" == *windows* ]]; then
+              (cd "$d" && zip "$GITHUB_WORKSPACE/pkg/${BIN_NAME}-${VERSION}-${target}.zip" "${BIN_NAME}.exe")
+            else
+              chmod +x "$d/${BIN_NAME}"
+              tar -czf "pkg/${BIN_NAME}-${VERSION}-${target}.tar.gz" -C "$d" "${BIN_NAME}"
+            fi
+          done
+          ls -lh pkg/
+        env:
+          VERSION: ${{ github.ref_name }}
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pkg/*
+          generate_release_notes: true
