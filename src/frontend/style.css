@@ -158,7 +158,7 @@ code { font-family: 'SFMono-Regular', 'JetBrains Mono', Consolas, monospace; }
 /* ============ Tables ============ */
 .table-wrap { overflow-x: auto; margin: 0 -22px; padding: 0 22px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th, td { padding: 11px 14px; text-align: left; border-bottom: 1px solid #f0f1f5; }
+th, td { padding: 11px 14px; text-align: center; border-bottom: 1px solid #f0f1f5; }
 th { font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--faint); border-bottom: 1px solid var(--border); }
 tbody tr { transition: background .12s; }
 tbody tr:hover { background: #f8f9fc; }
@@ -261,15 +261,19 @@ td .btn-sm { margin: 1px 2px; }
 .mcell-red { background: var(--danger); box-shadow: 0 0 0 1px rgba(239,68,68,.25); }
 .mcell-gray { background: #cbd2dc; }
 .mt-cell { cursor: pointer; }
-.mcell-testing { background: var(--primary); animation: mtPulse .8s ease-in-out infinite; }
 
 /* 模型测试一维列表:每渠道一行,模型为统一尺寸的方框 */
 .mt-rows { display: flex; flex-direction: column; gap: 10px; }
 .mt-row { display: flex; align-items: flex-start; gap: 14px; }
 .mt-row-name {
-  width: 170px; flex-shrink: 0; padding-top: 5px;
+  width: 220px; flex-shrink: 0; padding-top: 5px;
+  display: flex; align-items: center; gap: 8px;
+}
+.mt-chan {
+  flex: 1; min-width: 0; text-align: center;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.mt-row-name .badge { flex-shrink: 0; }
 .mt-row-models { display: flex; flex-wrap: wrap; gap: 8px; }
 .mbox {
   display: inline-flex; align-items: center; justify-content: center;

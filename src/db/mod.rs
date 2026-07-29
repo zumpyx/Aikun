@@ -89,6 +89,8 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             disabled_reason TEXT NOT NULL DEFAULT '',
             protocols       TEXT NOT NULL DEFAULT '',
             default_protocol TEXT NOT NULL DEFAULT '',
+            note            TEXT NOT NULL DEFAULT '',
+            website_url     TEXT NOT NULL DEFAULT '',
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -179,6 +181,10 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_column(conn, "providers", "disabled_reason", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "providers", "protocols", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "providers", "default_protocol", "TEXT NOT NULL DEFAULT ''")?;
+    // 渠道备注:同一供应商多个帐号时用于区分。
+    ensure_column(conn, "providers", "note", "TEXT NOT NULL DEFAULT ''")?;
+    // 渠道官网地址,仅用于后台展示。
+    ensure_column(conn, "providers", "website_url", "TEXT NOT NULL DEFAULT ''")?;
     // Backfill protocol fields from the legacy provider_type, gated by
     // user_version so it runs exactly once instead of on every startup.
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;

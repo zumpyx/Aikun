@@ -847,6 +847,8 @@ mod tests {
             disabled_reason: String::new(),
             protocols: "[\"openai\"]".into(),
             default_protocol: "openai".into(),
+            note: String::new(),
+            website_url: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
         }

@@ -37,6 +37,12 @@ pub struct Provider {
     /// Protocol used for upstream traffic by default.
     #[serde(default)]
     pub default_protocol: String,
+    /// 渠道备注:同一供应商多个帐号时用于区分。
+    #[serde(default)]
+    pub note: String,
+    /// 渠道官网地址,仅用于后台展示。
+    #[serde(default)]
+    pub website_url: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -67,6 +73,8 @@ impl std::fmt::Debug for Provider {
             .field("disabled_reason", &self.disabled_reason)
             .field("protocols", &self.protocols)
             .field("default_protocol", &self.default_protocol)
+            .field("note", &self.note)
+            .field("website_url", &self.website_url)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -124,7 +132,7 @@ pub fn channel_protocols(p: &Provider) -> Vec<String> {
 /// priority, weight, is_active, health_status, latency_ms, error_rate,
 /// last_health_check, max_retries, timeout_secs, created_at, updated_at,
 /// proxy_url, model_mapping, consecutive_failures, disabled_reason,
-/// protocols, default_protocol) to a Provider.
+/// protocols, default_protocol, note, website_url) to a Provider.
 pub fn row_to_provider(row: &rusqlite::Row) -> rusqlite::Result<Provider> {
     Ok(Provider {
         id: row.get(0)?,
@@ -151,6 +159,8 @@ pub fn row_to_provider(row: &rusqlite::Row) -> rusqlite::Result<Provider> {
         disabled_reason: row.get(21)?,
         protocols: row.get(22)?,
         default_protocol: row.get(23)?,
+        note: row.get(24)?,
+        website_url: row.get(25)?,
     })
 }
 
@@ -171,6 +181,8 @@ pub struct CreateProviderRequest {
     pub model_mapping: Option<std::collections::HashMap<String, String>>,
     pub protocols: Option<Vec<String>>,
     pub default_protocol: Option<String>,
+    pub note: Option<String>,
+    pub website_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +202,8 @@ pub struct UpdateProviderRequest {
     pub model_mapping: Option<std::collections::HashMap<String, String>>,
     pub protocols: Option<Vec<String>>,
     pub default_protocol: Option<String>,
+    pub note: Option<String>,
+    pub website_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -214,6 +228,8 @@ pub struct ProviderResponse {
     pub disabled_reason: String,
     pub protocols: Vec<String>,
     pub default_protocol: String,
+    pub note: String,
+    pub website_url: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -246,6 +262,8 @@ impl From<Provider> for ProviderResponse {
             disabled_reason: p.disabled_reason,
             protocols,
             default_protocol,
+            note: p.note,
+            website_url: p.website_url,
             created_at: p.created_at,
             updated_at: p.updated_at,
         }
@@ -279,6 +297,8 @@ mod tests {
             disabled_reason: String::new(),
             protocols: String::new(),
             default_protocol: String::new(),
+            note: String::new(),
+            website_url: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
         }

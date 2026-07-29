@@ -340,7 +340,7 @@ async fn run_model_test_round(
                     is_active, health_status, latency_ms, error_rate, last_health_check,
                     max_retries, timeout_secs, created_at, updated_at, proxy_url,
                     model_mapping, consecutive_failures, disabled_reason,
-                    protocols, default_protocol
+                    protocols, default_protocol, note, website_url
              FROM providers WHERE is_active = 1",
         ) {
             Ok(s) => s,

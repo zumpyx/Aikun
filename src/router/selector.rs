@@ -144,7 +144,7 @@ fn find_providers_for_model(conn: &Connection, model: &str) -> Option<Vec<Provid
                     is_active, health_status, latency_ms, error_rate, last_health_check,
                     max_retries, timeout_secs, created_at, updated_at, proxy_url,
                     model_mapping, consecutive_failures, disabled_reason,
-                    protocols, default_protocol
+                    protocols, default_protocol, note, website_url
              FROM providers WHERE is_active = 1",
         )
         .ok()?;
@@ -348,6 +348,8 @@ mod tests {
             disabled_reason: String::new(),
             protocols: "[\"openai\"]".into(),
             default_protocol: "openai".into(),
+            note: String::new(),
+            website_url: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
         }

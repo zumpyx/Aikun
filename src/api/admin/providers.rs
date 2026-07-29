@@ -28,7 +28,7 @@ pub async fn list_providers(
                 is_active, health_status, latency_ms, error_rate, last_health_check,
                 max_retries, timeout_secs, created_at, updated_at, proxy_url,
                 model_mapping, consecutive_failures, disabled_reason,
-                protocols, default_protocol
+                protocols, default_protocol, note, website_url
          FROM providers ORDER BY priority DESC, name ASC"
     ) {
         Ok(s) => s,
@@ -145,10 +145,17 @@ pub async fn create_provider(
         .trim()
         .trim_end_matches('/')
         .to_string();
-    if openai_base_url.is_empty() && anthropic_base_url.is_empty() {
+    // 勾选了哪个协议就必须填对应的上游地址。
+    if protocols.iter().any(|p| p == "openai") && openai_base_url.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({
             "error": "invalid_base_url",
-            "message": "openai_base_url 和 anthropic_base_url 至少填写一个"
+            "message": "勾选 openai 协议时必须填写 openai_base_url"
+        })));
+    }
+    if protocols.iter().any(|p| p == "anthropic") && anthropic_base_url.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "error": "invalid_base_url",
+            "message": "勾选 anthropic 协议时必须填写 anthropic_base_url"
         })));
     }
     if !valid_provider_type(&provider_type) {
@@ -184,17 +191,19 @@ pub async fn create_provider(
     let proxy_url = req.proxy_url.unwrap_or_default();
     let model_mapping = serde_json::to_string(&req.model_mapping.unwrap_or_default())
         .unwrap_or_else(|_| "{}".to_string());
+    let note = req.note.unwrap_or_default().trim().to_string();
+    let website_url = req.website_url.unwrap_or_default().trim().to_string();
 
     match conn.execute(
         "INSERT INTO providers (id, name, provider_type, openai_base_url, anthropic_base_url,
                                 api_key, models, priority, weight,
                                 max_retries, timeout_secs, proxy_url, model_mapping,
-                                protocols, default_protocol)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                                protocols, default_protocol, note, website_url)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![id, name, provider_type, openai_base_url, anthropic_base_url,
                  req.api_key, models_json,
                  priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
-                 protocols_json, default_protocol],
+                 protocols_json, default_protocol, note, website_url],
     ) {
         Ok(_) => (StatusCode::CREATED, Json(json!(ProviderResponse {
             id,
@@ -217,6 +226,8 @@ pub async fn create_provider(
             disabled_reason: String::new(),
             protocols,
             default_protocol,
+            note,
+            website_url,
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
         }))),
@@ -244,7 +255,7 @@ pub async fn get_provider(
                 is_active, health_status, latency_ms, error_rate, last_health_check,
                 max_retries, timeout_secs, created_at, updated_at, proxy_url,
                 model_mapping, consecutive_failures, disabled_reason,
-                protocols, default_protocol
+                protocols, default_protocol, note, website_url
          FROM providers WHERE id = ?1",
         params![provider_id],
         row_to_provider,
@@ -305,6 +316,14 @@ pub async fn update_provider(
         let url = url.trim().trim_end_matches('/').to_string();
         updates.push("anthropic_base_url = ?");
         params_vec.push(Box::new(url));
+    }
+    if let Some(note) = &req.note {
+        updates.push("note = ?");
+        params_vec.push(Box::new(note.trim().to_string()));
+    }
+    if let Some(website_url) = &req.website_url {
+        updates.push("website_url = ?");
+        params_vec.push(Box::new(website_url.trim().to_string()));
     }
     if let Some(key) = &req.api_key {
         updates.push("api_key = ?");
@@ -489,7 +508,7 @@ pub async fn duplicate_provider(
     let source = conn.query_row(
         "SELECT name, provider_type, openai_base_url, anthropic_base_url, api_key, models,
                 priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
-                protocols, default_protocol
+                protocols, default_protocol, note, website_url
          FROM providers WHERE id = ?1",
         params![provider_id],
         |row| {
@@ -508,13 +527,15 @@ pub async fn duplicate_provider(
                 row.get::<_, String>(11)?,
                 row.get::<_, String>(12)?,
                 row.get::<_, String>(13)?,
+                row.get::<_, String>(14)?,
+                row.get::<_, String>(15)?,
             ))
         },
     );
 
     let (name, provider_type, openai_base_url, anthropic_base_url, api_key, models,
          priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
-         protocols, default_protocol) = match source {
+         protocols, default_protocol, note, website_url) = match source {
         Ok(s) => s,
         Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
     };
@@ -526,11 +547,11 @@ pub async fn duplicate_provider(
         "INSERT INTO providers (id, name, provider_type, openai_base_url, anthropic_base_url,
                                 api_key, models, priority, weight,
                                 max_retries, timeout_secs, proxy_url, model_mapping,
-                                protocols, default_protocol)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                                protocols, default_protocol, note, website_url)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![new_id, new_name, provider_type, openai_base_url, anthropic_base_url,
                 api_key, models, priority, weight, max_retries, timeout_secs,
-                proxy_url, model_mapping, protocols, default_protocol],
+                proxy_url, model_mapping, protocols, default_protocol, note, website_url],
     ) {
         Ok(_) => {
             let models_parsed: Vec<String> =
@@ -556,6 +577,8 @@ pub async fn duplicate_provider(
                 disabled_reason: String::new(),
                 protocols: serde_json::from_str(&protocols).unwrap_or_default(),
                 default_protocol,
+                note,
+                website_url,
                 created_at: chrono::Utc::now().to_rfc3339(),
                 updated_at: chrono::Utc::now().to_rfc3339(),
             })))
@@ -880,7 +903,7 @@ pub async fn test_provider_model(
                     is_active, health_status, latency_ms, error_rate, last_health_check,
                     max_retries, timeout_secs, created_at, updated_at, proxy_url,
                     model_mapping, consecutive_failures, disabled_reason,
-                    protocols, default_protocol
+                    protocols, default_protocol, note, website_url
              FROM providers WHERE id = ?1",
             params![provider_id],
             row_to_provider,

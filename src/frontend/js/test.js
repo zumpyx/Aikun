@@ -235,7 +235,7 @@ async function loadTestMatrix() {
     <div class="mt-rows">
       ${provs.map(p => `
         <div class="mt-row">
-          <div class="mt-row-name" title="${esc(p.name)}"><strong>${esc(p.name)}</strong> ${provHealthBadge(p)}</div>
+          <div class="mt-row-name" title="${esc(p.name)}"><strong class="mt-chan">${esc(p.name)}</strong>${provHealthBadge(p)}</div>
           <div class="mt-row-models">${p.models.map(m => boxOf(p, m)).join('')}</div>
         </div>`).join('')}
     </div>
