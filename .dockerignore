@@ -1,0 +1,10 @@
+# 构建上下文只保留源码;产物、数据、密钥一律排除。
+target/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+.env
+.git/
+.github/
+Dockerfile
+docker-compose.yml

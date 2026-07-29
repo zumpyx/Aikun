@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use reqwest::Client;
 use serde_json::{json, Value};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::models::Provider;
 use crate::proxy::convert::PROTOCOL_ANTHROPIC;
@@ -185,7 +185,8 @@ pub async fn send_request(
     };
     let url = build_api_url(&provider.base_url, path);
 
-    info!(
+    // 同 chat.rs:转发日志是每请求热路径,降级 debug。
+    debug!(
         "Forwarding {} request to {} ({}){}",
         protocol,
         provider.name,

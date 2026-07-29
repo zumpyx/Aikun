@@ -13,7 +13,10 @@ pub fn create_connection(config: &AppConfig) -> Result<Connection, rusqlite::Err
     let db_path = without_scheme.split('?').next().unwrap_or("aikun.db");
     let db_path = if db_path.is_empty() { "aikun.db" } else { db_path };
     let conn = Connection::open(db_path)?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")?;
+    // synchronous=NORMAL:WAL 模式下提交不强制 fsync,断电最多丢失最后一个检查点
+    // 之后的若干事务(不会损坏库),换取写入吞吐一个数量级提升 —— 日志/指标类写入
+    // 可接受该取舍;若每次提交都 fsync,单连接写入会被磁盘 fsync 锁死在百级 TPS。
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")?;
     initialize_schema(&conn)?;
     seed_default_admin(&conn)?;
     Ok(conn)

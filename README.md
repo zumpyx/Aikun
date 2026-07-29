@@ -42,7 +42,26 @@
 
 浏览器打开 `http://localhost:3000` 即为管理端。首次启动会创建管理员账号 `admin`,**随机密码只在启动日志中打印一次**,请立即登录并修改。
 
-### 3. 从源码构建(可选)
+### 3. Docker 部署(可选)
+
+镜像发布在 GHCR(`ghcr.io/zumpyx/aikun`),多架构(linux/amd64、linux/arm64),约 20MB:
+
+```bash
+# 方式一:docker compose(推荐)——先创建 .env 设置 AIKUN_JWT_SECRET,然后:
+docker compose up -d
+docker logs aikun   # 首次启动查看随机 admin 密码
+
+# 方式二:纯 docker
+docker run -d --name aikun --restart unless-stopped \
+  -p 3000:3000 \
+  -e AIKUN_JWT_SECRET=$(openssl rand -hex 32) \
+  -v aikun-data:/data \
+  ghcr.io/zumpyx/aikun:latest
+```
+
+容器内配置通过 `AIKUN_*` 环境变量注入(见下方配置表),SQLite 数据持久化在 `aikun-data` 卷。容器默认监听 `0.0.0.0:3000`,端口映射改 `docker-compose.yml` 左侧即可。本地构建镜像:`docker compose build`。
+
+### 4. 从源码构建(可选)
 
 ```bash
 cargo build --release                                        # 本机构建
@@ -111,7 +130,7 @@ curl http://localhost:3000/v1/messages \
 
 ## 发布
 
-推送 `v*` 标签即可触发 GitHub Action,使用 `cargo zigbuild` 交叉编译六个目标并自动创建 Release:
+推送 `v*` 标签即可触发 GitHub Action,使用 `cargo zigbuild` 交叉编译六个目标、自动创建 Release,并构建多架构 Docker 镜像推送到 GHCR:
 
 ```bash
 git tag v0.1.0

@@ -15,7 +15,7 @@ use axum::{
 use futures_util::StreamExt;
 use rusqlite::params;
 use serde_json::{json, Value};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::auth::{AuthContext, Claims};
@@ -95,7 +95,9 @@ pub async fn proxy_completion(
         }
     }
 
-    info!(
+    // 热路径每请求日志用 debug 级:生产默认 info 级下保持安静,
+    // 高并发时不至于让 stdout 日志 I/O 成为瓶颈。
+    debug!(
         "Proxy completion: protocol={} model={} user={}{}",
         client_protocol, model, claims.username,
         if auth_ctx.api_key_id.is_some() { " (api-key)" } else { "" }
@@ -171,7 +173,7 @@ async fn attempt_loop(
         tried.insert(provider.id.clone());
 
         let provider_protocol = crate::models::channel_protocol(&provider);
-        info!(
+        debug!(
             "Routing '{}' ({} client) → provider '{}' ({} upstream, health={} latency={}ms)",
             model, client_protocol, provider.name, provider_protocol,
             provider.health_status, provider.latency_ms as i64
@@ -217,7 +219,7 @@ async fn attempt_loop(
                             Some(provider.id.clone()), model.clone(), client_protocol,
                             p, c, t, latency as i32, 200, true, None,
                         );
-                        info!(
+                        debug!(
                             "Completed: model={} provider={} latency={}ms tokens={}",
                             model, provider.name, latency as i64, t
                         );
@@ -389,7 +391,7 @@ fn apply_model_mapping(provider: &Provider, upstream_body: &mut Value) {
             .and_then(|k| mapping.get(k))
     });
     if let Some(target) = mapped {
-        info!("Model mapping: '{}' → '{}'", current, target);
+        debug!("Model mapping: '{}' → '{}'", current, target);
         upstream_body["model"] = json!(target);
     }
 }
@@ -594,7 +596,7 @@ fn stream_response(
             model_log.clone(), &client_protocol,
             p, c, t, latency as i32, 200, true, None,
         );
-        info!(
+        debug!(
             "Stream completed: model={} provider={} latency={}ms tokens={}",
             model_log, provider_id, latency as i64, t
         );
