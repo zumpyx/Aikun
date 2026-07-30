@@ -140,7 +140,7 @@ async fn run_health_check_round(
         }
 
         let providers = {
-            let conn = match pool.conn.lock() {
+            let conn = match pool.read().lock() {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::error!("Failed to lock DB for health check: {}", e);

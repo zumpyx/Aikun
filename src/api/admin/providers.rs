@@ -18,7 +18,7 @@ use crate::router::health::check_provider_health;
 pub async fn list_providers(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let conn = match state.pool.conn.lock() {
+    let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
     };
@@ -252,7 +252,7 @@ pub async fn get_provider(
     State(state): State<AppState>,
     Path(provider_id): Path<String>,
 ) -> impl IntoResponse {
-    let conn = match state.pool.conn.lock() {
+    let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
     };
@@ -654,7 +654,7 @@ pub async fn test_provider(
 ) -> impl IntoResponse {
     // Step 1: Read provider info from DB (synchronous, drop lock before await)
     let provider_info = {
-        let conn = match state.pool.conn.lock() {
+        let conn = match state.pool.read().lock() {
             Ok(c) => c,
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
         };
@@ -820,7 +820,7 @@ pub async fn fetch_upstream_models(
     if (api_key.is_empty() || proxy_url.is_empty()) && req.provider_id.is_some() {
         let pid = req.provider_id.as_deref().unwrap_or_default();
         let stored = {
-            let conn = match state.pool.conn.lock() {
+            let conn = match state.pool.read().lock() {
                 Ok(c) => c,
                 Err(_) => {
                     return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
@@ -958,7 +958,7 @@ pub async fn test_provider_model(
     }
 
     let provider = {
-        let conn = match state.pool.conn.lock() {
+        let conn = match state.pool.read().lock() {
             Ok(c) => c,
             Err(_) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
@@ -1048,7 +1048,7 @@ pub async fn test_provider_model(
 pub async fn list_model_health(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let conn = match state.pool.conn.lock() {
+    let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
     };

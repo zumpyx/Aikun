@@ -23,8 +23,30 @@ pub fn create_connection(config: &AppConfig) -> Result<Connection, rusqlite::Err
     Ok(conn)
 }
 
+/// 只读连接:WAL 允许并发读者与单写者并行,读路径不再与写互斥。
+/// WAL 是文件级设置无需重设,busy_timeout 是连接级必须带上。
+fn open_reader(config: &AppConfig) -> Result<Connection, rusqlite::Error> {
+    let without_scheme = config
+        .database_url
+        .strip_prefix("sqlite://")
+        .unwrap_or(&config.database_url);
+    let db_path = without_scheme.split('?').next().unwrap_or("aikun.db");
+    let db_path = if db_path.is_empty() { "aikun.db" } else { db_path };
+    let conn = Connection::open(db_path)?;
+    conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")?;
+    Ok(conn)
+}
+
+/// 只读连接数:读路径(认证、选路、统计)远多于写,4 个轮转足够
+/// 覆盖管理后台与 /v1 热路径的并发度。
+const READ_POOL_SIZE: usize = 4;
+
 pub struct DbPool {
+    /// 写连接:所有 INSERT/UPDATE/DELETE 走这里,串行化写。
     pub conn: Mutex<Connection>,
+    /// 只读连接池,经 `read()` 轮转取用。
+    readers: Vec<Mutex<Connection>>,
+    rr: std::sync::atomic::AtomicUsize,
     /// providers.api_key 静态加密,密钥派生自 JWT secret。
     pub cipher: KeyCipher,
 }
@@ -34,10 +56,22 @@ impl DbPool {
         let cipher = KeyCipher::from_secret(&config.jwt_secret);
         let conn = create_connection(config)?;
         migrate_encrypt_provider_keys(&conn, &cipher)?;
+        let mut readers = Vec::with_capacity(READ_POOL_SIZE);
+        for _ in 0..READ_POOL_SIZE {
+            readers.push(Mutex::new(open_reader(config)?));
+        }
         Ok(Self {
             conn: Mutex::new(conn),
+            readers,
+            rr: std::sync::atomic::AtomicUsize::new(0),
             cipher,
         })
+    }
+
+    /// 取一个只读连接(轮转)。只用于纯 SELECT;任何写必须走 `conn`。
+    pub fn read(&self) -> &Mutex<Connection> {
+        let i = self.rr.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        &self.readers[i % self.readers.len()]
     }
 }
 

@@ -90,7 +90,7 @@ fn is_last_active_admin(conn: &rusqlite::Connection, user_id: &str) -> bool {
 pub async fn list_users(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let conn = match state.pool.conn.lock() {
+    let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
     };
@@ -348,7 +348,7 @@ pub async fn get_user(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
-    let conn = match state.pool.conn.lock() {
+    let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
     };

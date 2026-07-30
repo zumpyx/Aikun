@@ -171,7 +171,7 @@ async fn enforce_key_limits(state: &AppState, key_id: &str) -> Option<String> {
     let pool = state.pool.clone();
     let key = key_id.to_string();
     let limits = tokio::task::spawn_blocking(move || {
-        let conn = pool.conn.lock().ok()?;
+        let conn = pool.read().lock().ok()?;
         conn.query_row(
             "SELECT rate_limit_rpm, quota_daily_tokens,
                     (SELECT COALESCE(SUM(total_tokens), 0) FROM request_logs

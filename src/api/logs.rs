@@ -88,7 +88,7 @@ pub async fn list_logs(
     claims: Claims,
     Query(query): Query<LogQuery>,
 ) -> impl IntoResponse {
-    let conn = match state.pool.conn.lock() {
+    let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
     };
@@ -173,7 +173,7 @@ pub async fn log_stats(
     claims: Claims,
     Query(query): Query<LogQuery>,
 ) -> impl IntoResponse {
-    let conn = match state.pool.conn.lock() {
+    let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))).into_response(),
     };
@@ -228,7 +228,7 @@ pub async fn log_stats(
 pub async fn usage_stats(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let conn = match state.pool.conn.lock() {
+    let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))).into_response(),
     };

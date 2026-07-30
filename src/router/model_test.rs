@@ -366,7 +366,7 @@ async fn run_model_test_round(
     clients: &Arc<Mutex<std::collections::HashMap<String, reqwest::Client>>>,
 ) {
     let providers: Vec<Provider> = {
-        let conn = match pool.conn.lock() {
+        let conn = match pool.read().lock() {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("Model test loop failed to lock DB: {}", e);

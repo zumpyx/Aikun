@@ -171,7 +171,8 @@ fn authenticate_api_key(pool: &crate::db::DbPool, key: &str) -> Option<(Claims, 
     if key.is_empty() {
         return None;
     }
-    let conn = pool.conn.lock().ok()?;
+    // 纯查询走只读连接(每请求热路径);last_used_at 节流写走写连接。
+    let conn = pool.read().lock().ok()?;
     let row = conn
         .query_row(
             "SELECT k.id, k.user_id, k.is_active, k.expires_at, k.models,
@@ -218,11 +219,15 @@ fn authenticate_api_key(pool: &crate::db::DbPool, key: &str) -> Option<(Claims, 
     };
 
     // 节流:距上次写入不足 60s 就不更新,避免每次请求都写库。
-    let _ = conn.execute(
-        "UPDATE api_keys SET last_used_at = datetime('now')
-         WHERE id = ?1 AND (last_used_at IS NULL OR last_used_at <= datetime('now', '-60 seconds'))",
-        rusqlite::params![key_id],
-    );
+    // 写操作换写连接;读锁先释放,避免读写两锁并持。
+    drop(conn);
+    if let Ok(wconn) = pool.conn.lock() {
+        let _ = wconn.execute(
+            "UPDATE api_keys SET last_used_at = datetime('now')
+             WHERE id = ?1 AND (last_used_at IS NULL OR last_used_at <= datetime('now', '-60 seconds'))",
+            rusqlite::params![key_id],
+        );
+    }
 
     let now = chrono::Utc::now().timestamp() as usize;
     let claims = Claims {
@@ -247,7 +252,7 @@ fn authenticate_api_key(pool: &crate::db::DbPool, key: &str) -> Option<(Claims, 
 /// rejected, and the live role from the DB overrides the (possibly stale) role
 /// embedded in the token.
 fn authenticate_jwt(pool: &crate::db::DbPool, mut claims: Claims) -> Option<(Claims, AuthContext)> {
-    let conn = pool.conn.lock().ok()?;
+    let conn = pool.read().lock().ok()?;
     let (role, is_active, token_version) = conn
         .query_row(
             "SELECT role, is_active, token_version FROM users WHERE id = ?1",

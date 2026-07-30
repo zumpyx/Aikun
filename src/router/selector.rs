@@ -100,7 +100,7 @@ pub fn select_provider(
     model: &str,
     exclude: &HashSet<String>,
 ) -> Option<Provider> {
-    let conn = pool.conn.lock().ok()?;
+    let conn = pool.read().lock().ok()?;
     let providers = find_providers_for_model(&conn, &pool.cipher, model)?;
 
     let mut candidates: Vec<&Provider> = providers
@@ -170,7 +170,7 @@ fn find_providers_for_model(
 
 /// List all unique models available across all active providers.
 pub fn list_available_models(pool: &DbPool) -> Vec<String> {
-    let conn = match pool.conn.lock() {
+    let conn = match pool.read().lock() {
         Ok(c) => c,
         Err(_) => return vec![],
     };

@@ -112,7 +112,7 @@ pub async fn login(
 
     // Look up the user inside the lock; password verification happens outside.
     let user = {
-        let conn = match state.pool.conn.lock() {
+        let conn = match state.pool.read().lock() {
             Ok(c) => c,
             Err(_) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
@@ -198,7 +198,7 @@ pub async fn get_current_user(
     State(state): State<AppState>,
     claims: Claims,
 ) -> impl IntoResponse {
-    let conn = match state.pool.conn.lock() {
+    let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
     };
@@ -289,7 +289,7 @@ pub async fn list_api_keys(
     State(state): State<AppState>,
     claims: Claims,
 ) -> impl IntoResponse {
-    let conn = match state.pool.conn.lock() {
+    let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
     };
