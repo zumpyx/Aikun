@@ -49,8 +49,9 @@ async function renderLogs(container) {
   document.getElementById('log-refresh').onclick = () => { loadLogStats(isAdmin); loadLogs(isAdmin); };
   document.getElementById('log-filter-btn').onclick = () => { loadLogStats(isAdmin); loadLogs(isAdmin); };
 
-  const modelsR = await api('GET', '/v1/models');
-  if (modelsR.ok && modelsR.data.data) {
+  // 下拉选项与日志列表/统计并行加载,/v1/models 慢不阻塞首屏
+  api('GET', '/v1/models').then(modelsR => {
+    if (!modelsR.ok || !modelsR.data.data) return;
     const sel = document.getElementById('log-filter-model');
     if (!sel) return;
     modelsR.data.data.forEach(m => {
@@ -58,11 +59,11 @@ async function renderLogs(container) {
       o.value = m.id; o.textContent = m.id;
       sel.appendChild(o);
     });
-  }
+  });
 
   if (isAdmin) {
-    const usersR = await api('GET', '/api/admin/users');
-    if (usersR.ok && Array.isArray(usersR.data)) {
+    api('GET', '/api/admin/users').then(usersR => {
+      if (!usersR.ok || !Array.isArray(usersR.data)) return;
       const sel = document.getElementById('log-filter-user');
       if (!sel) return;
       usersR.data.forEach(u => {
@@ -70,11 +71,11 @@ async function renderLogs(container) {
         o.value = u.id; o.textContent = u.username;
         sel.appendChild(o);
       });
-    }
+    });
   }
 
-  await loadLogStats(isAdmin);
-  await loadLogs(isAdmin);
+  loadLogStats(isAdmin);
+  loadLogs(isAdmin);
 }
 
 // 当前筛选条件拼成查询串(不带前导 ?/&),日志列表与统计共用,

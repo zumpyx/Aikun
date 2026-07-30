@@ -8,7 +8,7 @@ use tracing::info;
 
 use crate::config::AppConfig;
 use crate::db::DbPool;
-use crate::proxy::client::{cached_client, sanitize_proxy_url};
+use crate::proxy::client::{cached_client, sanitize_log_url, sanitize_proxy_url};
 
 /// Build a proper API URL for health checks. 与聊天路径共用 build_api_url,
 /// 保证带 query(如 ?api-version=...)或非 /v1 版本段(如 /v1beta)的
@@ -30,6 +30,8 @@ pub async fn check_provider_health(
     let client = cached_client(clients, proxy_url, base_url, timeout_secs);
 
     let url = build_health_url(base_url);
+    // 日志脱敏:URL 可能带 userinfo 或 query(如 ?key=...),不落明文。
+    let log_url = sanitize_log_url(&url);
 
     let req = client.get(&url);
     let req = match provider_type {
@@ -51,20 +53,20 @@ pub async fn check_provider_health(
             let status = resp.status();
             let elapsed = latency;
             if status.is_success() {
-                info!("Health check OK: {} -> {} ({}ms)", url, status, elapsed as i64);
+                info!("Health check OK: {} -> {} ({}ms)", log_url, status, elapsed as i64);
                 ("healthy".to_string(), elapsed)
             } else if status.is_server_error() {
-                info!("Health check server error: {} -> {} ({}ms)", url, status, elapsed as i64);
+                info!("Health check server error: {} -> {} ({}ms)", log_url, status, elapsed as i64);
                 ("unhealthy".to_string(), elapsed)
             } else {
-                info!("Health check degraded: {} -> {} ({}ms)", url, status, elapsed as i64);
+                info!("Health check degraded: {} -> {} ({}ms)", log_url, status, elapsed as i64);
                 ("degraded".to_string(), elapsed)
             }
         }
         Err(e) => {
             info!(
                 "Health check failed: {}{} -> {} ({}ms)",
-                url,
+                log_url,
                 if proxy_url.is_empty() {
                     String::new()
                 } else {
@@ -112,9 +114,22 @@ pub async fn run_health_check_loop(
     clients: Arc<Mutex<HashMap<String, reqwest::Client>>>,
 ) {
     let interval = std::time::Duration::from_secs(config.health_check_interval);
+    // 启动即跑首轮,再按 interval 周期执行——否则启动后最长一个 interval
+    // 内零探测,而 model_test 循环的注释假设 health ping 覆盖启动期。
     loop {
+        run_health_check_round(&pool, &config, &clients).await;
         tokio::time::sleep(interval).await;
-        info!("Running periodic health check...");
+    }
+}
+
+/// 一轮健康检查:日志清理 + 并发探测所有启用渠道 + 持久化结果。
+/// Design: DB lock is never held across an await point, ensuring the future is Send.
+async fn run_health_check_round(
+    pool: &Arc<DbPool>,
+    config: &AppConfig,
+    clients: &Arc<Mutex<HashMap<String, reqwest::Client>>>,
+) {
+    info!("Running periodic health check...");
 
         // Enforce the log retention policy on every round. The purge holds the
         // DB mutex while deleting, so run it on the blocking thread pool.
@@ -129,7 +144,7 @@ pub async fn run_health_check_loop(
                 Ok(c) => c,
                 Err(e) => {
                     tracing::error!("Failed to lock DB for health check: {}", e);
-                    continue;
+                    return;
                 }
             };
 
@@ -141,7 +156,7 @@ pub async fn run_health_check_loop(
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!("Failed to prepare health check query: {}", e);
-                    continue;
+                    return;
                 }
             };
 
@@ -159,7 +174,7 @@ pub async fn run_health_check_loop(
                 Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
                 Err(e) => {
                     tracing::error!("Failed to query providers: {}", e);
-                    continue;
+                    return;
                 }
             };
             result
@@ -212,7 +227,7 @@ pub async fn run_health_check_loop(
                 Ok(c) => c,
                 Err(e) => {
                     tracing::error!("Failed to lock DB for health update: {}", e);
-                    continue;
+                    return;
                 }
             };
 
@@ -228,5 +243,4 @@ pub async fn run_health_check_loop(
                 }
             }
         }
-    }
 }

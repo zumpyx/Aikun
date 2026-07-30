@@ -22,7 +22,7 @@ async function renderDashboard(container) {
     const kData = apiKeys.ok ? apiKeys.data : [];
     const usageData = usage.ok ? usage.data : null;
 
-    const healthy = pData.filter(p => p.health_status === 'healthy').length;
+    const healthy = pData.filter(p => p.is_active && p.health_status === 'healthy').length;
     const totalModels = new Set(pData.flatMap(p => p.models || [])).size;
 
     const stat = (icon, color, bg, value, label) =>

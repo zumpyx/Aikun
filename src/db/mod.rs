@@ -147,11 +147,23 @@ fn ensure_column(
         .filter_map(|r| r.ok())
         .collect();
     if !columns.iter().any(|c| c == column) {
-        conn.execute(
+        // 检查-执行非原子:多实例共享同一 SQLite 文件并发启动时,另一实例
+        // 可能抢先加了列。ALTER 失败后复查,列已存在即视为成功。
+        if let Err(e) = conn.execute(
             &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, ddl),
             [],
-        )?;
-        tracing::info!("Migrated {} table: added {} column", table, column);
+        ) {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+            let now_exists = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .any(|c: String| c == column);
+            if !now_exists {
+                return Err(e);
+            }
+        } else {
+            tracing::info!("Migrated {} table: added {} column", table, column);
+        }
     }
     Ok(())
 }

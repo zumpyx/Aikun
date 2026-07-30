@@ -118,6 +118,10 @@ async function initTestCascade() {
   const protoSel = document.getElementById('chat-protocol');
   if (!provSel || !modelSel || !protoSel) return;
 
+  // 级联数据就绪前禁用发送按钮,避免请求慢时点击无反应
+  const sendBtn = document.getElementById('chat-send');
+  if (sendBtn) sendBtn.disabled = true;
+
   const r = await api('GET', '/api/admin/providers');
   // await 期间页面可能已切换，选择器已不在文档中就直接放弃
   if (!provSel.isConnected) return;
@@ -178,6 +182,7 @@ async function initTestCascade() {
       btn.disabled = false; btn.textContent = '发送请求';
     }
   };
+  if (sendBtn) sendBtn.disabled = false;
 }
 
 function provHealthBadge(p) {

@@ -115,7 +115,7 @@ async function showProviderModal(id) {
         <div class="form-group"><label>最大重试</label><input id="pf-retries" type="number" value="${provider?.max_retries ?? 3}"></div>
         <div class="form-group"><label>超时(秒)</label><input id="pf-timeout" type="number" value="${provider?.timeout_secs ?? 120}"></div>
       </div>
-      <div class="form-group"><label>代理（可选）</label><input id="pf-proxy" value="${esc(provider?.proxy_url || '')}" placeholder="socks5://127.0.0.1:1080 或 http://127.0.0.1:8080"></div>
+      <div class="form-group"><label>代理${provider?.proxy_url ? '（留空不修改）' : '（可选）'}</label><input id="pf-proxy" value="" placeholder="socks5://127.0.0.1:1080 或 http://127.0.0.1:8080"></div>
       <div class="form-group"><label>模型重定向（可选，JSON 对象）</label><textarea id="pf-mapping" style="min-height:56px" placeholder='{"gpt-4": "gpt-4-turbo"}'>${esc(provider?.model_mapping && Object.keys(provider.model_mapping).length > 0 ? JSON.stringify(provider.model_mapping) : '')}</textarea></div>
       <div class="form-actions">
         <button class="btn-primary" id="pf-save">${provider ? '保存' : '创建'}</button>
@@ -221,6 +221,9 @@ async function showProviderModal(id) {
     if (protocols.includes('anthropic') && !body.anthropic_base_url) return toast('已勾选 Anthropic 协议，请填写 ANTHROPIC_BASE_URL', 'error');
 
     if (provider) {
+      // 编辑模式 proxy_url 留空表示不修改(后端返回的是脱敏值,不回填);
+      // 空串不参与 diff,避免把无凭证的代理地址写库
+      if (!body.proxy_url) delete body.proxy_url;
       // Only send changed fields
       const upd = {};
       for (const k of Object.keys(body)) {
@@ -256,10 +259,15 @@ async function toggleProvider(id, active) {
   else toast(r.data.message || r.data.error || '操作失败', 'error');
 }
 
-async function duplicateProvider(id) {
-  const r = await api('POST', `/api/admin/providers/${id}/duplicate`);
-  if (r.ok) { toast(`已创建副本: ${r.data.name || '新渠道'}`); await loadProviders(); }
-  else toast('复制失败: ' + (r.data.message || r.data.error || '未知错误'), 'error');
+async function duplicateProvider(id, btn) {
+  btn.disabled = true;
+  try {
+    const r = await api('POST', `/api/admin/providers/${id}/duplicate`);
+    if (r.ok) { toast(`已创建副本: ${r.data.name || '新渠道'}`); await loadProviders(); }
+    else toast('复制失败: ' + (r.data.message || r.data.error || '未知错误'), 'error');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function testProvider(id, btn) {

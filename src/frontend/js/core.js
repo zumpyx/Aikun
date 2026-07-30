@@ -59,6 +59,7 @@ async function api(method, path, body) {
       state.token = null;
       state.user = null;
       localStorage.removeItem('token');
+      document.querySelectorAll('.modal-overlay').forEach(m => m.remove());
       renderLogin(document.getElementById('app'));
     }
     return { ok: res.ok, status: res.status, data };
@@ -229,7 +230,7 @@ function renderView(container) {
 // instead of inline onclick — one delegated listener covers every re-render.
 const listActions = {
   'edit-provider':      (id) => showProviderModal(id),
-  'duplicate-provider': (id) => duplicateProvider(id),
+  'duplicate-provider': (id, btn) => duplicateProvider(id, btn),
   'test-provider':      (id, btn) => testProvider(id, btn),
   'toggle-provider':    (id, btn) => toggleProvider(id, btn.dataset.active !== 'true'),
   'delete-provider':    (id) => deleteProvider(id),

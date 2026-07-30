@@ -212,16 +212,29 @@ fn prepare_batch_users(
     for item in users {
         let username = item.username.trim().to_string();
         let role = item.role.unwrap_or_else(|| "user".to_string());
-        if username.is_empty() {
-            results.push(json!({"username": username, "ok": false, "error": "empty_username"}));
+        // 与单个创建同一套规则(validate_username / validate_display_name /
+        // validate_password),批量接口不放弱校验的账号进来。
+        if username.is_empty() || username.chars().count() > 64 {
+            results.push(json!({"username": username, "ok": false, "error": "invalid_username"}));
             continue;
         }
         if !is_valid_role(&role) {
             results.push(json!({"username": username, "ok": false, "error": "invalid_role"}));
             continue;
         }
+        let display_name = item.display_name.unwrap_or_else(|| username.clone());
+        if display_name.chars().count() > 64 {
+            results.push(json!({"username": username, "ok": false, "error": "invalid_display_name"}));
+            continue;
+        }
         let (password, generated) = match item.password {
-            Some(p) if !p.is_empty() => (p, None),
+            Some(p) if !p.is_empty() => {
+                if p.len() < 8 || p.len() > 256 || p.trim().is_empty() {
+                    results.push(json!({"username": username, "ok": false, "error": "invalid_password"}));
+                    continue;
+                }
+                (p, None)
+            }
             _ => {
                 let p = generate_random_password();
                 (p.clone(), Some(p))
@@ -238,7 +251,7 @@ fn prepare_batch_users(
         prepared_result_idx.push(results.len());
         results.push(serde_json::Value::Null); // placeholder, filled in phase 2
         prepared.push(PreparedBatchUser {
-            display_name: item.display_name.unwrap_or_else(|| username.clone()),
+            display_name,
             username,
             role,
             password_hash,

@@ -20,7 +20,7 @@ use axum::{
 use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::auth::{auth_middleware, require_admin};
 use crate::config::AppConfig;
@@ -77,11 +77,12 @@ async fn main() {
     info!("Starting Aikun on {}", config.host);
 
     if config.jwt_secret == AppConfig::default().jwt_secret {
-        warn!("JWT_SECRET is default, this is a security risk.");
-        // panic!(
-        //     "JWT_SECRET is not set (or still the built-in default). \
-        //      Set the JWT_SECRET environment variable to a long random string before starting."
-        // );
+        // 默认 secret 是公开源码里的常量,任何人都能伪造 admin JWT,
+        // 只告警等于放行,直接拒绝启动。
+        panic!(
+            "AIKUN_JWT_SECRET is not set (or still the built-in default). \
+             Set the AIKUN_JWT_SECRET environment variable to a long random string before starting."
+        );
     }
 
     let pool = Arc::new(DbPool::new(&config).expect("Failed to initialize database"));

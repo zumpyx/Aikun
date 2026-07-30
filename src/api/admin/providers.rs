@@ -45,7 +45,12 @@ pub async fn list_providers(
                     resp
                 })
                 .collect(),
-            Err(_) => vec![],
+            // 查询失败要报 500 而不是返回空列表——否则 DB 故障在前端
+            // 表现为"没有任何渠道",掩盖真实故障。
+            Err(e) => {
+                tracing::error!("Failed to list providers: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})));
+            }
         };
 
     (StatusCode::OK, Json(json!(providers)))
@@ -444,6 +449,53 @@ pub async fn update_provider(
         params_vec.push(Box::new(default_protocol));
     }
 
+    // 与 create 同一约束:勾选的协议必须有对应上游地址。协议或地址任一
+    // 被修改时,按更新后的最终状态校验,防止造出运行时必失败的渠道。
+    if req.protocols.is_some() || req.openai_base_url.is_some() || req.anthropic_base_url.is_some() {
+        let stored = conn.query_row(
+            "SELECT protocols, openai_base_url, anthropic_base_url FROM providers WHERE id = ?1",
+            params![provider_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        );
+        let (stored_protocols, stored_openai, stored_anthropic) = match stored {
+            Ok(s) => s,
+            Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
+        };
+        let final_protocols: Vec<String> = match &req.protocols {
+            Some(list) => list.clone(),
+            None => serde_json::from_str(&stored_protocols)
+                .unwrap_or_else(|_| vec!["openai".to_string()]),
+        };
+        let final_openai = req
+            .openai_base_url
+            .as_deref()
+            .unwrap_or(&stored_openai)
+            .trim();
+        let final_anthropic = req
+            .anthropic_base_url
+            .as_deref()
+            .unwrap_or(&stored_anthropic)
+            .trim();
+        if final_protocols.iter().any(|p| p == "openai") && final_openai.is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "error": "invalid_base_url",
+                "message": "勾选 openai 协议时必须填写 openai_base_url"
+            })));
+        }
+        if final_protocols.iter().any(|p| p == "anthropic") && final_anthropic.is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "error": "invalid_base_url",
+                "message": "勾选 anthropic 协议时必须填写 anthropic_base_url"
+            })));
+        }
+    }
+
     if updates.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "no_fields_to_update"})));
     }
@@ -756,27 +808,35 @@ pub async fn fetch_upstream_models(
             "message": "protocol 仅支持 openai / anthropic"
         })));
     }
-    let proxy_url = req.proxy_url.unwrap_or_default();
+    let mut proxy_url = req.proxy_url.unwrap_or_default();
 
-    if api_key.is_empty() {
-        if let Some(pid) = req.provider_id.as_deref() {
-            let stored = {
-                let conn = match state.pool.conn.lock() {
-                    Ok(c) => c,
-                    Err(_) => {
-                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
-                    }
-                };
-                conn.query_row(
-                    "SELECT api_key FROM providers WHERE id = ?1",
-                    params![pid],
-                    |row| row.get::<_, String>(0),
-                )
+    // 编辑表单里 api_key / 代理都是"留空不修改":任一为空且有 provider_id
+    // 时回退到库存值,否则带认证的代理在编辑态下获取模型列表必失败。
+    if (api_key.is_empty() || proxy_url.is_empty()) && req.provider_id.is_some() {
+        let pid = req.provider_id.as_deref().unwrap_or_default();
+        let stored = {
+            let conn = match state.pool.conn.lock() {
+                Ok(c) => c,
+                Err(_) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
+                }
             };
-            match stored {
-                Ok(k) => api_key = k,
-                Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
+            conn.query_row(
+                "SELECT api_key, proxy_url FROM providers WHERE id = ?1",
+                params![pid],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+        };
+        match stored {
+            Ok((k, p)) => {
+                if api_key.is_empty() {
+                    api_key = k;
+                }
+                if proxy_url.is_empty() {
+                    proxy_url = p;
+                }
             }
+            Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
         }
     }
 
@@ -944,7 +1004,15 @@ pub async fn test_provider_model(
     let probe = crate::router::model_test::probe_model(
         &state.clients, &provider, protocol, &model, messages, 1024, stream,
     ).await;
-    crate::router::model_test::record_model_health(&state.pool, &provider.id, &model, &probe);
+    crate::router::model_test::record_model_health_async(
+        state.pool.clone(),
+        provider.id.clone(),
+        model,
+        probe.ok,
+        probe.latency_ms,
+        probe.error.clone(),
+    )
+    .await;
 
     let mut out = json!({
         "ok": probe.ok,
@@ -993,7 +1061,11 @@ pub async fn list_model_health(
         }))
     }) {
         Ok(r) => r.filter_map(|x| x.ok()).collect(),
-        Err(_) => vec![],
+        // 同上:查询失败报 500,不静默返回空列表。
+        Err(e) => {
+            tracing::error!("Failed to list model health: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})));
+        }
     };
 
     (StatusCode::OK, Json(json!(rows)))

@@ -104,7 +104,8 @@ async function showUserModal(id) {
       toast('用户已创建');
     }
     overlay.remove();
-    await renderUsers(document.getElementById('main-content'));
+    // await 期间用户可能已切走页面,用户列表不在 DOM 中就放弃重渲染
+    if (document.getElementById('users-list')) await renderUsers(document.getElementById('main-content'));
     } finally {
       btn.disabled = false;
     }
@@ -113,7 +114,7 @@ async function showUserModal(id) {
 
 async function toggleUser(id, active) {
   const r = await api('PATCH', `/api/admin/users/${id}`, { is_active: active });
-  if (r.ok) { toast(active ? '用户已启用' : '用户已禁用'); await renderUsers(document.getElementById('main-content')); }
+  if (r.ok) { toast(active ? '用户已启用' : '用户已禁用'); if (document.getElementById('users-list')) await renderUsers(document.getElementById('main-content')); }
   else toast('操作失败', 'error');
 }
 
@@ -172,7 +173,7 @@ function showBatchUserModal() {
         </div>
         ${results.some(x => x.ok && x.password) ? '<p style="font-size:12.5px;color:var(--danger);margin-top:6px">自动生成的密码仅在此显示一次,请立即保存。</p>' : ''}`;
       document.getElementById('batch-input').value = '';
-      await renderUsers(document.getElementById('main-content'));
+      if (document.getElementById('users-list')) await renderUsers(document.getElementById('main-content'));
     } finally {
       btn.disabled = false; btn.textContent = '创建';
     }

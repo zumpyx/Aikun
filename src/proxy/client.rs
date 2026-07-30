@@ -65,7 +65,7 @@ pub fn sanitize_proxy_url(url: &str) -> String {
 }
 
 /// 上游 URL 日志脱敏：剥掉 userinfo 与 query（query 常带 api-version、key 等参数）。
-fn sanitize_log_url(url: &str) -> String {
+pub fn sanitize_log_url(url: &str) -> String {
     let no_creds = sanitize_proxy_url(url);
     no_creds.split('?').next().unwrap_or("").to_string()
 }

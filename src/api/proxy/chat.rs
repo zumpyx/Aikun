@@ -318,10 +318,18 @@ async fn attempt_loop(
             model, provider.name, status, msg
         );
         spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, status, threshold);
+        // 401/403 的上游消息可能回显渠道凭证(one-api 系常见);request_logs
+        // 对终端用户可见(/api/logs 按 user_id 过滤),日志只存通用文案,
+        // 完整消息仅留在服务端 warn 里。
+        let log_msg = if status == 401 || status == 403 {
+            format!("upstream authentication failed ({})", status)
+        } else {
+            msg.clone()
+        };
         spawn_request_log(
             &state.pool, user_id.clone(), api_key_id.clone(),
             Some(provider.id.clone()), model.clone(), client_protocol,
-            0, 0, 0, latency as i32, status as i32, false, Some(msg),
+            0, 0, 0, latency as i32, status as i32, false, Some(log_msg),
         );
 
         // Retryable: rate limits, server errors, timeouts, and dead channels
@@ -520,6 +528,7 @@ fn stream_response(
         // Set when the upstream stream becomes unusable mid-flight (stall,
         // transport error, or unbounded buffer); recorded as a failure below.
         let mut stream_error: Option<String> = None;
+        let mut events: u32 = 0;
         let mut upstream = std::pin::pin!(byte_stream);
         loop {
             let item = match tokio::time::timeout(idle_timeout, upstream.next()).await {
@@ -541,6 +550,7 @@ fn stream_response(
                 Ok(bytes) => {
                     buf.extend_from_slice(&bytes);
                     for ev in parse_sse_events(&mut buf) {
+                        events += 1;
                         for out in converter.push(&ev) {
                             yield Ok::<Event, Infallible>(to_axum_event(out));
                         }
@@ -594,9 +604,26 @@ fn stream_response(
         }
 
         if let Some(ev) = parse_sse_remaining(&mut buf) {
+            events += 1;
             for out in converter.push(&ev) {
                 yield Ok(to_axum_event(out));
             }
+        }
+        // 上游 200+SSE 头却一个事件都没发就 EOF:按失败处理(与模型实测
+        // 探针同一口径),否则客户端对着空流干等,指标还被记成成功。
+        if events == 0 {
+            let err_msg = "upstream sent an empty SSE stream".to_string();
+            let latency = start.elapsed().as_millis() as f64;
+            spawn_record_failure(pool.clone(), provider_id.clone(), latency, 0, threshold);
+            spawn_request_log(
+                &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
+                model_log.clone(), &client_protocol,
+                0, 0, 0, latency as i32, 502, false, Some(err_msg.clone()),
+            );
+            yield Ok(to_axum_event(stream_error_event(&client_protocol, &err_msg)));
+            yield Ok(to_axum_event(stream_terminal_event(&client_protocol)));
+            guard.finish();
+            return;
         }
         for out in converter.finish() {
             yield Ok(to_axum_event(out));

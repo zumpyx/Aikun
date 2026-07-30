@@ -121,7 +121,9 @@ pub async fn read_json_limited(resp: reqwest::Response, max_bytes: usize) -> Res
         }
         buf.extend_from_slice(&bytes);
     }
-    Ok(serde_json::from_slice(&buf).unwrap_or_else(|_| json!({})))
+    // 解析失败必须报错而不是当空对象:否则 200+HTML 错误页/非 JSON
+    // 响应会被探针和 fetch-models 误判为"合法的 200"。
+    serde_json::from_slice(&buf).map_err(|e| format!("响应体不是合法 JSON: {}", e))
 }
 
 /// Run one live test of `model` through `provider` and report the outcome.
@@ -193,6 +195,18 @@ pub async fn probe_model(
                 };
             }
         };
+        // 与代理转发路径同一口径:200 但响应体不符合协议形状(MiniMax 式
+        // 200+错误信封)判失败,否则会写成 healthy 并污染渠道 EMA。
+        if !crate::proxy::convert::valid_response_shape(&v, protocol) {
+            return ModelProbe {
+                ok: false,
+                latency_ms: latency,
+                status,
+                error: Some("上游响应不符合协议格式".to_string()),
+                snippet: None,
+                response: Some(v),
+            };
+        }
         let text = extract_text(protocol, &v);
         return ModelProbe {
             ok: true,
@@ -282,7 +296,14 @@ pub async fn probe_model(
 /// Persist a probe outcome for one (channel, model) pair.
 /// 模型测试是真实推理请求,延迟有代表性:顺带按代理转发路径同款口径
 /// 更新渠道的 latency_ms / error_rate EMA(失败不会触发自动禁用)。
-pub fn record_model_health(pool: &DbPool, provider_id: &str, model: &str, probe: &ModelProbe) {
+pub fn record_model_health(
+    pool: &DbPool,
+    provider_id: &str,
+    model: &str,
+    ok: bool,
+    latency_ms: f64,
+    error: Option<&str>,
+) {
     if let Ok(conn) = pool.conn.lock() {
         let _ = conn.execute(
             "INSERT INTO model_health (provider_id, model, status, latency_ms, error, checked_at)
@@ -293,13 +314,30 @@ pub fn record_model_health(pool: &DbPool, provider_id: &str, model: &str, probe:
             params![
                 provider_id,
                 model,
-                if probe.ok { "healthy" } else { "unhealthy" },
-                probe.latency_ms,
-                probe.error.as_deref().unwrap_or(""),
+                if ok { "healthy" } else { "unhealthy" },
+                latency_ms,
+                error.unwrap_or(""),
             ],
         );
     }
-    crate::router::selector::record_request_result(pool, provider_id, probe.latency_ms, probe.ok);
+    crate::router::selector::record_request_result(pool, provider_id, latency_ms, ok);
+}
+
+/// record_model_health 的异步包装:持 DB 锁的写派发到 blocking 线程池,
+/// 不在 async executor 上同步持锁(与 selector.rs 的 M35 注释同一规则)。
+#[allow(clippy::too_many_arguments)]
+pub async fn record_model_health_async(
+    pool: Arc<DbPool>,
+    provider_id: String,
+    model: String,
+    ok: bool,
+    latency_ms: f64,
+    error: Option<String>,
+) {
+    let _ = tokio::task::spawn_blocking(move || {
+        record_model_health(&pool, &provider_id, &model, ok, latency_ms, error.as_deref())
+    })
+    .await;
 }
 
 /// Background loop: every MODEL_TEST_INTERVAL_SECS, probe every active
@@ -449,6 +487,14 @@ async fn model_test_worker(
                 probe.error.as_deref().unwrap_or("unknown")
             );
         }
-        record_model_health(&pool, &provider.id, &model, &probe);
+        record_model_health_async(
+            pool.clone(),
+            provider.id.clone(),
+            model,
+            probe.ok,
+            probe.latency_ms,
+            probe.error,
+        )
+        .await;
     }
 }
