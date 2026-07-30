@@ -30,6 +30,8 @@ function showApiKeyModal(id) {
       <div class="form-group"><label>名称</label><input id="kf-name" value="${esc(key?.name || '')}" placeholder="例如: 我的应用"></div>
       <div class="form-group"><label>过期时间（留空永不过期）</label><input id="kf-expires" type="datetime-local" value="${esc(toLocalInput(key?.expires_at))}"></div>
       <div class="form-group"><label>模型限制（逗号分隔，留空不限制）</label><input id="kf-models" value="${esc((key?.models || []).join(', '))}" placeholder="gpt-4, claude-*"></div>
+      <div class="form-group"><label>每分钟请求上限</label><input id="kf-rpm" type="number" min="0" step="1" value="${key ? esc(String(key.rate_limit_rpm ?? 0)) : 0}" placeholder="0 不限制"></div>
+      <div class="form-group"><label>每日 Token 额度</label><input id="kf-quota" type="number" min="0" step="1" value="${key ? esc(String(key.quota_daily_tokens ?? 0)) : 0}" placeholder="0 不限制"></div>
       <div class="form-actions">
         <button class="btn-primary" id="kf-save">${key ? '保存' : '创建'}</button>
         <button class="btn-outline" id="kf-cancel">取消</button>
@@ -50,6 +52,8 @@ function showApiKeyModal(id) {
       name: document.getElementById('kf-name').value,
       expires_at: expDate && !Number.isNaN(expDate.getTime()) ? expDate.toISOString() : '',
       models: document.getElementById('kf-models').value.split(',').map(s => s.trim()).filter(Boolean),
+      rate_limit_rpm: Math.max(0, parseInt(document.getElementById('kf-rpm').value, 10) || 0),
+      quota_daily_tokens: Math.max(0, parseInt(document.getElementById('kf-quota').value, 10) || 0),
     };
     if (key) {
       const r = await api('PATCH', `/api/api-keys/${key.id}`, body);
@@ -107,12 +111,18 @@ async function loadApiKeys() {
   }
 
   const isExpired = k => k.expires_at && new Date(k.expires_at) < new Date();
+  const fmtLimits = k => {
+    const parts = [];
+    if (k.rate_limit_rpm > 0) parts.push(`${fmtNum(k.rate_limit_rpm)}/分`);
+    if (k.quota_daily_tokens > 0) parts.push(`${fmtNum(k.quota_daily_tokens)}/日`);
+    return parts.length ? esc(parts.join(' · ')) : '<span style="color:var(--faint)">不限</span>';
+  };
 
   list.innerHTML = `
     <div class="card">
       <div class="table-wrap">
         <table>
-          <thead><tr><th>名称</th><th>密钥</th><th>状态</th><th>模型限制</th><th>过期时间</th><th>最后使用</th><th>操作</th></tr></thead>
+          <thead><tr><th>名称</th><th>密钥</th><th>状态</th><th>模型限制</th><th>限额</th><th>过期时间</th><th>最后使用</th><th>操作</th></tr></thead>
           <tbody>
             ${data.map(k => `
               <tr>
@@ -120,6 +130,7 @@ async function loadApiKeys() {
                 <td style="font-family:monospace;font-size:12.5px;color:var(--muted)">${esc(k.key)}</td>
                 <td><span class="badge ${k.is_active && !isExpired(k) ? 'badge-green' : 'badge-red'}">${!k.is_active ? '已禁用' : isExpired(k) ? '已过期' : '活跃'}</span></td>
                 <td style="font-size:12.5px">${(k.models || []).length > 0 ? esc(k.models.join(', ')) : '<span style="color:var(--faint)">全部</span>'}</td>
+                <td style="font-size:12.5px">${fmtLimits(k)}</td>
                 <td style="color:var(--muted);font-size:12.5px">${k.expires_at ? esc(k.expires_at) : '<span style="color:var(--faint)">永不</span>'}</td>
                 <td style="color:var(--muted);font-size:12.5px">${k.last_used_at ? esc(k.last_used_at) : '<span style="color:var(--faint)">未使用</span>'}</td>
                 <td>

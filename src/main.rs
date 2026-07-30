@@ -60,6 +60,10 @@ pub struct AppState {
     /// Sliding-window login-attempt tracker keyed by "ip:..." / "user:..." —
     /// brute-force protection for /api/login.
     pub login_attempts: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
+    /// Sliding-window per-API-key request timestamps (keyed by api_keys.id) —
+    /// enforces api_keys.rate_limit_rpm. In-memory only: a restart resets the
+    /// window, which is acceptable for a per-minute limit.
+    pub api_key_rate: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
 }
 
 #[tokio::main]
@@ -93,6 +97,7 @@ async fn main() {
         config: config.clone(),
         clients: Arc::new(Mutex::new(HashMap::new())),
         login_attempts: Arc::new(Mutex::new(HashMap::new())),
+        api_key_rate: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // --- Public routes (no auth) ---

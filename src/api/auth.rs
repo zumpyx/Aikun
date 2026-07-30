@@ -255,10 +255,12 @@ pub async fn create_api_key(
     let name = req.name.unwrap_or_default();
     let models_json = serde_json::to_string(&req.models.unwrap_or_default())
         .unwrap_or_else(|_| "[]".to_string());
+    let rate_limit_rpm = req.rate_limit_rpm.unwrap_or(0).max(0);
+    let quota_daily_tokens = req.quota_daily_tokens.unwrap_or(0).max(0);
 
     match conn.execute(
-        "INSERT INTO api_keys (id, user_id, key, key_suffix, name, expires_at, models) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![id, claims.sub, key_hash, key_suffix, name, expires_at, models_json],
+        "INSERT INTO api_keys (id, user_id, key, key_suffix, name, expires_at, models, rate_limit_rpm, quota_daily_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![id, claims.sub, key_hash, key_suffix, name, expires_at, models_json, rate_limit_rpm, quota_daily_tokens],
     ) {
         Ok(_) => (StatusCode::CREATED, Json(json!(ApiKeyResponse {
             id,
@@ -269,6 +271,8 @@ pub async fn create_api_key(
             last_used_at: None,
             expires_at,
             models: serde_json::from_str(&models_json).unwrap_or_default(),
+            rate_limit_rpm,
+            quota_daily_tokens,
             created_at: chrono::Utc::now().to_rfc3339(),
         }))),
         Err(e) => {
@@ -291,7 +295,8 @@ pub async fn list_api_keys(
     };
 
     let mut stmt = match conn.prepare(
-        "SELECT id, user_id, key_suffix, name, is_active, last_used_at, expires_at, models, created_at
+        "SELECT id, user_id, key_suffix, name, is_active, last_used_at, expires_at, models,
+                rate_limit_rpm, quota_daily_tokens, created_at
          FROM api_keys WHERE user_id = ?1"
     ) {
         Ok(s) => s,
@@ -308,7 +313,9 @@ pub async fn list_api_keys(
                 last_used_at: row.get(5)?,
                 expires_at: row.get(6)?,
                 models: row.get(7)?,
-                created_at: row.get(8)?,
+                rate_limit_rpm: row.get(8)?,
+                quota_daily_tokens: row.get(9)?,
+                created_at: row.get(10)?,
             })
         }) {
             Ok(rows) => rows
@@ -379,6 +386,14 @@ pub async fn update_api_key(
         params_vec.push(Box::new(
             serde_json::to_string(models).unwrap_or_else(|_| "[]".to_string()),
         ));
+    }
+    if let Some(rpm) = req.rate_limit_rpm {
+        updates.push("rate_limit_rpm = ?");
+        params_vec.push(Box::new(rpm.max(0)));
+    }
+    if let Some(quota) = req.quota_daily_tokens {
+        updates.push("quota_daily_tokens = ?");
+        params_vec.push(Box::new(quota.max(0)));
     }
 
     if updates.is_empty() {

@@ -197,6 +197,9 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_column(conn, "providers", "note", "TEXT NOT NULL DEFAULT ''")?;
     // 渠道官网地址,仅用于后台展示。
     ensure_column(conn, "providers", "website_url", "TEXT NOT NULL DEFAULT ''")?;
+    // API key 限流/额度:每分钟请求数与每日 token 额度,0 表示不限制。
+    ensure_column(conn, "api_keys", "rate_limit_rpm", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "api_keys", "quota_daily_tokens", "INTEGER NOT NULL DEFAULT 0")?;
     // Backfill protocol fields from the legacy provider_type, gated by
     // user_version so it runs exactly once instead of on every startup.
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;

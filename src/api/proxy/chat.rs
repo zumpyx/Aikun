@@ -95,6 +95,22 @@ pub async fn proxy_completion(
         }
     }
 
+    // API key 的每分钟限流与每日 token 额度(仅 /v1 的 key 调用;JWT 会话无此概念)。
+    if let Some(key_id) = &auth_ctx.api_key_id {
+        if let Some(msg) = enforce_key_limits(&state, key_id).await {
+            spawn_request_log(
+                &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
+                model.clone(), client_protocol, 0, 0, 0, 0, 429, false,
+                Some(msg.clone()),
+            );
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(protocol_error(client_protocol, "rate_limit_error", &msg)),
+            )
+                .into_response();
+        }
+    }
+
     // 热路径每请求日志用 debug 级:生产默认 info 级下保持安静,
     // 高并发时不至于让 stdout 日志 I/O 成为瓶颈。
     debug!(
@@ -145,6 +161,65 @@ pub async fn proxy_completion(
                 .into_response()
         }
     }
+}
+
+/// Per-API-key 限流/日额度检查。返回 Some(message) 表示应以 429 拒绝。
+/// 限额配置与当日已用 token 在 blocking 线程一次取回;RPM 用内存滑动窗口
+/// (key 为 api_keys.id)。查询失败时放行——key 刚通过认证,行必然存在,
+/// 瞬时的锁/IO 失败不应打断流量。
+async fn enforce_key_limits(state: &AppState, key_id: &str) -> Option<String> {
+    let pool = state.pool.clone();
+    let key = key_id.to_string();
+    let limits = tokio::task::spawn_blocking(move || {
+        let conn = pool.conn.lock().ok()?;
+        conn.query_row(
+            "SELECT rate_limit_rpm, quota_daily_tokens,
+                    (SELECT COALESCE(SUM(total_tokens), 0) FROM request_logs
+                     WHERE api_key_id = ?1
+                       AND created_at >= strftime('%Y-%m-%dT00:00:00', 'now'))
+             FROM api_keys WHERE id = ?1",
+            rusqlite::params![key],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .ok()
+    })
+    .await
+    .ok()
+    .flatten()?;
+
+    let (rpm, daily_quota, used_today) = limits;
+
+    if daily_quota > 0 && used_today >= daily_quota {
+        return Some(format!(
+            "Daily token quota exceeded for this API key ({}/{} tokens used today)",
+            used_today, daily_quota
+        ));
+    }
+
+    if rpm > 0 {
+        let now = std::time::Instant::now();
+        let mut windows = state.api_key_rate.lock().ok()?;
+        let window = windows.entry(key_id.to_string()).or_default();
+        window.retain(|t| now.duration_since(*t).as_secs() < 60);
+        if window.len() >= rpm as usize {
+            // 空窗口的 key 顺手清掉,避免 map 随 key 数量无限增长(这里
+            // 窗口非空不处理,空窗口在下一次请求 retain 后同样被清)。
+            return Some(format!(
+                "Rate limit exceeded for this API key ({} requests/minute)",
+                rpm
+            ));
+        }
+        window.push(now);
+        windows.retain(|_, w| !w.is_empty());
+    }
+
+    None
 }
 
 /// 渠道重试/故障转移循环：依次尝试可用渠道，全部失败时返回最后一次上游

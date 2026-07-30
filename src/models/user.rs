@@ -123,6 +123,8 @@ pub struct ApiKey {
     pub last_used_at: Option<String>,
     pub expires_at: Option<String>,
     pub models: String, // JSON array; empty = all models allowed
+    pub rate_limit_rpm: i64,      // 0 = unlimited
+    pub quota_daily_tokens: i64,  // 0 = unlimited
     pub created_at: String,
 }
 
@@ -138,6 +140,8 @@ impl std::fmt::Debug for ApiKey {
             .field("last_used_at", &self.last_used_at)
             .field("expires_at", &self.expires_at)
             .field("models", &self.models)
+            .field("rate_limit_rpm", &self.rate_limit_rpm)
+            .field("quota_daily_tokens", &self.quota_daily_tokens)
             .field("created_at", &self.created_at)
             .finish()
     }
@@ -148,6 +152,8 @@ pub struct CreateApiKeyRequest {
     pub name: Option<String>,
     pub expires_at: Option<String>,
     pub models: Option<Vec<String>>,
+    pub rate_limit_rpm: Option<i64>,
+    pub quota_daily_tokens: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +162,8 @@ pub struct UpdateApiKeyRequest {
     pub is_active: Option<bool>,
     pub expires_at: Option<String>,
     pub models: Option<Vec<String>>,
+    pub rate_limit_rpm: Option<i64>,
+    pub quota_daily_tokens: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -168,6 +176,8 @@ pub struct ApiKeyResponse {
     pub last_used_at: Option<String>,
     pub expires_at: Option<String>,
     pub models: Vec<String>,
+    pub rate_limit_rpm: i64,
+    pub quota_daily_tokens: i64,
     pub created_at: String,
 }
 
@@ -183,6 +193,8 @@ impl From<ApiKey> for ApiKeyResponse {
             last_used_at: k.last_used_at,
             expires_at: k.expires_at,
             models,
+            rate_limit_rpm: k.rate_limit_rpm,
+            quota_daily_tokens: k.quota_daily_tokens,
             created_at: k.created_at,
         }
     }

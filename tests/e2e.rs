@@ -3,13 +3,13 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    seed_api_key, seed_provider, wait_until, MockUpstream, ProviderSeed, TestApp,
+    seed_api_key, seed_api_key_with_limits, seed_provider, wait_until, MockUpstream, ProviderSeed,
+    TestApp,
 };
 
 const WAIT: Duration = Duration::from_secs(10);
 
 fn seed_openai_provider(app: &TestApp, mock: &MockUpstream, id: &str) {
-    seed_api_key(&app.db());
     seed_provider(
         &app.db(),
         &ProviderSeed {
@@ -41,6 +41,7 @@ async fn chat_completions(app: &TestApp) -> reqwest::Response {
 async fn openai_chat_success_end_to_end() {
     let mock = MockUpstream::start().await;
     let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
     seed_openai_provider(&app, &mock, "p1");
 
     let resp = chat_completions(&app).await;
@@ -71,6 +72,7 @@ async fn openai_chat_success_end_to_end() {
 async fn anthropic_client_converted_to_openai_upstream() {
     let mock = MockUpstream::start().await;
     let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
     seed_openai_provider(&app, &mock, "p1");
 
     let req = app
@@ -177,6 +179,7 @@ async fn failover_to_second_channel_after_upstream_500() {
 async fn envelope_200_counts_as_failure_not_success() {
     let mock = MockUpstream::start().await;
     let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
     seed_openai_provider(&app, &mock, "p1");
     // 唯一渠道在所有候选被排除后会被重试(max_retries=3),三次尝试都给信封错误。
     for _ in 0..3 {
@@ -214,6 +217,7 @@ async fn envelope_200_counts_as_failure_not_success() {
 async fn empty_sse_stream_is_failure() {
     let mock = MockUpstream::start().await;
     let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
     seed_openai_provider(&app, &mock, "p1");
     mock.push_sse("");
 
@@ -266,6 +270,7 @@ async fn v1_requires_api_key() {
 async fn upstream_401_auto_disables_channel() {
     let mock = MockUpstream::start().await;
     let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
     seed_openai_provider(&app, &mock, "p1");
     // max_retries is 3, all attempts hit the same channel (it's the only one)
     for _ in 0..3 {
@@ -285,4 +290,59 @@ async fn upstream_401_auto_disables_channel() {
         active == 0
     })
     .await;
+}
+
+#[tokio::test]
+async fn api_key_rate_limit_returns_429() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key_with_limits(&app.db(), 1, 0); // 1 req/min
+    seed_openai_provider(&app, &mock, "p1");
+
+    let first = chat_completions(&app).await;
+    assert_eq!(first.status(), 200, "first request within the limit");
+
+    let second = chat_completions(&app).await;
+    assert_eq!(second.status(), 429, "second request in the same minute");
+    let body: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "rate_limit_error");
+
+    // 被限流的请求不应打到上游
+    assert_eq!(
+        mock.requests()
+            .iter()
+            .filter(|r| r.path == "/v1/chat/completions")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn api_key_daily_quota_returns_429() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key_with_limits(&app.db(), 0, 5); // 5 tokens/day,mock 每次消耗 8
+    seed_openai_provider(&app, &mock, "p1");
+
+    let first = chat_completions(&app).await;
+    assert_eq!(first.status(), 200, "first request within the quota");
+
+    // 记账是异步的:等 8 个 token 落库后再发第二个请求
+    wait_until("first request accounted", WAIT, || {
+        let used: i64 = app
+            .db()
+            .query_row(
+                "SELECT COALESCE(SUM(total_tokens), 0) FROM request_logs WHERE api_key_id = 'k-e2e'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        used >= 8
+    })
+    .await;
+
+    let second = chat_completions(&app).await;
+    assert_eq!(second.status(), 429, "quota (5) already consumed (8)");
+    let body: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "rate_limit_error");
 }

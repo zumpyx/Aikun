@@ -237,6 +237,11 @@ impl Drop for TestApp {
 
 /// 插入一个用户和一把 API key(TEST_KEY 的 sha256)。
 pub fn seed_api_key(db: &rusqlite::Connection) {
+    seed_api_key_with_limits(db, 0, 0);
+}
+
+/// 同 seed_api_key,但设置 rate_limit_rpm / quota_daily_tokens(0 = 不限)。
+pub fn seed_api_key_with_limits(db: &rusqlite::Connection, rpm: i64, daily_quota: i64) {
     db.execute(
         "INSERT INTO users (id, username, password_hash, display_name, role)
          VALUES ('u-e2e', 'e2e', 'unused', 'E2E', 'admin')",
@@ -244,8 +249,9 @@ pub fn seed_api_key(db: &rusqlite::Connection) {
     )
     .unwrap();
     db.execute(
-        "INSERT INTO api_keys (id, user_id, key, name) VALUES ('k-e2e', 'u-e2e', ?1, 'e2e')",
-        rusqlite::params![sha256_hex(TEST_KEY)],
+        "INSERT INTO api_keys (id, user_id, key, name, rate_limit_rpm, quota_daily_tokens)
+         VALUES ('k-e2e', 'u-e2e', ?1, 'e2e', ?2, ?3)",
+        rusqlite::params![sha256_hex(TEST_KEY), rpm, daily_quota],
     )
     .unwrap();
 }
