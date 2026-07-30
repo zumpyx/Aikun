@@ -228,6 +228,12 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_column(conn, "api_keys", "models", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "api_keys", "key_suffix", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "users", "token_version", "INTEGER NOT NULL DEFAULT 0")?;
+    // 默认管理员显示名改名(Administrator 过长,侧栏显示被截断);幂等,
+    // 只影响从未改过显示名的默认 admin 行。
+    conn.execute(
+        "UPDATE users SET display_name = 'Admin' WHERE username = 'admin' AND display_name = 'Administrator'",
+        [],
+    )?;
     // request_logs 的后加列无条件补齐:FK 已修但缺列的中间态数据库
     // 不会触发下面的表重建,缺列会导致日志插入静默失败。
     ensure_column(conn, "request_logs", "request_type", "TEXT NOT NULL DEFAULT 'chat'")?;
@@ -358,7 +364,7 @@ fn seed_default_admin(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute(
             "INSERT INTO users (id, username, password_hash, display_name, role)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, "admin", password_hash, "Administrator", "admin"],
+            params![id, "admin", password_hash, "Admin", "admin"],
         )?;
         tracing::warn!("============================================================");
         tracing::warn!("Default admin created — username: admin  password: {}", password);

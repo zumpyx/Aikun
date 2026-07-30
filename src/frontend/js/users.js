@@ -35,7 +35,7 @@ async function renderUsers(container) {
               <tr>
                 <td><strong>${esc(u.username)}</strong></td>
                 <td>${esc(u.display_name)}</td>
-                <td><span class="badge ${u.role === 'admin' ? 'badge-blue' : 'badge-gray'}">${esc(u.role)}</span></td>
+                <td><span class="badge ${u.role === 'admin' ? 'badge-blue' : 'badge-gray'}">${u.role === 'admin' ? 'Admin' : 'User'}</span></td>
                 <td><span class="badge ${u.is_active ? 'badge-green' : 'badge-red'}">${u.is_active ? '活跃' : '禁用'}</span></td>
                 <td style="color:var(--muted);font-size:12.5px">${esc(u.created_at)}</td>
                 <td>
@@ -67,7 +67,7 @@ async function showUserModal(id) {
       <div class="form-group"><label>用户名</label><input id="uf-user" value="${esc(user?.username || '')}" ${user ? 'disabled' : ''}></div>
       <div class="form-group"><label>显示名称</label><input id="uf-name" value="${esc(user?.display_name || '')}"></div>
       <div class="form-group"><label>密码${user ? '（留空不修改）' : ''}</label><input id="uf-pass" type="password" ${user ? '' : 'required'}></div>
-      ${!user ? `<div class="form-group"><label>角色</label><select id="uf-role"><option value="user">user</option><option value="admin">admin</option></select></div>` : ''}
+      ${!user ? `<div class="form-group"><label>角色</label><select id="uf-role"><option value="user">User</option><option value="admin">Admin</option></select></div>` : ''}
       <div class="form-actions">
         <button class="btn-primary" id="uf-save">${user ? '保存' : '创建'}</button>
         <button class="btn-outline" id="uf-cancel">取消</button>
@@ -129,7 +129,7 @@ function showBatchUserModal() {
         示例：<code>alice,,爱丽丝</code> 或 <code>bob,pass123</code>
       </p>
       <div class="form-group"><textarea id="batch-input" rows="8" style="width:100%;font-family:monospace" placeholder="alice,,爱丽丝&#10;bob,pass123&#10;carol"></textarea></div>
-      <div class="form-group"><label>角色（应用于全部）</label><select id="batch-role"><option value="user">user</option><option value="admin">admin</option></select></div>
+      <div class="form-group"><label>角色（应用于全部）</label><select id="batch-role"><option value="user">User</option><option value="admin">Admin</option></select></div>
       <div id="batch-result"></div>
       <div class="form-actions">
         <button class="btn-primary" id="batch-save">创建</button>
