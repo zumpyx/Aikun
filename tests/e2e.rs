@@ -377,3 +377,69 @@ async fn provider_keys_encrypted_at_rest_and_still_usable() {
         .expect("request must reach upstream");
     assert_eq!(chat.authorization.as_deref(), Some("Bearer upstream-key"));
 }
+
+#[tokio::test]
+async fn successful_request_deducts_user_balance() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+    // 余额 100 元;gpt-4 价格:输入 10 元/1M、输出 30 元/1M
+    app.db()
+        .execute("UPDATE users SET balance = 100.0 WHERE id = 'u-e2e'", [])
+        .unwrap();
+    app.db()
+        .execute(
+            "INSERT INTO model_prices (id, model, prompt_price, completion_price)
+             VALUES ('mp1', 'gpt-4', 10.0, 30.0)",
+            [],
+        )
+        .unwrap();
+
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 200);
+
+    // mock usage: 5 prompt + 3 completion → cost = 5×10/1M + 3×30/1M = 0.00014
+    wait_until("cost recorded and balance deducted", WAIT, || {
+        let (cost, balance): (f64, f64) = app
+            .db()
+            .query_row(
+                "SELECT (SELECT COALESCE(SUM(cost), 0) FROM request_logs WHERE user_id = 'u-e2e'),
+                        (SELECT balance FROM users WHERE id = 'u-e2e')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        (cost - 0.00014).abs() < 1e-9 && (balance - (100.0 - 0.00014)).abs() < 1e-9
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn no_price_match_leaves_balance_unchanged() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+    app.db()
+        .execute("UPDATE users SET balance = 100.0 WHERE id = 'u-e2e'", [])
+        .unwrap();
+
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 200);
+
+    wait_until("request logged with zero cost", WAIT, || {
+        let (n, cost, balance): (i64, f64, f64) = app
+            .db()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM request_logs WHERE user_id = 'u-e2e' AND success = 1),
+                        (SELECT COALESCE(SUM(cost), 0) FROM request_logs WHERE user_id = 'u-e2e'),
+                        (SELECT balance FROM users WHERE id = 'u-e2e')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        n >= 1 && cost == 0.0 && balance == 100.0
+    })
+    .await;
+}

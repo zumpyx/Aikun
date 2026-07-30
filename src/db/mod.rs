@@ -190,6 +190,30 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             PRIMARY KEY (provider_id, model)
         );
 
+        -- 模型价格:每 1M tokens 的价格(元)。model 支持 * 前缀通配
+        -- (如 gpt-*),匹配规则见 src/billing.rs。
+        CREATE TABLE IF NOT EXISTS model_prices (
+            id                  TEXT PRIMARY KEY,
+            model               TEXT NOT NULL UNIQUE,
+            prompt_price        REAL NOT NULL DEFAULT 0,
+            completion_price    REAL NOT NULL DEFAULT 0,
+            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        -- 管理员手工调账流水(充值/扣减);请求扣费不逐条写这里,
+        -- 计费明细以 request_logs.cost 为准。
+        CREATE TABLE IF NOT EXISTS billing_transactions (
+            id              TEXT PRIMARY KEY,
+            user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            amount          REAL NOT NULL,
+            balance_after   REAL NOT NULL,
+            kind            TEXT NOT NULL
+                CHECK(kind IN ('recharge', 'adjust')),
+            note            TEXT NOT NULL DEFAULT '',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
         CREATE INDEX IF NOT EXISTS idx_request_logs_user_id ON request_logs(user_id);
         CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_request_logs_provider_id ON request_logs(provider_id);
@@ -267,6 +291,9 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // API key 限流/额度:每分钟请求数与每日 token 额度,0 表示不限制。
     ensure_column(conn, "api_keys", "rate_limit_rpm", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "api_keys", "quota_daily_tokens", "INTEGER NOT NULL DEFAULT 0")?;
+    // 计费:用户余额(元,允许为负——不拦截语义)与每次请求的折算费用。
+    ensure_column(conn, "users", "balance", "REAL NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "request_logs", "cost", "REAL NOT NULL DEFAULT 0")?;
     // Backfill protocol fields from the legacy provider_type, gated by
     // user_version so it runs exactly once instead of on every startup.
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;

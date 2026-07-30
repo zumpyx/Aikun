@@ -289,11 +289,13 @@ async fn attempt_loop(
                     Ok(resp_body) if valid_response_shape(&resp_body, provider_protocol) => {
                         spawn_record_result(state.pool.clone(), provider.id.clone(), latency, true);
                         let (p, c, t) = extract_usage_any(&resp_body);
-                        spawn_request_log(
+                        // 计费级:响应返回前日志与扣费已落库(await)。
+                        request_log_sync(
                             &state.pool, user_id.clone(), api_key_id.clone(),
                             Some(provider.id.clone()), model.clone(), client_protocol,
                             p, c, t, latency as i32, 200, true, None,
-                        );
+                        )
+                        .await;
                         debug!(
                             "Completed: model={} provider={} latency={}ms tokens={}",
                             model, provider.name, latency as i64, t
@@ -845,7 +847,7 @@ fn stream_terminal_event(client_protocol: &str) -> SseOut {
 }
 
 /// Fire-and-forget 版本：异步上下文写请求日志时投递到 blocking 线程池，
-/// 避免持 DB mutex 的同步写阻塞 async executor。
+/// 避免持 DB mutex 的同步写阻塞 async executor。用于不涉计费的失败路径。
 #[allow(clippy::too_many_arguments)]
 fn spawn_request_log(
     pool: &Arc<DbPool>,
@@ -873,6 +875,36 @@ fn spawn_request_log(
     });
 }
 
+/// 计费级同步版本:调用方 await,函数返回时日志与扣费已落库。
+/// 用于非流式成功路径——响应返回给用户前费用必须已记账。
+#[allow(clippy::too_many_arguments)]
+async fn request_log_sync(
+    pool: &Arc<DbPool>,
+    user_id: String,
+    api_key_id: Option<String>,
+    provider_id: Option<String>,
+    model: String,
+    request_type: &str,
+    prompt_tokens: i32,
+    completion_tokens: i32,
+    total_tokens: i32,
+    latency_ms: i32,
+    status_code: i32,
+    success: bool,
+    error_message: Option<String>,
+) {
+    let pool = pool.clone();
+    let request_type = request_type.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        insert_request_log(
+            &pool, &user_id, api_key_id.as_deref(), provider_id.as_deref(),
+            &model, &request_type, prompt_tokens, completion_tokens, total_tokens,
+            latency_ms, status_code, success, error_message,
+        );
+    })
+    .await;
+}
+
 #[allow(clippy::too_many_arguments)]
 fn insert_request_log(
     pool: &DbPool,
@@ -890,11 +922,21 @@ fn insert_request_log(
     error_message: Option<String>,
 ) {
     if let Ok(conn) = pool.conn.lock() {
+        // 计费:成功且有用量时按价格表折算费用。价格查询、日志插入、
+        // 余额扣减同在一把写锁(单连接)内,天然同事务——不会出现
+        // "记了日志没扣费"或"扣了费没日志"的中间态。
+        let cost = if success && total_tokens > 0 {
+            crate::billing::find_price(&conn, model)
+                .map(|prices| crate::billing::compute_cost(prompt_tokens, completion_tokens, prices))
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
         // 日志插入失败必须可见:此前静默吞错曾导致迁移中间态下日志全丢。
         if let Err(e) = conn.execute(
             "INSERT INTO request_logs (id, user_id, api_key_id, provider_id, model, request_type,
-             prompt_tokens, completion_tokens, total_tokens, latency_ms, status_code, success, error_message, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             prompt_tokens, completion_tokens, total_tokens, latency_ms, status_code, success, error_message, cost, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 Uuid::new_v4().to_string(),
                 Some(user_id),
@@ -909,10 +951,21 @@ fn insert_request_log(
                 status_code,
                 success as i32,
                 error_message,
+                cost,
                 chrono::Utc::now().to_rfc3339(),
             ],
         ) {
             warn!("Failed to insert request log: {}", e);
+            return;
+        }
+        // 余额不拦截语义:允许扣成负数,只记账。
+        if cost > 0.0 {
+            if let Err(e) = conn.execute(
+                "UPDATE users SET balance = balance - ?1 WHERE id = ?2",
+                params![cost, user_id],
+            ) {
+                warn!("Failed to deduct balance for user {}: {}", user_id, e);
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod billing;
 mod config;
 mod crypto;
 mod db;
