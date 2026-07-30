@@ -101,7 +101,7 @@ pub fn select_provider(
     exclude: &HashSet<String>,
 ) -> Option<Provider> {
     let conn = pool.conn.lock().ok()?;
-    let providers = find_providers_for_model(&conn, model)?;
+    let providers = find_providers_for_model(&conn, &pool.cipher, model)?;
 
     let mut candidates: Vec<&Provider> = providers
         .iter()
@@ -137,7 +137,12 @@ pub fn select_provider(
 }
 
 /// Find all providers that support the given model.
-fn find_providers_for_model(conn: &Connection, model: &str) -> Option<Vec<Provider>> {
+/// api_key 在出库时解密(密文以 enc:v1: 为前缀,明文原样兼容)。
+fn find_providers_for_model(
+    conn: &Connection,
+    cipher: &crate::crypto::KeyCipher,
+    model: &str,
+) -> Option<Vec<Provider>> {
     let mut stmt = conn
         .prepare(
             "SELECT id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models, priority, weight,
@@ -153,6 +158,10 @@ fn find_providers_for_model(conn: &Connection, model: &str) -> Option<Vec<Provid
         .query_map([], row_to_provider)
         .ok()?
         .filter_map(|r| r.ok())
+        .map(|mut p| {
+            p.api_key = crate::crypto::decrypt_or_plain(cipher, &p.api_key);
+            p
+        })
         .filter(|p| provider_supports_model(p, model))
         .collect();
 

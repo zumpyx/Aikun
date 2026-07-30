@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod config;
+mod crypto;
 mod db;
 mod models;
 mod proxy;

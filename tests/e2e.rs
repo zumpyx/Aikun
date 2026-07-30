@@ -346,3 +346,34 @@ async fn api_key_daily_quota_returns_429() {
     let body: serde_json::Value = second.json().await.unwrap();
     assert_eq!(body["error"]["type"], "rate_limit_error");
 }
+
+#[tokio::test]
+async fn provider_keys_encrypted_at_rest_and_still_usable() {
+    let mock = MockUpstream::start().await;
+    let mut app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    // 启动后插入明文 key(seed_provider 写 'upstream-key')
+    seed_openai_provider(&app, &mock, "p1");
+
+    // 重启触发启动迁移:存量明文 → enc:v1: 密文
+    app.restart().await;
+    let stored: String = app
+        .db()
+        .query_row("SELECT api_key FROM providers WHERE id = 'p1'", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        stored.starts_with("enc:v1:"),
+        "stored key must be encrypted at rest, got {stored}"
+    );
+    assert!(!stored.contains("upstream-key"));
+
+    // 加密落库后代理链路仍正常,上游收到解密后的明文 Bearer
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 200);
+    let reqs = mock.requests();
+    let chat = reqs
+        .iter()
+        .find(|r| r.path == "/v1/chat/completions")
+        .expect("request must reach upstream");
+    assert_eq!(chat.authorization.as_deref(), Some("Bearer upstream-key"));
+}

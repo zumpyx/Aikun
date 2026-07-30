@@ -388,7 +388,14 @@ async fn run_model_test_round(
             }
         };
         match stmt.query_map([], crate::models::row_to_provider) {
-            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Ok(rows) => rows
+                .filter_map(|r| r.ok())
+                .map(|mut p: Provider| {
+                    // api_key 出库解密(enc:v1: 前缀密文,明文兼容)
+                    p.api_key = crate::crypto::decrypt_or_plain(&pool.cipher, &p.api_key);
+                    p
+                })
+                .collect(),
             Err(e) => {
                 tracing::error!("Model test loop failed to read providers: {}", e);
                 return;

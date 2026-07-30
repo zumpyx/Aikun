@@ -198,6 +198,8 @@ pub async fn create_provider(
         .unwrap_or_else(|_| "{}".to_string());
     let note = req.note.unwrap_or_default().trim().to_string();
     let website_url = req.website_url.unwrap_or_default().trim().to_string();
+    // 静态加密落库(enc:v1: 前缀),明文只存在于本次请求内存中。
+    let encrypted_key = state.pool.cipher.encrypt(&req.api_key);
 
     match conn.execute(
         "INSERT INTO providers (id, name, provider_type, openai_base_url, anthropic_base_url,
@@ -206,7 +208,7 @@ pub async fn create_provider(
                                 protocols, default_protocol, note, website_url)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![id, name, provider_type, openai_base_url, anthropic_base_url,
-                 req.api_key, models_json,
+                 encrypted_key, models_json,
                  priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
                  protocols_json, default_protocol, note, website_url],
     ) {
@@ -332,7 +334,8 @@ pub async fn update_provider(
     }
     if let Some(key) = &req.api_key {
         updates.push("api_key = ?");
-        params_vec.push(Box::new(key.clone()));
+        // 静态加密落库(enc:v1: 前缀)。
+        params_vec.push(Box::new(state.pool.cipher.encrypt(key)));
     }
     if let Some(models) = &req.models {
         if let Ok(json_str) = serde_json::to_string(models) {
@@ -680,6 +683,8 @@ pub async fn test_provider(
     }; // MutexGuard dropped here
 
     let (id, name, openai_url, anthropic_url, api_key, protocol, timeout, proxy_url) = provider_info;
+    // api_key 出库解密(enc:v1: 前缀密文,明文兼容)
+    let api_key = crate::crypto::decrypt_or_plain(&state.pool.cipher, &api_key);
 
     // 按渠道的默认协议选对应的上游地址;留空的一路回退到另一个。
     let base_url = if protocol == "anthropic" {
@@ -830,7 +835,8 @@ pub async fn fetch_upstream_models(
         match stored {
             Ok((k, p)) => {
                 if api_key.is_empty() {
-                    api_key = k;
+                    // 库存为密文(enc:v1: 前缀)时先解密
+                    api_key = crate::crypto::decrypt_or_plain(&state.pool.cipher, &k);
                 }
                 if proxy_url.is_empty() {
                     proxy_url = p;
@@ -968,7 +974,11 @@ pub async fn test_provider_model(
             params![provider_id],
             row_to_provider,
         ) {
-            Ok(p) => p,
+            Ok(mut p) => {
+                // api_key 出库解密(enc:v1: 前缀密文,明文兼容)
+                p.api_key = crate::crypto::decrypt_or_plain(&state.pool.cipher, &p.api_key);
+                p
+            }
             Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
         }
     };

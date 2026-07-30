@@ -41,6 +41,8 @@ pub enum Scripted {
 pub struct Recorded {
     pub method: String,
     pub path: String,
+    /// Authorization 头(无则 None),用于断言转发给上游的凭证。
+    pub authorization: Option<String>,
     pub body: String,
 }
 
@@ -108,12 +110,18 @@ async fn mock_handler(
     // 健康探针(GET /models)不消费脚本:启动首轮健康检查与夹具注入
     // 存在调度竞态,探针一律回默认 200,保证脚本只被真实代理请求消耗。
     let is_health_probe = path.ends_with("/models");
+    let authorization = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let bytes = axum::body::to_bytes(req.into_body(), 8 * 1024 * 1024)
         .await
         .unwrap_or_default();
     st.requests.lock().unwrap().push(Recorded {
         method,
         path,
+        authorization,
         body: String::from_utf8_lossy(&bytes).to_string(),
     });
     let scripted = if is_health_probe {
@@ -155,8 +163,25 @@ pub fn openai_completion(text: &str) -> Value {
 pub struct TestApp {
     pub base: String,
     pub db_path: PathBuf,
+    port: u16,
     child: Child,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
+}
+
+fn spawn_child(dir: &std::path::Path, db_path: &std::path::Path, port: u16) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_aikun"))
+        .current_dir(dir)
+        .env("AIKUN_HOST", format!("127.0.0.1:{}", port))
+        .env("AIKUN_JWT_SECRET", "e2e-test-secret-not-for-production")
+        .env(
+            "AIKUN_DATABASE_URL",
+            format!("sqlite://{}?mode=rwc", db_path.display()),
+        )
+        .env("AIKUN_HEALTH_CHECK_INTERVAL", "3600")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn aikun binary")
 }
 
 impl TestApp {
@@ -166,27 +191,25 @@ impl TestApp {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let port = free_port();
-        let child = Command::new(env!("CARGO_BIN_EXE_aikun"))
-            .current_dir(dir.path())
-            .env("AIKUN_HOST", format!("127.0.0.1:{}", port))
-            .env("AIKUN_JWT_SECRET", "e2e-test-secret-not-for-production")
-            .env(
-                "AIKUN_DATABASE_URL",
-                format!("sqlite://{}?mode=rwc", db_path.display()),
-            )
-            .env("AIKUN_HEALTH_CHECK_INTERVAL", "3600")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("failed to spawn aikun binary");
+        let child = spawn_child(dir.path(), &db_path, port);
         let app = Self {
             base: format!("http://127.0.0.1:{}", port),
-            db_path,
+            db_path: db_path.clone(),
+            port,
             child,
-            _dir: dir,
+            dir,
         };
         app.wait_ready().await;
         app
+    }
+
+    /// 杀掉进程并在同一目录/数据库/端口上重新拉起——用于验证启动期
+    /// 迁移(如存量明文渠道 key 的重加密)。
+    pub async fn restart(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.child = spawn_child(self.dir.path(), &self.db_path, self.port);
+        self.wait_ready().await;
     }
 
     async fn wait_ready(&self) {

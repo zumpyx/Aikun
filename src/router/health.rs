@@ -165,7 +165,8 @@ async fn run_health_check_round(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    // api_key 出库解密(enc:v1: 前缀密文,明文兼容)
+                    crate::crypto::decrypt_or_plain(&pool.cipher, &row.get::<_, String>(3)?),
                     row.get::<_, String>(4)?,
                     row.get::<_, i32>(5)?,
                     row.get::<_, String>(6)?,

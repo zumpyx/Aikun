@@ -2,6 +2,7 @@ use rusqlite::{Connection, params};
 use std::sync::Mutex;
 
 use crate::config::AppConfig;
+use crate::crypto::KeyCipher;
 
 pub fn create_connection(config: &AppConfig) -> Result<Connection, rusqlite::Error> {
     // Parse sqlite:// URL, stripping query parameters like ?mode=rwc.
@@ -24,15 +25,47 @@ pub fn create_connection(config: &AppConfig) -> Result<Connection, rusqlite::Err
 
 pub struct DbPool {
     pub conn: Mutex<Connection>,
+    /// providers.api_key 静态加密,密钥派生自 JWT secret。
+    pub cipher: KeyCipher,
 }
 
 impl DbPool {
     pub fn new(config: &AppConfig) -> Result<Self, rusqlite::Error> {
+        let cipher = KeyCipher::from_secret(&config.jwt_secret);
         let conn = create_connection(config)?;
+        migrate_encrypt_provider_keys(&conn, &cipher)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            cipher,
         })
     }
+}
+
+/// 把存量明文 providers.api_key 重加密为 enc:v1: 密文;已加密的行跳过,
+/// 幂等,每次启动都运行(正常为 0 行,代价一次扫描)。
+fn migrate_encrypt_provider_keys(
+    conn: &Connection,
+    cipher: &KeyCipher,
+) -> Result<(), rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, api_key FROM providers WHERE api_key != '' AND api_key NOT LIKE '{}%'",
+        crate::crypto::ENC_PREFIX
+    ))?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    let n = rows.len();
+    for (id, key) in rows {
+        conn.execute(
+            "UPDATE providers SET api_key = ?1 WHERE id = ?2",
+            params![cipher.encrypt(&key), id],
+        )?;
+    }
+    if n > 0 {
+        tracing::info!("Migrated {} plaintext provider api_keys to AES-256-GCM ciphertext", n);
+    }
+    Ok(())
 }
 
 fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {

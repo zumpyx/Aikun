@@ -24,6 +24,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 # 哈希(api key 存储等)
 sha2 = "0.10"
 
+# 上游渠道 key 静态加密(AES-256-GCM,密钥派生自 JWT secret)
+aes-gcm = "0.10"
+base64 = "0.22"
+
 # Streaming (SSE)
 futures-util = "0.3"
 async-stream = "0.3"

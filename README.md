@@ -77,6 +77,10 @@ cargo zigbuild --release --target x86_64-unknown-linux-musl  # 静态交叉编�
 export AIKUN_JWT_SECRET=$(openssl rand -hex 32)
 ```
 
+该密钥同时用于派生渠道上游 key 的静态加密密钥(AES-256-GCM,密文以
+`enc:v1:` 前缀落库)。**部署后请勿更换**:否则已加密的渠道 key 无法解密,
+所有已签发 JWT 也会同时失效。
+
 ## 配置
 
 配置优先级:**`AIKUN_*` 环境变量 > 命令行参数 > 默认值**。参数支持 `--key value` 与 `--key=value` 两种写法,完整列表见 `./aikun --help`。
