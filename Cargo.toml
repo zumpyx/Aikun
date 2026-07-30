@@ -42,6 +42,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Config
 dotenvy = "0.15"
+
+[dev-dependencies]
+# E2E:拉起真实二进制 + axum mock 上游(tests/)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+axum = { version = "0.8", features = ["macros"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+
 [profile.release]
 strip = "symbols"
 lto = "thin"
