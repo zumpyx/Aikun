@@ -15,7 +15,7 @@ jobs:
     # 与 release.yml 同一工具链容器,避免环境差异
     container: ghcr.io/rust-cross/cargo-zigbuild:0.23.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -28,19 +28,19 @@ jobs:
   docker-build-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/aikun
           tags: type=raw,value=ci-check
 
       - name: Build (no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
