@@ -43,6 +43,7 @@ const STATIC_ASSETS: &[(&str, &str)] = &[
     ("js/dashboard.js", include_str!("frontend/js/dashboard.js")),
     ("js/providers.js", include_str!("frontend/js/providers.js")),
     ("js/users.js", include_str!("frontend/js/users.js")),
+    ("js/billing.js", include_str!("frontend/js/billing.js")),
     ("js/keys.js", include_str!("frontend/js/keys.js")),
     ("js/models.js", include_str!("frontend/js/models.js")),
     ("js/test.js", include_str!("frontend/js/test.js")),
@@ -142,6 +143,12 @@ async fn main() {
         .route("/api/admin/providers/{id}/test-model", post(api::admin::providers::test_provider_model))
         .route("/api/admin/providers/{id}/duplicate", post(api::admin::providers::duplicate_provider))
         .route("/api/admin/model-health", get(api::admin::providers::list_model_health))
+        .route("/api/admin/prices", get(api::admin::billing::list_prices))
+        .route("/api/admin/prices", post(api::admin::billing::create_price))
+        .route("/api/admin/prices/{id}", patch(api::admin::billing::update_price))
+        .route("/api/admin/prices/{id}", delete(api::admin::billing::delete_price))
+        .route("/api/admin/users/{id}/balance", post(api::admin::billing::adjust_balance))
+        .route("/api/admin/billing/transactions", get(api::admin::billing::list_transactions))
         .route("/api/admin/usage-stats", get(api::logs::usage_stats))
         .layer(middleware::from_fn(require_admin))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));

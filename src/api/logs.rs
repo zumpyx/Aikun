@@ -109,7 +109,7 @@ pub async fn list_logs(
     let sql = format!(
         "SELECT id, user_id, api_key_id, provider_id, model, request_type,
                 prompt_tokens, completion_tokens, total_tokens, latency_ms,
-                status_code, success, error_message, created_at
+                status_code, success, error_message, cost, created_at
          FROM request_logs
          {}ORDER BY created_at DESC LIMIT ? OFFSET ?",
         where_clause
@@ -143,7 +143,8 @@ pub async fn list_logs(
             status_code: row.get(10)?,
             success: row.get(11)?,
             error_message: row.get(12)?,
-            created_at: row.get(13)?,
+            cost: row.get(13)?,
+            created_at: row.get(14)?,
         })
     }) {
         Ok(rows) => rows.filter_map(|r| match r {
@@ -187,7 +188,8 @@ pub async fn log_stats(
 
     let sql = format!(
         "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0),
-                COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0)
+                COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0),
+                COALESCE(SUM(cost), 0)
          FROM request_logs {}",
         where_clause
     );
@@ -200,16 +202,18 @@ pub async fn log_stats(
             row.get::<_, i64>(1)?,
             row.get::<_, f64>(2)?,
             row.get::<_, f64>(3)?,
+            row.get::<_, f64>(4)?,
         ))
     });
 
     match result {
-        Ok((total_requests, total_tokens, avg_latency, success_rate)) => {
+        Ok((total_requests, total_tokens, avg_latency, success_rate, total_cost)) => {
             (StatusCode::OK, Json(json!({
                 "total_requests": total_requests,
                 "total_tokens": total_tokens,
                 "avg_latency_ms": avg_latency.round() as i64,
-                "success_rate": (success_rate * 100.0).round() / 100.0
+                "success_rate": (success_rate * 100.0).round() / 100.0,
+                "total_cost": (total_cost * 1_000_000.0).round() / 1_000_000.0
             }))).into_response()
         }
         Err(e) => {

@@ -317,6 +317,37 @@ pub fn seed_provider(db: &rusqlite::Connection, p: &ProviderSeed) {
     .unwrap();
 }
 
+/// 用测试密钥直接签发 admin JWT(u-e2e 角色为 admin、token_version=0)。
+pub fn admin_jwt() -> String {
+    #[derive(serde::Serialize)]
+    struct TestClaims {
+        sub: String,
+        username: String,
+        role: String,
+        exp: usize,
+        iat: usize,
+        token_version: i64,
+    }
+    // app 进程的 AIKUN_JWT_SECRET 固定为 e2e-test-secret-not-for-production
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as usize;
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &TestClaims {
+            sub: "u-e2e".to_string(),
+            username: "e2e".to_string(),
+            role: "admin".to_string(),
+            exp: now + 3600,
+            iat: now,
+            token_version: 0,
+        },
+        &jsonwebtoken::EncodingKey::from_secret(b"e2e-test-secret-not-for-production"),
+    )
+    .unwrap()
+}
+
 /// 记账/禁用都是异步 fire-and-forget:断言前轮询等待条件成立。
 pub async fn wait_until(desc: &str, timeout: Duration, mut f: impl FnMut() -> bool) {
     let deadline = Instant::now() + timeout;

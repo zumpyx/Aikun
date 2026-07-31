@@ -117,6 +117,7 @@ async function loadLogStats(isAdmin) {
     <div style="display:flex;gap:10px;flex-wrap:wrap">
       ${chip('请求数量', fmtNum(s.total_requests ?? 0))}
       ${chip('消耗 Token', fmtNum(s.total_tokens ?? 0))}
+      ${chip('消费(元)', fmtCost(s.total_cost))}
       ${chip('平均延迟', Math.round(s.avg_latency_ms ?? 0) + 'ms')}
       ${chip('成功率', (s.success_rate ?? 0).toFixed(1) + '%')}
     </div>`;
@@ -153,6 +154,7 @@ async function loadLogs(isAdmin) {
             ${isAdmin ? '<th>用户</th>' : ''}
             <th>模型</th>
             <th>Token</th>
+            <th>费用(元)</th>
             <th>延迟</th>
             <th>状态</th>
             <th>错误</th>
@@ -165,6 +167,7 @@ async function loadLogs(isAdmin) {
                 ${isAdmin ? '<td style="font-size:12.5px">' + (l.user_id ? esc(l.user_id.substring(0, 8)) + '...' : '-') + '</td>' : ''}
                 <td><code style="font-size:12.5px">${esc(l.model)}</code></td>
                 <td>${fmtNum(l.total_tokens)}</td>
+                <td>${fmtCost(l.cost)}</td>
                 <td>${l.latency_ms}ms</td>
                 <td><span class="badge ${l.success ? 'badge-green' : 'badge-red'}">${l.success ? '成功' : '失败'}</span></td>
                 <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:12.5px;color:var(--danger)">${esc(l.error_message || '-')}</td>

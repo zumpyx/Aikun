@@ -96,17 +96,24 @@ pub async fn list_users(
     };
 
     let mut stmt = match conn.prepare(
-        "SELECT id, username, password_hash, display_name, role, is_active, created_at, updated_at
+        "SELECT id, username, password_hash, display_name, role, is_active, created_at, updated_at, balance
          FROM users ORDER BY created_at DESC"
     ) {
         Ok(s) => s,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"}))),
     };
 
-    let users: Vec<UserResponse> = match stmt.query_map([], row_to_user) {
+    let users: Vec<serde_json::Value> = match stmt.query_map([], |row| {
+        Ok((row_to_user(row)?, row.get::<_, f64>(8)?))
+    }) {
             Ok(rows) => rows
                 .filter_map(|r| r.ok())
-                .map(UserResponse::from)
+                .map(|(u, balance)| {
+                    let mut v = serde_json::to_value(UserResponse::from(u))
+                        .unwrap_or_else(|_| json!({}));
+                        v["balance"] = json!(balance);
+                    v
+                })
                 .collect(),
             Err(_) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})))
@@ -354,14 +361,19 @@ pub async fn get_user(
     };
 
     let user = conn.query_row(
-        "SELECT id, username, password_hash, display_name, role, is_active, created_at, updated_at
+        "SELECT id, username, password_hash, display_name, role, is_active, created_at, updated_at, balance
          FROM users WHERE id = ?1",
         params![user_id],
-        row_to_user,
+        |row| Ok((row_to_user(row)?, row.get::<_, f64>(8)?)),
     );
 
     match user {
-        Ok(u) => (StatusCode::OK, Json(json!(UserResponse::from(u)))),
+        Ok((u, balance)) => {
+            let mut v = serde_json::to_value(UserResponse::from(u))
+                .unwrap_or_else(|_| json!({}));
+            v["balance"] = json!(balance);
+            (StatusCode::OK, Json(v))
+        }
         Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
     }
 }

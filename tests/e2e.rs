@@ -443,3 +443,157 @@ async fn no_price_match_leaves_balance_unchanged() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn admin_prices_crud_and_wildcard_billing() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+    let jwt = common::admin_jwt();
+
+    // 创建通配价格 gpt-*(1, 2)/1M
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/prices", app.base))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"model": "gpt-*", "prompt_price": 1.0, "completion_price": 2.0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let price: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(price["model"], "gpt-*");
+
+    // 重复创建同一 model → 409
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/prices", app.base))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"model": "gpt-*"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+
+    // 请求命中通配价格:cost = 5×1/1M + 3×2/1M = 0.000011
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 200);
+    wait_until("wildcard price applied", WAIT, || {
+        let cost: f64 = app
+            .db()
+            .query_row(
+                "SELECT COALESCE(SUM(cost), 0) FROM request_logs WHERE user_id = 'u-e2e'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (cost - 0.000011).abs() < 1e-9
+    })
+    .await;
+
+    // 列表 → 更新 → 删除
+    let resp = app
+        .client()
+        .get(format!("{}/api/admin/prices", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let prices: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(prices.as_array().unwrap().len(), 1);
+
+    let id = price["id"].as_str().unwrap();
+    let resp = app
+        .client()
+        .patch(format!("{}/api/admin/prices/{}", app.base, id))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"prompt_price": 5.0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.json::<serde_json::Value>().await.unwrap()["prompt_price"], 5.0);
+
+    let resp = app
+        .client()
+        .delete(format!("{}/api/admin/prices/{}", app.base, id))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn admin_adjust_balance_records_transaction() {
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    let jwt = common::admin_jwt();
+
+    // 充值 100
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/users/u-e2e/balance", app.base))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"amount": 100.0, "note": "首充"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["balance"], 100.0);
+    assert_eq!(body["kind"], "recharge");
+
+    // 扣减 30 → 余额 70,kind=adjust
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/users/u-e2e/balance", app.base))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"amount": -30.0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.json::<serde_json::Value>().await.unwrap()["balance"], 70.0);
+
+    // 流水有两条,最新的在前
+    let resp = app
+        .client()
+        .get(format!("{}/api/admin/billing/transactions", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let txs: serde_json::Value = resp.json().await.unwrap();
+    let arr = txs.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["amount"], -30.0);
+    assert_eq!(arr[0]["balance_after"], 70.0);
+    assert_eq!(arr[0]["kind"], "adjust");
+    assert_eq!(arr[1]["amount"], 100.0);
+    assert_eq!(arr[1]["kind"], "recharge");
+    assert_eq!(arr[1]["note"], "首充");
+
+    // 非法金额 → 400;不存在的用户 → 404
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/users/u-e2e/balance", app.base))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"amount": 0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/users/nobody/balance", app.base))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"amount": 1.0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}

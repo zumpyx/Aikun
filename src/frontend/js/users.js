@@ -20,6 +20,7 @@ async function renderUsers(container) {
   if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
 
   const data = r.data;
+  state.users = data;
   if (data.length === 0) {
     list.innerHTML = '<div class="card"><div class="empty"><p>暂无用户</p></div></div>';
     return;
@@ -29,7 +30,7 @@ async function renderUsers(container) {
     <div class="card">
       <div class="table-wrap">
         <table>
-          <thead><tr><th>用户名</th><th>显示名</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>用户名</th><th>显示名</th><th>角色</th><th>状态</th><th>余额(元)</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody>
             ${data.map(u => `
               <tr>
@@ -37,9 +38,11 @@ async function renderUsers(container) {
                 <td>${esc(u.display_name)}</td>
                 <td><span class="badge ${u.role === 'admin' ? 'badge-blue' : 'badge-gray'}">${u.role === 'admin' ? 'Admin' : 'User'}</span></td>
                 <td><span class="badge ${u.is_active ? 'badge-green' : 'badge-red'}">${u.is_active ? '活跃' : '禁用'}</span></td>
+                <td style="font-size:12.5px;color:${(u.balance ?? 0) < 0 ? 'var(--danger,#f43f5e)' : 'inherit'}">${fmtNum(u.balance ?? 0)}</td>
                 <td style="color:var(--muted);font-size:12.5px">${esc(u.created_at)}</td>
                 <td>
                   <button class="btn-outline btn-sm" data-action="edit-user" data-id="${esc(u.id)}">编辑</button>
+                  <button class="btn-outline btn-sm" data-action="adjust-balance" data-id="${esc(u.id)}">调账</button>
                   <button class="btn-danger btn-sm" data-action="toggle-user" data-id="${esc(u.id)}" data-active="${!u.is_active}">${u.is_active ? '禁用' : '启用'}</button>
                 </td>
               </tr>

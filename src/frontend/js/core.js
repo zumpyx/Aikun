@@ -4,6 +4,8 @@ const state = {
   user: null,
   view: null,
   apiKeys: [],
+  users: [],
+  prices: [],
   version: null,
 };
 
@@ -11,6 +13,12 @@ const state = {
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 // 千分位数字:1234567 → 1,234,567
 const fmtNum = n => Number(n ?? 0).toLocaleString('en-US');
+// 金额:保留 6 位小数并去掉末尾的 0(每请求费用通常极小)
+const fmtCost = n => {
+  const v = Number(n ?? 0);
+  if (!v) return '0';
+  return v.toFixed(6).replace(/\.?0+$/, '');
+};
 // Truncate a string to at most `max` UTF-8 bytes without cutting a
 // multi-byte character in half (sidebar nickname is capped at 8 bytes).
 const truncBytes = (s, max) => {
@@ -94,6 +102,7 @@ const icons = {
   logs: I('<path d="M9 6h12M9 12h12M9 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01" stroke-width="2.6"/>'),
   docs: I('<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4a2 2 0 0 0-2-2H6.5A2.5 2.5 0 0 0 4 4.5v15z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/>'),
   pulse: I('<path d="M2.5 12h4l2.5-6.5 4.5 13L16 12h5.5"/>'),
+  billing: I('<circle cx="12" cy="12" r="9"/><path d="M12 7v10M15.5 9.5c-.7-1-2-1.5-3.5-1.5-1.9 0-3.5 1-3.5 2.5s1.3 2.2 3.5 2.5c2.2.3 3.5 1 3.5 2.5s-1.6 2.5-3.5 2.5c-1.5 0-2.8-.5-3.5-1.5"/>'),
 };
 
 // ============ Router ============
@@ -164,6 +173,7 @@ function renderApp(container) {
     { id: 'dashboard', label: '总览', icon: icons.dashboard, admin: true },
     { id: 'providers', label: '渠道', icon: icons.providers, admin: true },
     { id: 'users', label: '用户', icon: icons.users, admin: true },
+    { id: 'billing', label: '计费', icon: icons.billing, admin: true },
     { id: 'apikeys', label: '密钥', icon: icons.key, admin: false },
     { id: 'models', label: '模型', icon: icons.models, admin: false },
     { id: 'chat', label: '测试', icon: icons.chat, admin: false },
@@ -215,6 +225,7 @@ function renderView(container) {
   if (view === 'dashboard') renderDashboard(container);
   else if (view === 'providers') renderProviders(container);
   else if (view === 'users') renderUsers(container);
+  else if (view === 'billing') renderBilling(container);
   else if (view === 'apikeys') renderApiKeys(container);
   else if (view === 'models') renderModels(container);
   else if (view === 'chat') renderChat(container);
@@ -236,6 +247,9 @@ const listActions = {
   'delete-provider':    (id) => deleteProvider(id),
   'edit-user':          (id) => showUserModal(id),
   'toggle-user':        (id, btn) => toggleUser(id, btn.dataset.active === 'true'),
+  'adjust-balance':     (id) => showAdjustBalanceModal(id),
+  'edit-price':         (id) => showPriceModal(id),
+  'delete-price':       (id) => deletePrice(id),
   'edit-api-key':       (id) => showApiKeyModal(id),
   'toggle-api-key':     (id, btn) => toggleApiKey(id, btn.dataset.active === 'true'),
   'delete-api-key':     (id) => deleteApiKey(id),

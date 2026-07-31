@@ -15,6 +15,7 @@ pub struct RequestLog {
     pub status_code: i32,
     pub success: bool,
     pub error_message: Option<String>,
+    pub cost: f64,
     pub created_at: String,
 }
 
@@ -33,6 +34,7 @@ pub struct RequestLogResponse {
     pub status_code: i32,
     pub success: bool,
     pub error_message: Option<String>,
+    pub cost: f64,
     pub created_at: String,
 }
 
@@ -52,6 +54,7 @@ impl From<RequestLog> for RequestLogResponse {
             status_code: l.status_code,
             success: l.success,
             error_message: l.error_message,
+            cost: l.cost,
             created_at: l.created_at,
         }
     }
