@@ -55,8 +55,14 @@ pub async fn check_provider_health(
             if status.is_success() {
                 info!("Health check OK: {} -> {} ({}ms)", log_url, status, elapsed as i64);
                 ("healthy".to_string(), elapsed)
-            } else if status.is_server_error() {
-                info!("Health check server error: {} -> {} ({}ms)", log_url, status, elapsed as i64);
+            } else if status.is_server_error()
+                || status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                // 401/403 是凭证失效,与"响应慢"的 degraded 是两回事:与请求
+                // 路径(record_failure 对 401/403 立即禁用)口径对齐,ping
+                // 直接判不健康,提前拦下而不是等真实用户请求踩雷。
+                info!("Health check unhealthy: {} -> {} ({}ms)", log_url, status, elapsed as i64);
                 ("unhealthy".to_string(), elapsed)
             } else {
                 info!("Health check degraded: {} -> {} ({}ms)", log_url, status, elapsed as i64);

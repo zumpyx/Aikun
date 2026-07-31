@@ -122,19 +122,48 @@ pub async fn proxy_completion(
     let is_stream = body["stream"].as_bool().unwrap_or(false);
     let max_attempts = state.config.max_retries.max(1);
 
+    // 单次尝试的超时取全局与渠道级 timeout_secs 的较大者:渠道允许配到
+    // 600s,整体 deadline 若只按全局值算会把它静默截断。查询失败回退全局值。
+    let max_channel_timeout = {
+        let pool = state.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            pool.read().lock().ok().and_then(|conn| {
+                conn.query_row(
+                    "SELECT MAX(timeout_secs) FROM providers WHERE is_active = 1",
+                    [],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .ok()
+                .flatten()
+            })
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+    };
+    let per_attempt_secs = state
+        .config
+        .request_timeout_secs
+        .max(max_channel_timeout.max(0) as u64);
+
     // 重试循环外包整体超时：避免 max_attempts × 单渠道超时让一次请求挂数分钟，
-    // 超时按 504 返回并写失败日志。下限 300s;若配置的单次超时 × 尝试次数
-    // 超过下限则随之放大,保证 REQUEST_TIMEOUT_SECS 配置实际生效。
+    // 超时按 504 返回并写失败日志。下限 300s;若单次超时 × 尝试次数
+    // 超过下限则随之放大,保证全局与渠道级超时配置都实际生效。
     let overall_timeout = std::time::Duration::from_secs(300).max(
-        std::time::Duration::from_secs(
-            max_attempts as u64 * state.config.request_timeout_secs + 15,
-        ),
+        std::time::Duration::from_secs(max_attempts as u64 * per_attempt_secs + 15),
     );
+
+    // 与 attempt_loop 共享的已尝试渠道(按选择顺序):整体 deadline 取消
+    // 在途尝试时,对最后在试渠道补记一次失败——被取消的尝试不会走任何
+    // record_failure,不补记的话"假死"渠道在指标里完全隐形。
+    let tried_order = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let req_start = Instant::now();
     match tokio::time::timeout(
         overall_timeout,
         attempt_loop(
             state.clone(), client_protocol, model.clone(), body, is_stream,
-            claims.sub.clone(), auth_ctx.api_key_id.clone(),
+            claims.sub.clone(), auth_ctx.api_key_id.clone(), tried_order.clone(),
         ),
     )
     .await
@@ -145,8 +174,16 @@ pub async fn proxy_completion(
                 "Overall retry deadline ({}s) exceeded: model={} attempts={}",
                 overall_timeout.as_secs(), model, max_attempts
             );
+            let last_provider = tried_order.lock().ok().and_then(|t| t.last().cloned());
+            if let Some(pid) = last_provider.clone() {
+                spawn_record_failure(
+                    state.pool.clone(), pid,
+                    req_start.elapsed().as_millis() as f64, 0,
+                    state.config.auto_disable_threshold, true,
+                );
+            }
             spawn_request_log(
-                &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
+                &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), last_provider,
                 model.clone(), client_protocol, 0, 0, 0, 0, 504, false,
                 Some(format!("overall timeout after {}s", overall_timeout.as_secs())),
             );
@@ -235,11 +272,19 @@ async fn attempt_loop(
     is_stream: bool,
     user_id: String,
     api_key_id: Option<String>,
+    tried_order: Arc<std::sync::Mutex<Vec<String>>>,
 ) -> Response {
     let max_attempts = state.config.max_retries.max(1);
     let threshold = state.config.auto_disable_threshold;
 
     let mut tried: HashSet<String> = HashSet::new();
+    // 每个渠道在本请求内的尝试次数:受渠道级 max_retries(重试次数,0 = 不重试)
+    // 约束——同一渠道最多尝试 max_retries + 1 次,达上限后本请求内不再选它。
+    let mut per_provider_attempts: HashMap<String, u32> = HashMap::new();
+    // 本请求已对哪些渠道累计过 consecutive_failure:selector 在候选耗尽时
+    // 会重置排除集,同一渠道可能被反复选回;重试造成的重复失败不重复累加,
+    // 防止失败计数被重试放大(见 record_failure 的 count_consecutive)。
+    let mut failure_counted: HashSet<String> = HashSet::new();
     let mut last_error: Option<(Value, u16)> = None;
 
     for _ in 0..max_attempts {
@@ -248,6 +293,20 @@ async fn attempt_loop(
             None => break,
         };
         tried.insert(provider.id.clone());
+        if let Ok(mut t) = tried_order.lock() {
+            t.push(provider.id.clone());
+        }
+
+        // 渠道级重试上限:该渠道已尝试 max_retries + 1 次后跳过,换下一个。
+        let attempts = per_provider_attempts.entry(provider.id.clone()).or_insert(0);
+        *attempts += 1;
+        if *attempts > provider.max_retries.max(0) as u32 + 1 {
+            debug!(
+                "Provider {} reached its per-channel retry limit ({}) — skipping",
+                provider.name, provider.max_retries
+            );
+            continue;
+        }
 
         let provider_protocol = crate::models::channel_protocol(&provider);
         debug!(
@@ -269,7 +328,7 @@ async fn attempt_loop(
                         "Transport error from provider {}: status={} — failing over",
                         provider.name, status
                     );
-                    spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold);
+                    spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold, failure_counted.insert(provider.id.clone()));
                     spawn_request_log(
                         &state.pool, user_id.clone(), api_key_id.clone(),
                         Some(provider.id.clone()), model.clone(), client_protocol,
@@ -324,7 +383,7 @@ async fn attempt_loop(
                             "Upstream 200 from provider {} but body unusable: {} — failing over",
                             provider.name, detail
                         );
-                        spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold);
+                        spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold, failure_counted.insert(provider.id.clone()));
                         spawn_request_log(
                             &state.pool, user_id.clone(), api_key_id.clone(),
                             Some(provider.id.clone()), model.clone(), client_protocol,
@@ -363,7 +422,7 @@ async fn attempt_loop(
                     "Upstream 200 from provider {} but not an SSE stream: {} — failing over",
                     provider.name, detail
                 );
-                spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold);
+                spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold, failure_counted.insert(provider.id.clone()));
                 spawn_request_log(
                     &state.pool, user_id.clone(), api_key_id.clone(),
                     Some(provider.id.clone()), model.clone(), client_protocol,
@@ -400,7 +459,7 @@ async fn attempt_loop(
             "Upstream error: model={} provider={} status={} msg={}",
             model, provider.name, status, msg
         );
-        spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, status, threshold);
+        spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, status, threshold, failure_counted.insert(provider.id.clone()));
         // 401/403 的上游消息可能回显渠道凭证(one-api 系常见);request_logs
         // 对终端用户可见(/api/logs 按 user_id 过滤),日志只存通用文案,
         // 完整消息仅留在服务端 warn 里。
@@ -663,7 +722,7 @@ fn stream_response(
         if let Some(err_msg) = stream_error {
             // The upstream stream was unusable — count it as a provider failure.
             let latency = start.elapsed().as_millis() as f64;
-            spawn_record_failure(pool.clone(), provider_id.clone(), latency, 0, threshold);
+            spawn_record_failure(pool.clone(), provider_id.clone(), latency, 0, threshold, true);
             let (p, c, t) = converter.usage();
             spawn_request_log(
                 &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
@@ -701,7 +760,7 @@ fn stream_response(
         if events == 0 {
             let err_msg = "upstream sent an empty SSE stream".to_string();
             let latency = start.elapsed().as_millis() as f64;
-            spawn_record_failure(pool.clone(), provider_id.clone(), latency, 0, threshold);
+            spawn_record_failure(pool.clone(), provider_id.clone(), latency, 0, threshold, true);
             spawn_request_log(
                 &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
                 model_log.clone(), &client_protocol,
@@ -972,6 +1031,31 @@ fn insert_request_log(
                 0.0
             };
             let tx = conn.transaction()?;
+            // 渠道/API key 可能在长请求(尤其流式)进行中被硬删除:dangling
+            // 引用会让 INSERT 触发 FK 约束、整个记账事务回滚——日志与扣费全丢。
+            // 落库前把已不存在的引用降级为 NULL,只丢失维度归属。
+            let fk_downgrade = |table: &str, id: Option<&str>| -> Option<String> {
+                id.and_then(|v| {
+                    let exists: bool = tx
+                        .query_row(
+                            &format!("SELECT EXISTS(SELECT 1 FROM {} WHERE id = ?1)", table),
+                            params![v],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(true);
+                    if exists {
+                        Some(v.to_string())
+                    } else {
+                        warn!(
+                            "Request log: {} {} was deleted mid-request — storing NULL",
+                            table, v
+                        );
+                        None
+                    }
+                })
+            };
+            let provider_id = fk_downgrade("providers", provider_id);
+            let api_key_id = fk_downgrade("api_keys", api_key_id);
             tx.execute(
                 "INSERT INTO request_logs (id, user_id, api_key_id, provider_id, model, request_type,
                  prompt_tokens, completion_tokens, total_tokens, latency_ms, status_code, success, error_message, cost, created_at)

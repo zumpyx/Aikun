@@ -1036,7 +1036,13 @@ impl OaStreamState {
                     "stop_reason": self.stop_reason.unwrap_or("end_turn"),
                     "stop_sequence": null,
                 },
-                "usage": {"output_tokens": self.usage.1},
+                // OpenAI 上游的 usage 在结尾 chunk 才到达,message_start 时
+                // input_tokens 只能填 0;finalize 时真实值已捕获,回填给
+                // Anthropic 客户端(其容忍 usage 里的额外字段)。
+                "usage": {
+                    "input_tokens": self.usage.0,
+                    "output_tokens": self.usage.1,
+                },
             }),
         ));
         out.push(SseOut::json("message_stop", json!({"type": "message_stop"})));

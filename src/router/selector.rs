@@ -231,39 +231,56 @@ pub fn record_request_result(
 /// Record a failed upstream attempt. Auto-disables the provider when:
 /// - the upstream returned 401/403 (bad credentials — always dead), or
 /// - consecutive failures reach `threshold`.
-/// 429 (rate limited) only updates the error-rate EMA — it does not count as
-/// a consecutive failure and never triggers auto-disable, since the channel
-/// itself may still be healthy.
+///
+/// 健康口径:
+/// - 传输错误(0)、408、429、5xx 视为上游失败,推高 error_rate;
+/// - 其中除 429(上游限流,渠道本身可能健康)外累计 consecutive_failures;
+/// - 其余 4xx(400/404/422)是客户端请求的错,与渠道健康无关——只更新
+///   延迟、按成功方向衰减 error_rate,不计 consecutive_failures,避免
+///   恶意/乱配客户端的坏请求把健康渠道打到自动禁用。
+///
+/// `count_consecutive`:同一请求内因重试反复打到同一渠道时,后续尝试传
+/// false——latency/error_rate 照记,consecutive_failures 不重复累加,
+/// 防止失败计数被重试放大导致误禁用。
 pub fn record_failure(
     pool: &DbPool,
     provider_id: &str,
     latency_ms: f64,
     status: u16,
     threshold: u32,
+    count_consecutive: bool,
 ) {
     let conn = match pool.conn.lock() {
         Ok(c) => c,
         Err(_) => return,
     };
 
-    let counts_as_failure = (status != 429) as i32;
+    let is_upstream_failure = status == 0 || status == 408 || status == 429 || status >= 500;
+    let counts_as_failure =
+        (count_consecutive && is_upstream_failure && status != 429) as i32;
     let _ = conn.execute(
         "UPDATE providers SET
             latency_ms = CASE
                 WHEN latency_ms = 0 THEN ?1
                 ELSE latency_ms * 0.9 + ?1 * 0.1
             END,
-            error_rate = error_rate * 0.95 + 0.05,
-            consecutive_failures = consecutive_failures + ?2
-         WHERE id = ?3",
-        params![latency_ms, counts_as_failure, provider_id],
+            error_rate = CASE
+                WHEN ?2 = 1 THEN error_rate * 0.95 + 0.05
+                ELSE error_rate * 0.95
+            END,
+            consecutive_failures = consecutive_failures + ?3
+         WHERE id = ?4",
+        params![
+            latency_ms,
+            is_upstream_failure as i32,
+            counts_as_failure,
+            provider_id
+        ],
     );
 
     let reason = if status == 401 || status == 403 {
         Some(format!("上游返回 {} 认证失败,自动禁用", status))
-    } else if status == 429 {
-        None
-    } else {
+    } else if counts_as_failure == 1 {
         let failures: i32 = conn
             .query_row(
                 "SELECT consecutive_failures FROM providers WHERE id = ?1",
@@ -276,6 +293,8 @@ pub fn record_failure(
         } else {
             None
         }
+    } else {
+        None
     };
 
     if let Some(reason) = reason {
@@ -315,9 +334,10 @@ pub fn spawn_record_failure(
     latency_ms: f64,
     status: u16,
     threshold: u32,
+    count_consecutive: bool,
 ) {
     tokio::task::spawn_blocking(move || {
-        record_failure(&pool, &provider_id, latency_ms, status, threshold);
+        record_failure(&pool, &provider_id, latency_ms, status, threshold, count_consecutive);
     });
 }
 
@@ -420,5 +440,107 @@ mod tests {
         p.weight = f64::NAN;
         let picked = weighted_pick(&[&p]);
         assert!(picked.is_some());
+    }
+
+    // ---- record_failure 的健康口径 ----
+
+    fn test_pool() -> crate::db::DbPool {
+        let config = crate::config::AppConfig {
+            database_url: ":memory:".into(),
+            ..Default::default()
+        };
+        let pool = crate::db::DbPool::new(&config).unwrap();
+        // schema 由 create_connection 建好,这里只造一个最小可用渠道行
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO providers (id, name, provider_type, openai_base_url, api_key, models)
+                 VALUES ('p', 'p', 'openai', 'http://x', 'k', '[]')",
+                [],
+            )
+            .unwrap();
+        pool
+    }
+
+    fn provider_state(pool: &crate::db::DbPool) -> (f64, i32, bool, String) {
+        pool.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT error_rate, consecutive_failures, is_active, disabled_reason
+                 FROM providers WHERE id = 'p'",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, f64>(0)?,
+                        r.get::<_, i32>(1)?,
+                        r.get::<_, i32>(2)? == 1,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn client_4xx_does_not_hurt_channel_health() {
+        let pool = test_pool();
+        // 先制造一次真实上游失败,让 error_rate 非零
+        record_failure(&pool, "p", 100.0, 500, 5, true);
+        let (er_before, cf_before, _, _) = provider_state(&pool);
+        assert_eq!(cf_before, 1);
+        // 客户端的错(400/404/422):不计 consecutive_failures,error_rate 只衰减
+        for status in [400u16, 404, 422] {
+            record_failure(&pool, "p", 100.0, status, 5, true);
+        }
+        let (er_after, cf_after, active, _) = provider_state(&pool);
+        assert_eq!(cf_after, 1);
+        assert!(er_after < er_before);
+        assert!(active);
+    }
+
+    #[test]
+    fn server_5xx_counts_and_threshold_disables() {
+        let pool = test_pool();
+        record_failure(&pool, "p", 100.0, 500, 2, true);
+        record_failure(&pool, "p", 100.0, 502, 2, true);
+        let (_, cf, active, reason) = provider_state(&pool);
+        assert_eq!(cf, 2);
+        assert!(!active);
+        assert!(reason.contains("连续失败"));
+    }
+
+    #[test]
+    fn repeated_attempt_in_same_request_not_double_counted() {
+        let pool = test_pool();
+        record_failure(&pool, "p", 100.0, 500, 5, true);
+        // 同一请求内重试又打到同一渠道:指标照记,consecutive_failures 不加
+        record_failure(&pool, "p", 100.0, 500, 5, false);
+        let (er, cf, active, _) = provider_state(&pool);
+        assert_eq!(cf, 1);
+        assert!(er > 0.05); // error_rate 两次都推了
+        assert!(active);
+    }
+
+    #[test]
+    fn status_429_never_counts_nor_disables() {
+        let pool = test_pool();
+        for _ in 0..6 {
+            record_failure(&pool, "p", 100.0, 429, 5, true);
+        }
+        let (er, cf, active, _) = provider_state(&pool);
+        assert_eq!(cf, 0);
+        assert!(er > 0.0); // 429 仍推 error_rate
+        assert!(active);
+    }
+
+    #[test]
+    fn status_401_disables_immediately() {
+        let pool = test_pool();
+        record_failure(&pool, "p", 100.0, 401, 5, true);
+        let (_, _, active, reason) = provider_state(&pool);
+        assert!(!active);
+        assert!(reason.contains("认证失败"));
     }
 }

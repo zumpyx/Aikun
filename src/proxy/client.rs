@@ -207,7 +207,36 @@ pub async fn send_request(
         .json(request_body);
     let req = apply_auth(req, provider, protocol);
 
-    match req.send().await {
+    // 流式响应总时长任意,client 不带整体超时(中段 stall 由流读取侧的
+    // idle 超时约束);但首字节必须有界:上游 accept 后迟迟不发响应头时
+    // 按传输失败处理并故障转移,而不是挂到整体重试 deadline 才被取消。
+    let send_result = if stream {
+        let ttfb_secs = non_stream_timeout.clamp(1, 60);
+        match tokio::time::timeout(std::time::Duration::from_secs(ttfb_secs), req.send()).await {
+            Ok(r) => r,
+            Err(_) => {
+                let latency = start.elapsed().as_millis() as f64;
+                warn!(
+                    "Request to {} timed out waiting for response headers ({}s)",
+                    provider.name, ttfb_secs
+                );
+                return Err((
+                    json!({
+                        "error": {
+                            "message": "Upstream request failed",
+                            "type": "upstream_error"
+                        }
+                    }),
+                    502,
+                    latency,
+                ));
+            }
+        }
+    } else {
+        req.send().await
+    };
+
+    match send_result {
         Ok(resp) => {
             let latency = start.elapsed().as_millis() as f64;
             Ok((resp, latency))
