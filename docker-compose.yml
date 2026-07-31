@@ -23,6 +23,11 @@ services:
     environment:
       # compose 插值也会读取同目录 .env;:? 表示未设置时直接报错拒绝启动
       AIKUN_JWT_SECRET: ${AIKUN_JWT_SECRET:?请在 .env 中设置 AIKUN_JWT_SECRET}
+      # 容器内网络/存储拓扑固定,不能沿用 .env 里的本地开发值
+      # (environment 优先级高于 env_file,这里强制覆盖):
+      # 必须监听 0.0.0.0 才能接受宿主机端口转发;库文件必须落在 /data 卷中。
+      AIKUN_HOST: 0.0.0.0:3000
+      AIKUN_DATABASE_URL: sqlite:///data/aikun.db?mode=rwc
       # 其余配置项见 env.example(全部 AIKUN_ 前缀),写进 .env 即生效,
       # 也可在这里直接取消注释覆盖:
       # AIKUN_LOG_RETENTION_DAYS: "30"

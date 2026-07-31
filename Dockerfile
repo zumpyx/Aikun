@@ -27,6 +27,9 @@ RUN adduser -D -u 10001 aikun \
 COPY --from=builder --chown=aikun:aikun /out/aikun /usr/local/bin/aikun
 
 USER aikun
+# 工作目录设为 /data:即使外部传入相对路径的 AIKUN_DATABASE_URL,
+# 库文件也会落在可写的 /data 卷中,而不是容器根目录(无写权限)。
+WORKDIR /data
 # 容器内必须监听 0.0.0.0 才能接受宿主机转发;库文件落在 /data 卷中持久化。
 ENV AIKUN_HOST=0.0.0.0:3000 \
     AIKUN_DATABASE_URL=sqlite:///data/aikun.db?mode=rwc
