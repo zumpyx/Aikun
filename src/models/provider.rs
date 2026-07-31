@@ -12,6 +12,11 @@ pub struct Provider {
     pub anthropic_base_url: String,
     #[serde(skip_serializing)]
     pub api_key: String,
+    /// 出库解密失败的标记(enc:v1: 密文用当前密钥解不开,多半是
+    /// AIKUN_ENCRYPTION_KEY/AIKUN_JWT_SECRET 被换)。仅内存使用:不进库;
+    /// attempt_loop 据此跳过该渠道,避免空凭证打到上游吃 401。
+    #[serde(default, skip_serializing)]
+    pub key_decrypt_failed: bool,
     pub models: String,  // JSON array
     pub priority: i32,
     pub weight: f64,
@@ -141,6 +146,8 @@ pub fn row_to_provider(row: &rusqlite::Row) -> rusqlite::Result<Provider> {
         openai_base_url: row.get(3)?,
         anthropic_base_url: row.get(4)?,
         api_key: row.get(5)?,
+        // 出库时尚未解密,标记在 selector 的解密步骤里设置。
+        key_decrypt_failed: false,
         models: row.get(6)?,
         priority: row.get(7)?,
         weight: row.get(8)?,
@@ -281,6 +288,7 @@ mod tests {
             openai_base_url: "http://x".into(),
             anthropic_base_url: String::new(),
             api_key: "k".into(),
+            key_decrypt_failed: false,
             models: "[]".into(),
             priority: 0,
             weight: 1.0,

@@ -597,3 +597,109 @@ async fn admin_adjust_balance_records_transaction() {
         .unwrap();
     assert_eq!(resp.status(), 404);
 }
+
+/// 3.4:admin 跨用户管理 API key(list ?user_id= / PATCH / DELETE),
+/// 普通用户操作他人 key 一律 404。
+#[tokio::test]
+async fn admin_manages_other_users_api_keys() {
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db()); // u-e2e(admin) + k-e2e
+    // 普通用户 bob 及其 key
+    app.db()
+        .execute(
+            "INSERT INTO users (id, username, password_hash, role) VALUES ('u-bob', 'bob', 'h', 'user')",
+            [],
+        )
+        .unwrap();
+    app.db()
+        .execute(
+            "INSERT INTO api_keys (id, user_id, key, key_suffix, name) VALUES ('k-bob', 'u-bob', ?1, 'wxyz', 'bob-key')",
+            [common::sha256_hex("sk-bob")],
+        )
+        .unwrap();
+
+    let admin = common::admin_jwt();
+    let bob = common::sign_jwt("u-bob", "bob", "user");
+
+    // admin 带 ?user_id= 列出 bob 的 key;返回只有掩码,无明文。
+    let resp = app
+        .client()
+        .get(format!("{}/api/api-keys?user_id=u-bob", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let keys: serde_json::Value = resp.json().await.unwrap();
+    let arr = keys.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], "k-bob");
+    assert_eq!(arr[0]["key"], "sk-****wxyz");
+
+    // admin 不带 user_id 仍只看自己的 key。
+    let resp = app
+        .client()
+        .get(format!("{}/api/api-keys", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    let keys: serde_json::Value = resp.json().await.unwrap();
+    let arr = keys.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], "k-e2e");
+
+    // admin 禁用 bob 的 key。
+    let resp = app
+        .client()
+        .patch(format!("{}/api/api-keys/k-bob", app.base))
+        .bearer_auth(&admin)
+        .json(&serde_json::json!({"is_active": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let active: i64 = app
+        .db()
+        .query_row("SELECT is_active FROM api_keys WHERE id = 'k-bob'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(active, 0);
+
+    // bob 对 admin 的 key 无权操作:404(不暴露存在性)。
+    let resp = app
+        .client()
+        .patch(format!("{}/api/api-keys/k-e2e", app.base))
+        .bearer_auth(&bob)
+        .json(&serde_json::json!({"is_active": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let resp = app
+        .client()
+        .delete(format!("{}/api/api-keys/k-e2e", app.base))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    // admin 删除 bob 的 key。
+    let resp = app
+        .client()
+        .delete(format!("{}/api/api-keys/k-bob", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let n: i64 = app
+        .db()
+        .query_row("SELECT COUNT(*) FROM api_keys WHERE id = 'k-bob'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(n, 0);
+}

@@ -317,8 +317,9 @@ pub fn seed_provider(db: &rusqlite::Connection, p: &ProviderSeed) {
     .unwrap();
 }
 
-/// 用测试密钥直接签发 admin JWT(u-e2e 角色为 admin、token_version=0)。
-pub fn admin_jwt() -> String {
+/// 用测试密钥签发任意身份的 JWT(token_version=0;用户需在 users 表中
+/// 存在且 is_active=1,否则 authenticate_jwt 会拒绝)。
+pub fn sign_jwt(sub: &str, username: &str, role: &str) -> String {
     #[derive(serde::Serialize)]
     struct TestClaims {
         sub: String,
@@ -336,9 +337,9 @@ pub fn admin_jwt() -> String {
     jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
         &TestClaims {
-            sub: "u-e2e".to_string(),
-            username: "e2e".to_string(),
-            role: "admin".to_string(),
+            sub: sub.to_string(),
+            username: username.to_string(),
+            role: role.to_string(),
             exp: now + 3600,
             iat: now,
             token_version: 0,
@@ -346,6 +347,11 @@ pub fn admin_jwt() -> String {
         &jsonwebtoken::EncodingKey::from_secret(b"e2e-test-secret-not-for-production"),
     )
     .unwrap()
+}
+
+/// 用测试密钥直接签发 admin JWT(u-e2e 角色为 admin、token_version=0)。
+pub fn admin_jwt() -> String {
+    sign_jwt("u-e2e", "e2e", "admin")
 }
 
 /// 记账/禁用都是异步 fire-and-forget:断言前轮询等待条件成立。

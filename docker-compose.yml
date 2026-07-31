@@ -16,10 +16,15 @@ services:
     ports:
       # 宿主机端口:容器端口;宿主机端口被占用时改左边
       - "3001:3000"
+    # 同目录 .env 中的 AIKUN_* 变量注入容器;与下方 environment 共存,
+    # environment 里的同名项优先级更高。
+    env_file:
+      - .env
     environment:
-      # compose 自动读取同目录 .env;:? 表示未设置时直接报错拒绝启动
+      # compose 插值也会读取同目录 .env;:? 表示未设置时直接报错拒绝启动
       AIKUN_JWT_SECRET: ${AIKUN_JWT_SECRET:?请在 .env 中设置 AIKUN_JWT_SECRET}
-      # 其余配置项见 env.example(全部 AIKUN_ 前缀),按需取消注释:
+      # 其余配置项见 env.example(全部 AIKUN_ 前缀),写进 .env 即生效,
+      # 也可在这里直接取消注释覆盖:
       # AIKUN_LOG_RETENTION_DAYS: "30"
       # AIKUN_REQUEST_TIMEOUT_SECS: "120"
       # AIKUN_CORS_ALLOWED_ORIGINS: https://your-domain.example

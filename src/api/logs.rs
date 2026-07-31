@@ -24,6 +24,8 @@ pub struct LogQuery {
 /// 列表与统计接口共用的筛选条件构建:非管理员强制只看自己,
 /// success 仅接受 0/1(其余 400),model/user_id/since 非空才生效。
 /// 返回 (WHERE 子句, 参数);参数顺序与占位符一致。
+/// 列名带 l. 前缀:调用方一律以 `request_logs l` 为基表(list_logs 还有
+/// LEFT JOIN,不带前缀会与 users/providers 的同名列歧义)。
 #[allow(clippy::type_complexity)]
 fn build_log_filters(
     is_admin: bool,
@@ -46,30 +48,30 @@ fn build_log_filters(
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if !is_admin {
-        conditions.push("user_id = ?");
+        conditions.push("l.user_id = ?");
         params.push(Box::new(caller_uid.to_string()));
     }
     if let Some(ref model) = query.model {
         if !model.is_empty() {
-            conditions.push("model = ?");
+            conditions.push("l.model = ?");
             params.push(Box::new(model.clone()));
         }
     }
     if let Some(s) = success_filter {
-        conditions.push("success = ?");
+        conditions.push("l.success = ?");
         params.push(Box::new(s));
     }
     if is_admin {
         if let Some(ref uid) = query.user_id {
             if !uid.is_empty() {
-                conditions.push("user_id = ?");
+                conditions.push("l.user_id = ?");
                 params.push(Box::new(uid.clone()));
             }
         }
     }
     if let Some(ref since) = query.since {
         if !since.is_empty() {
-            conditions.push("created_at >= ?");
+            conditions.push("l.created_at >= ?");
             params.push(Box::new(since.clone()));
         }
     }
@@ -106,12 +108,17 @@ pub async fn list_logs(
     params.push(Box::new(limit));
     params.push(Box::new(offset));
 
+    // LEFT JOIN 带出用户名与渠道名:对应行被删除后两列为 NULL
+    // (前端显示"已删除"),日志本身因 ON DELETE SET NULL 仍保留。
     let sql = format!(
-        "SELECT id, user_id, api_key_id, provider_id, model, request_type,
-                prompt_tokens, completion_tokens, total_tokens, latency_ms,
-                status_code, success, error_message, cost, created_at
-         FROM request_logs
-         {}ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        "SELECT l.id, l.user_id, l.api_key_id, l.provider_id, l.model, l.request_type,
+                l.prompt_tokens, l.completion_tokens, l.total_tokens, l.latency_ms,
+                l.status_code, l.success, l.error_message, l.cost, l.created_at,
+                u.username, p.name
+         FROM request_logs l
+         LEFT JOIN users u ON u.id = l.user_id
+         LEFT JOIN providers p ON p.id = l.provider_id
+         {}ORDER BY l.created_at DESC LIMIT ? OFFSET ?",
         where_clause
     );
 
@@ -129,26 +136,35 @@ pub async fn list_logs(
     };
 
     let logs: Vec<RequestLogResponse> = match stmt.query_map(param_refs.as_slice(), |row| {
-        Ok(RequestLog {
-            id: row.get(0)?,
-            user_id: row.get(1)?,
-            api_key_id: row.get(2)?,
-            provider_id: row.get(3)?,
-            model: row.get(4)?,
-            request_type: row.get(5)?,
-            prompt_tokens: row.get(6)?,
-            completion_tokens: row.get(7)?,
-            total_tokens: row.get(8)?,
-            latency_ms: row.get(9)?,
-            status_code: row.get(10)?,
-            success: row.get(11)?,
-            error_message: row.get(12)?,
-            cost: row.get(13)?,
-            created_at: row.get(14)?,
-        })
+        Ok((
+            RequestLog {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                api_key_id: row.get(2)?,
+                provider_id: row.get(3)?,
+                model: row.get(4)?,
+                request_type: row.get(5)?,
+                prompt_tokens: row.get(6)?,
+                completion_tokens: row.get(7)?,
+                total_tokens: row.get(8)?,
+                latency_ms: row.get(9)?,
+                status_code: row.get(10)?,
+                success: row.get(11)?,
+                error_message: row.get(12)?,
+                cost: row.get(13)?,
+                created_at: row.get(14)?,
+            },
+            row.get::<_, Option<String>>(15)?,
+            row.get::<_, Option<String>>(16)?,
+        ))
     }) {
         Ok(rows) => rows.filter_map(|r| match r {
-            Ok(log) => Some(RequestLogResponse::from(log)),
+            Ok((log, username, provider_name)) => {
+                let mut resp = RequestLogResponse::from(log);
+                resp.username = username;
+                resp.provider_name = provider_name;
+                Some(resp)
+            }
             Err(e) => {
                 tracing::warn!("Skipping malformed request log row: {}", e);
                 None
@@ -190,7 +206,7 @@ pub async fn log_stats(
         "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0),
                 COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0),
                 COALESCE(SUM(cost), 0)
-         FROM request_logs {}",
+         FROM request_logs l {}",
         where_clause
     );
 
@@ -349,4 +365,49 @@ pub async fn usage_stats(
         "daily": daily,
         "top_models": top_models,
     }))).into_response()
+}
+
+/// 管理员仪表盘全局计数:全系统 api_keys / users / providers 总数与
+/// 今日请求数(按 created_at 日期前缀对齐当天,与 usage_stats 同口径)。
+pub async fn admin_stats(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let conn = match state.pool.read().lock() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))).into_response(),
+    };
+
+    let result = conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM api_keys),
+                (SELECT COUNT(*) FROM users),
+                (SELECT COUNT(*) FROM providers),
+                (SELECT COUNT(*) FROM request_logs WHERE substr(created_at, 1, 10) = date('now'))",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        },
+    );
+
+    match result {
+        Ok((api_keys, users, providers, requests_today)) => {
+            (StatusCode::OK, Json(json!({
+                "api_keys": api_keys,
+                "users": users,
+                "providers": providers,
+                "requests_today": requests_today,
+            }))).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to query admin stats: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "error": "query_failed",
+                "message": "Internal server error"
+            }))).into_response()
+        }
+    }
 }

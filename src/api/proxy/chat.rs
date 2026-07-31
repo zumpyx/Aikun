@@ -308,6 +308,21 @@ async fn attempt_loop(
             continue;
         }
 
+        // 密钥解密失败(AIKUN_ENCRYPTION_KEY/AIKUN_JWT_SECRET 被换)的渠道
+        // 直接跳过,记一次普通失败:绝不能把空凭证发给上游——上游 401 会
+        // 触发渠道立即禁用,换掉 JWT secret 就会连锁打挂全部渠道。
+        if provider.key_decrypt_failed {
+            tracing::error!(
+                "Provider '{}' 密钥解密失败,跳过该渠道——检查 AIKUN_ENCRYPTION_KEY/AIKUN_JWT_SECRET 是否变更",
+                provider.name
+            );
+            spawn_record_failure(
+                state.pool.clone(), provider.id.clone(), 0.0, 0, threshold,
+                failure_counted.insert(provider.id.clone()),
+            );
+            continue;
+        }
+
         let provider_protocol = crate::models::channel_protocol(&provider);
         debug!(
             "Routing '{}' ({} client) → provider '{}' ({} upstream, health={} latency={}ms)",
@@ -1151,6 +1166,7 @@ mod tests {
             openai_base_url: "http://x".into(),
             anthropic_base_url: "http://x".into(),
             api_key: "k".into(),
+            key_decrypt_failed: false,
             models: "[]".into(),
             priority: 0,
             weight: 1.0,

@@ -98,6 +98,30 @@ async fn main() {
     let pool = Arc::new(DbPool::new(&config).expect("Failed to initialize database"));
     info!("Database initialized");
 
+    // 运维逃生口:设置 AIKUN_RESET_ADMIN_PASSWORD 后,启动即重置 admin 密码
+    // 并 token_version + 1(旧会话全部失效)。密码本身绝不打印到日志。
+    if let Ok(new_password) = std::env::var("AIKUN_RESET_ADMIN_PASSWORD") {
+        if new_password.is_empty() {
+            tracing::warn!("AIKUN_RESET_ADMIN_PASSWORD 为空,忽略密码重置");
+        } else {
+            match crate::auth::hash_password(&new_password) {
+                Ok(hash) => match pool.conn.lock() {
+                    Ok(conn) => match crate::db::reset_admin_password(&conn, &hash) {
+                        Ok(true) => info!(
+                            "管理员密码已通过环境变量重置,请尽快修改并移除该变量"
+                        ),
+                        Ok(false) => tracing::warn!(
+                            "AIKUN_RESET_ADMIN_PASSWORD 已设置,但库中不存在 admin 用户"
+                        ),
+                        Err(e) => tracing::error!("管理员密码重置失败: {}", e),
+                    },
+                    Err(_) => tracing::error!("管理员密码重置失败:数据库锁不可用"),
+                },
+                Err(e) => tracing::error!("管理员密码重置失败(哈希计算): {}", e),
+            }
+        }
+    }
+
     let state = AppState {
         pool: pool.clone(),
         config: config.clone(),
@@ -154,6 +178,7 @@ async fn main() {
         .route("/api/admin/users/{id}/balance", post(api::admin::billing::adjust_balance))
         .route("/api/admin/billing/transactions", get(api::admin::billing::list_transactions))
         .route("/api/admin/usage-stats", get(api::logs::usage_stats))
+        .route("/api/admin/stats", get(api::logs::admin_stats))
         .layer(middleware::from_fn(require_admin))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 

@@ -5,6 +5,8 @@ use std::net::SocketAddr;
 pub struct AppConfig {
     pub host: SocketAddr,
     pub jwt_secret: String,
+    /// 渠道 key 静态加密密钥;缺省时派生自 jwt_secret(见 crypto.rs)。
+    pub encryption_key: Option<String>,
     pub jwt_expires_in: i64,          // seconds
     pub database_url: String,
     pub health_check_interval: u64,   // seconds
@@ -23,6 +25,7 @@ impl Default for AppConfig {
         Self {
             host: SocketAddr::from(([127, 0, 0, 1], 3000)),
             jwt_secret: "aikun-secret-change-me".to_string(),
+            encryption_key: None,
             jwt_expires_in: 86400 * 7, // 7 days
             database_url: "sqlite://aikun.db?mode=rwc".to_string(),
             health_check_interval: 30,
@@ -41,6 +44,7 @@ impl Default for AppConfig {
 const SETTINGS: &[(&str, &str, &str)] = &[
     ("host", "AIKUN_HOST", "监听地址(IP:端口)"),
     ("jwt-secret", "AIKUN_JWT_SECRET", "JWT 签名密钥"),
+    ("encryption-key", "AIKUN_ENCRYPTION_KEY", "渠道 key 静态加密密钥(缺省派生自 JWT secret)"),
     ("jwt-expires-in", "AIKUN_JWT_EXPIRES_IN", "JWT 有效期(秒,1..=31536000)"),
     ("database-url", "AIKUN_DATABASE_URL", "数据库 URL(如 sqlite://aikun.db?mode=rwc)"),
     ("health-check-interval", "AIKUN_HEALTH_CHECK_INTERVAL", "健康检查间隔(秒,≥5)"),
@@ -71,6 +75,9 @@ impl AppConfig {
         if let Some(secret) = get("jwt-secret", "AIKUN_JWT_SECRET") {
             config.jwt_secret = secret;
         }
+        // 空串视为未设置,回退到 JWT secret 派生(见 crypto.rs)。
+        config.encryption_key =
+            get("encryption-key", "AIKUN_ENCRYPTION_KEY").filter(|s| !s.is_empty());
         if let Some(val) = get("jwt-expires-in", "AIKUN_JWT_EXPIRES_IN") {
             // 要求 1..=1 年:非正值会签发已过期/永不过期的令牌,
             // 过大值则可能在做加法时溢出。

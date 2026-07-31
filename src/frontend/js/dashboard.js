@@ -9,17 +9,19 @@ async function renderDashboard(container) {
     <div class="stats-grid" id="stats-grid"><div class="stat-card"><div class="spinner"></div><div class="label" style="margin-left:10px">加载中...</div></div></div>`;
 
   try {
-    const [providers, users, apiKeys, usage] = await Promise.all([
+    const isAdmin = state.user && state.user.role === 'admin';
+    const [providers, users, keys, usage] = await Promise.all([
       api('GET', '/api/admin/providers'),
       api('GET', '/api/admin/users'),
-      api('GET', '/api/api-keys'),
+      // admin 用全系统密钥总数,普通用户用自己的密钥列表
+      isAdmin ? api('GET', '/api/admin/stats') : api('GET', '/api/api-keys'),
       api('GET', '/api/admin/usage-stats'),
     ]);
     if (seq !== dashboardSeq) return; // 已有更新的渲染在进行，丢弃旧响应
 
     const pData = providers.ok ? providers.data : [];
     const uData = users.ok ? users.data : [];
-    const kData = apiKeys.ok ? apiKeys.data : [];
+    const kCount = isAdmin ? (keys.ok ? keys.data.api_keys ?? 0 : 0) : (keys.ok ? keys.data.length : 0);
     const usageData = usage.ok ? usage.data : null;
 
     const healthy = pData.filter(p => p.is_active && p.health_status === 'healthy').length;
@@ -35,15 +37,15 @@ async function renderDashboard(container) {
       stat(icons.pulse, '#10b981', 'rgba(16,185,129,.1)', fmtNum(healthy), '健康渠道') +
       stat(icons.models, '#8b5cf6', 'rgba(139,92,246,.1)', fmtNum(totalModels), '可用模型') +
       stat(icons.users, '#0ea5e9', 'rgba(14,165,233,.1)', fmtNum(uData.length), '用户') +
-      stat(icons.key, '#f59e0b', 'rgba(245,158,11,.1)', fmtNum(kData.length), 'API 密钥');
+      stat(icons.key, '#f59e0b', 'rgba(245,158,11,.1)', fmtNum(kCount), isAdmin ? 'API 密钥' : '我的密钥');
 
     // ---- AI 使用情况:日/周/月调用量 + 趋势图 + 模型分布 ----
     if (usageData) {
       const u = usageData;
       grid.innerHTML +=
-        stat(icons.chat, '#f43f5e', 'rgba(244,63,94,.1)', fmtNum(u.today.requests), `今日调用 · ${fmtNum(u.today.tokens)} tokens`) +
-        stat(icons.chat, '#f97316', 'rgba(249,115,22,.1)', fmtNum(u.week.requests), `近 7 天调用 · ${fmtNum(u.week.tokens)} tokens`) +
-        stat(icons.chat, '#14b8a6', 'rgba(20,184,166,.1)', fmtNum(u.month.requests), `近 30 天调用 · ${fmtNum(u.month.tokens)} tokens`);
+        stat(icons.chat, '#f43f5e', 'rgba(244,63,94,.1)', fmtNum(u.today.requests), `今日调用 (UTC) · ${fmtNum(u.today.tokens)} tokens`) +
+        stat(icons.chat, '#f97316', 'rgba(249,115,22,.1)', fmtNum(u.week.requests), `近 7 天调用 (UTC) · ${fmtNum(u.week.tokens)} tokens`) +
+        stat(icons.chat, '#14b8a6', 'rgba(20,184,166,.1)', fmtNum(u.month.requests), `近 30 天调用 (UTC) · ${fmtNum(u.month.tokens)} tokens`);
 
       container.insertAdjacentHTML('beforeend', `
         <div class="usage-grid">

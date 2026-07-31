@@ -19,6 +19,14 @@ const fmtCost = n => {
   if (!v) return '0';
   return v.toFixed(6).replace(/\.?0+$/, '');
 };
+// 时间显示:兼容 RFC3339 与 'YYYY-MM-DD HH:MM:SS'(后者 Safari 不认,
+// 需把空格换成 'T' 再 parse),解析失败回退原字符串;输出本地化格式。
+const fmtTime = v => {
+  if (!v) return '';
+  const s = String(v);
+  const d = new Date(s.includes('T') ? s : s.replace(' ', 'T'));
+  return Number.isNaN(d.getTime()) ? s : d.toLocaleString();
+};
 // Truncate a string to at most `max` UTF-8 bytes without cutting a
 // multi-byte character in half (sidebar nickname is capped at 8 bytes).
 const truncBytes = (s, max) => {
@@ -263,6 +271,9 @@ const listActions = {
   'edit-user':          (id) => showUserModal(id),
   'toggle-user':        (id, btn) => toggleUser(id, btn.dataset.active === 'true'),
   'adjust-balance':     (id) => showAdjustBalanceModal(id),
+  'user-keys':          (id) => showUserKeysModal(id),
+  'toggle-user-key':    (id, btn) => toggleUserKey(id, btn.dataset.active === 'true', btn.dataset.user),
+  'delete-user-key':    (id, btn) => deleteUserKey(id, btn.dataset.user),
   'edit-price':         (id) => showPriceModal(id),
   'delete-price':       (id) => deletePrice(id),
   'edit-api-key':       (id) => showApiKeyModal(id),

@@ -47,13 +47,13 @@ pub struct DbPool {
     /// 只读连接池,经 `read()` 轮转取用。
     readers: Vec<Mutex<Connection>>,
     rr: std::sync::atomic::AtomicUsize,
-    /// providers.api_key 静态加密,密钥派生自 JWT secret。
+    /// providers.api_key 静态加密,密钥见 KeyCipher::from_config。
     pub cipher: KeyCipher,
 }
 
 impl DbPool {
     pub fn new(config: &AppConfig) -> Result<Self, rusqlite::Error> {
-        let cipher = KeyCipher::from_secret(&config.jwt_secret);
+        let cipher = KeyCipher::from_config(config);
         let conn = create_connection(config)?;
         migrate_encrypt_provider_keys(&conn, &cipher)?;
         // :memory: 数据库每个连接是独立的空库,只读连接没有意义——
@@ -513,6 +513,42 @@ fn migrate_request_logs_fk(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// 重置 admin 账户的密码哈希,并 token_version + 1(旧 JWT 会话全部失效)。
+/// 目标用户:优先用户名 admin;不存在时取最早创建的 role='admin' 用户。
+/// 返回 false 表示库中没有任何 admin 用户(不报错,视为无需处理)。
+/// 供启动期的 AIKUN_RESET_ADMIN_PASSWORD 运维逃生口调用。
+pub fn reset_admin_password(
+    conn: &Connection,
+    password_hash: &str,
+) -> Result<bool, rusqlite::Error> {
+    use rusqlite::OptionalExtension;
+    let target: Option<String> = match conn
+        .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+            row.get(0)
+        })
+        .optional()?
+    {
+        Some(id) => Some(id),
+        None => conn
+            .query_row(
+                "SELECT id FROM users WHERE role = 'admin' ORDER BY created_at LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?,
+    };
+    let Some(id) = target else {
+        return Ok(false);
+    };
+    let n = conn.execute(
+        "UPDATE users SET password_hash = ?1, token_version = token_version + 1,
+                updated_at = datetime('now')
+         WHERE id = ?2",
+        params![password_hash, id],
+    )?;
+    Ok(n > 0)
+}
+
 fn seed_default_admin(conn: &Connection) -> Result<(), rusqlite::Error> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM users WHERE role = 'admin'",
@@ -544,4 +580,93 @@ fn seed_default_admin(conn: &Connection) -> Result<(), rusqlite::Error> {
         tracing::warn!("============================================================");
     }
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// :memory: 库:建表 + 种子 admin 已由 DbPool::new 完成。
+    fn memory_pool() -> DbPool {
+        let config = AppConfig {
+            database_url: "sqlite://:memory:".to_string(),
+            ..Default::default()
+        };
+        DbPool::new(&config).expect("in-memory db")
+    }
+
+    #[test]
+    fn reset_admin_password_changes_hash_and_bumps_token_version() {
+        let pool = memory_pool();
+        let conn = pool.conn.lock().unwrap();
+        let (old_hash, old_version): (String, i64) = conn
+            .query_row(
+                "SELECT password_hash, token_version FROM users WHERE username = 'admin'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert!(reset_admin_password(&conn, "new-hash-1").unwrap());
+        let (hash, version): (String, i64) = conn
+            .query_row(
+                "SELECT password_hash, token_version FROM users WHERE username = 'admin'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(hash, "new-hash-1");
+        assert_ne!(hash, old_hash);
+        assert_eq!(version, old_version + 1);
+
+        // 再次重置:token_version 继续递增(每重置一次旧会话就失效一次)。
+        assert!(reset_admin_password(&conn, "new-hash-2").unwrap());
+        let version: i64 = conn
+            .query_row(
+                "SELECT token_version FROM users WHERE username = 'admin'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, old_version + 2);
+    }
+
+    #[test]
+    fn reset_admin_password_falls_back_to_first_admin_role_user() {
+        let pool = memory_pool();
+        let conn = pool.conn.lock().unwrap();
+        // 用户名不是 admin 的 admin 角色用户也应被命中。
+        conn.execute("UPDATE users SET username = 'root' WHERE username = 'admin'", [])
+            .unwrap();
+
+        assert!(reset_admin_password(&conn, "root-hash").unwrap());
+        let hash: String = conn
+            .query_row(
+                "SELECT password_hash FROM users WHERE username = 'root'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hash, "root-hash");
+    }
+
+    #[test]
+    fn reset_admin_password_without_admin_user_is_noop() {
+        let pool = memory_pool();
+        let conn = pool.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, role) VALUES ('u1', 'bob', 'h', 'user')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM users WHERE role = 'admin'", []).unwrap();
+
+        // 没有任何 admin 用户:返回 false,普通用户不受影响。
+        assert!(!reset_admin_password(&conn, "x").unwrap());
+        let hash: String = conn
+            .query_row("SELECT password_hash FROM users WHERE id = 'u1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(hash, "h");
+    }
 }

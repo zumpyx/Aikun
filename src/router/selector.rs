@@ -159,6 +159,14 @@ fn find_providers_for_model(
         .ok()?
         .filter_map(|r| r.ok())
         .map(|mut p| {
+            // 区分"密钥本就为空"(免密钥本地上游)与"密文解密失败"(加密
+            // 密钥被换):后者打标记,由 attempt_loop 跳过该渠道——空凭证
+            // 打到上游会吃 401,触发立即禁用并连锁打挂全部渠道。
+            if p.api_key.starts_with(crate::crypto::ENC_PREFIX)
+                && cipher.decrypt(&p.api_key).is_none()
+            {
+                p.key_decrypt_failed = true;
+            }
             p.api_key = crate::crypto::decrypt_or_plain(cipher, &p.api_key);
             p
         })
@@ -361,6 +369,7 @@ mod tests {
             openai_base_url: "http://x".into(),
             anthropic_base_url: "http://x".into(),
             api_key: "k".into(),
+            key_decrypt_failed: false,
             models: models.into(),
             priority: 0,
             weight: 1.0,

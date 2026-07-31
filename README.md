@@ -62,6 +62,8 @@ docker run -d --name aikun --restart unless-stopped \
 
 容器内配置通过 `AIKUN_*` 环境变量注入(见下方配置表),SQLite 数据库直接落在 `./data/aikun.db`(bind 挂载,备份即复制该文件),容器默认监听 `0.0.0.0:3000`,宿主机端口改 `docker-compose.yml` 端口映射左侧即可。`--user`/compose 的 `user:` 用于让容器以宿主机用户身份写入 `./data`,uid 非 1000 时请对应修改。本地构建镜像:`docker compose build`。
 
+配置加载口径:**裸机启动自动加载工作目录的 `.env`;Docker 部署经 compose 的 `env_file: .env` 注入容器**(也可直接写在 compose 的 `environment` 里,同名项 `environment` 优先)。
+
 ### 4. 从源码构建(可选)
 
 ```bash
@@ -77,9 +79,13 @@ cargo zigbuild --release --target x86_64-unknown-linux-musl  # 静态交叉编�
 export AIKUN_JWT_SECRET=$(openssl rand -hex 32)
 ```
 
-该密钥同时用于派生渠道上游 key 的静态加密密钥(AES-256-GCM,密文以
-`enc:v1:` 前缀落库)。**部署后请勿更换**:否则已加密的渠道 key 无法解密,
-所有已签发 JWT 也会同时失效。
+该密钥缺省时同时用于派生渠道上游 key 的静态加密密钥(AES-256-GCM,密文以
+`enc:v1:` 前缀落库):回退模式下**部署后请勿更换**,否则已加密的渠道 key
+无法解密,所有已签发 JWT 也会同时失效。设置独立的 `AIKUN_ENCRYPTION_KEY`
+(见配置表)后加密密钥即与之解耦,可自由轮换 JWT secret。
+
+忘记 admin 密码时,设置 `AIKUN_RESET_ADMIN_PASSWORD=<新密码>` 重启即可重置
+(旧会话全部失效,密码不会打印到日志);用完后请立即移除该变量再重启。
 
 ## 配置
 
@@ -89,6 +95,7 @@ export AIKUN_JWT_SECRET=$(openssl rand -hex 32)
 |---|---|---|---|
 | `--host` | `AIKUN_HOST` | `127.0.0.1:3000` | 监听地址 |
 | `--jwt-secret` | `AIKUN_JWT_SECRET` | (公开默认值,**必须修改**) | JWT 签名密钥 |
+| `--encryption-key` | `AIKUN_ENCRYPTION_KEY` | (空,派生自 JWT secret) | 渠道 key 静态加密密钥 |
 | `--jwt-expires-in` | `AIKUN_JWT_EXPIRES_IN` | `604800` | JWT 有效期(秒) |
 | `--database-url` | `AIKUN_DATABASE_URL` | `sqlite://aikun.db?mode=rwc` | 数据库 URL |
 | `--health-check-interval` | `AIKUN_HEALTH_CHECK_INTERVAL` | `30` | 健康检查间隔(秒) |

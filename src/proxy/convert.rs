@@ -449,14 +449,21 @@ fn anthropic_req_to_openai(body: &Value) -> Value {
 
 /// Convert a non-streaming response body from one protocol to another.
 pub fn convert_response(resp: &Value, from: &str, to: &str, model: &str) -> Value {
-    if from == to {
-        return resp.clone();
+    let mut out = if from == to {
+        resp.clone()
+    } else {
+        match (from, to) {
+            (PROTOCOL_OPENAI, PROTOCOL_ANTHROPIC) => openai_resp_to_anthropic(resp),
+            (PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI) => anthropic_resp_to_openai(resp, model),
+            _ => resp.clone(),
+        }
+    };
+    // 统一回写客户端请求的模型名(含直通路径):配置了 model_mapping 时
+    // 上游返回的是映射后的真实模型名,透传会泄漏渠道拓扑;与流式口径一致。
+    if out["model"].is_string() {
+        out["model"] = json!(model);
     }
-    match (from, to) {
-        (PROTOCOL_OPENAI, PROTOCOL_ANTHROPIC) => openai_resp_to_anthropic(resp),
-        (PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI) => anthropic_resp_to_openai(resp, model),
-        _ => resp.clone(),
-    }
+    out
 }
 
 fn anthropic_stop_to_openai(stop_reason: &str) -> &'static str {
@@ -521,7 +528,7 @@ fn anthropic_resp_to_openai(resp: &Value, model: &str) -> Value {
         message.insert("tool_calls".into(), json!(tool_calls));
     }
 
-    let resp_model = resp["model"].as_str().unwrap_or(model);
+    let resp_model = model; // 回写客户端请求的模型名,不透传上游真实模型名
     json!({
         "id": resp["id"].as_str().unwrap_or("chatcmpl-unknown"),
         "object": "chat.completion",
@@ -723,9 +730,11 @@ pub enum StreamConverter {
     /// Same protocol, OpenAI: pass events through, capturing usage.
     /// strip_usage_chunk 为 true 时剥掉仅含 usage 的结尾 chunk
     /// (客户端未请求 include_usage,由网关注入时不应多送一个 chunk)。
-    PassOpenAi { usage: (i32, i32, i32), strip_usage_chunk: bool },
+    /// model 为客户端请求的模型名:转发前回写 chunk 的 model 字段。
+    PassOpenAi { usage: (i32, i32, i32), strip_usage_chunk: bool, model: String },
     /// Same protocol, Anthropic: pass events through, capturing usage.
-    PassAnthropic { usage: (i32, i32, i32) },
+    /// model 用途同上(message_start 事件的 message.model 回写)。
+    PassAnthropic { usage: (i32, i32, i32), model: String },
     /// OpenAI upstream → Anthropic client.
     OpenAiToAnthropic(OaStreamState),
     /// Anthropic upstream → OpenAI client.
@@ -738,9 +747,10 @@ impl StreamConverter {
             (PROTOCOL_OPENAI, PROTOCOL_OPENAI) => StreamConverter::PassOpenAi {
                 usage: (0, 0, 0),
                 strip_usage_chunk: false,
+                model: model.to_string(),
             },
             (PROTOCOL_ANTHROPIC, PROTOCOL_ANTHROPIC) => {
-                StreamConverter::PassAnthropic { usage: (0, 0, 0) }
+                StreamConverter::PassAnthropic { usage: (0, 0, 0), model: model.to_string() }
             }
             (PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI) => {
                 StreamConverter::OpenAiToAnthropic(OaStreamState::new(model))
@@ -751,6 +761,7 @@ impl StreamConverter {
             _ => StreamConverter::PassOpenAi {
                 usage: (0, 0, 0),
                 strip_usage_chunk: false,
+                model: model.to_string(),
             },
         }
     }
@@ -766,9 +777,12 @@ impl StreamConverter {
 
     pub fn push(&mut self, ev: &SseEvent) -> Vec<SseOut> {
         match self {
-            StreamConverter::PassOpenAi { usage, strip_usage_chunk } => {
+            StreamConverter::PassOpenAi { usage, strip_usage_chunk, model } => {
                 let mut forward = true;
-                if let Ok(chunk) = serde_json::from_str::<Value>(&ev.data) {
+                // 解析成功且转发时重序列化(model 字段回写);解析失败
+                // (如 [DONE])原样直通。
+                let mut rewritten: Option<String> = None;
+                if let Ok(mut chunk) = serde_json::from_str::<Value>(&ev.data) {
                     let (p, c, t) = extract_usage_any(&chunk);
                     if t > 0 {
                         *usage = (p, c, t);
@@ -780,23 +794,36 @@ impl StreamConverter {
                     {
                         forward = false;
                     }
+                    // model 统一回写为客户端请求的模型名:映射后的上游真实
+                    // 模型名不透传给终端用户(泄漏渠道拓扑)。
+                    if forward && chunk["model"].is_string() {
+                        chunk["model"] = json!(model.as_str());
+                        rewritten = Some(chunk.to_string());
+                    }
                 }
                 if forward {
                     vec![SseOut {
                         event: ev.event.clone(),
-                        data: ev.data.clone(),
+                        data: rewritten.unwrap_or_else(|| ev.data.clone()),
                     }]
                 } else {
                     vec![]
                 }
             }
-            StreamConverter::PassAnthropic { usage } => {
-                if let Ok(data) = serde_json::from_str::<Value>(&ev.data) {
+            StreamConverter::PassAnthropic { usage, model } => {
+                let mut rewritten: Option<String> = None;
+                if let Ok(mut data) = serde_json::from_str::<Value>(&ev.data) {
                     match data["type"].as_str() {
                         Some("message_start") => {
                             usage.0 = data["message"]["usage"]["input_tokens"]
                                 .as_i64()
                                 .unwrap_or(0) as i32;
+                            // message_start 携带上游真实模型名,同样回写为
+                            // 客户端请求的模型名。
+                            if data["message"].is_object() {
+                                data["message"]["model"] = json!(model.as_str());
+                                rewritten = Some(data.to_string());
+                            }
                         }
                         Some("message_delta") => {
                             usage.1 = data["usage"]["output_tokens"].as_i64().unwrap_or(0) as i32;
@@ -807,7 +834,7 @@ impl StreamConverter {
                 }
                 vec![SseOut {
                     event: ev.event.clone(),
-                    data: ev.data.clone(),
+                    data: rewritten.unwrap_or_else(|| ev.data.clone()),
                 }]
             }
             StreamConverter::OpenAiToAnthropic(state) => state.push(ev),
@@ -827,7 +854,7 @@ impl StreamConverter {
 
     pub fn usage(&self) -> (i32, i32, i32) {
         match self {
-            StreamConverter::PassOpenAi { usage, .. } | StreamConverter::PassAnthropic { usage } => {
+            StreamConverter::PassOpenAi { usage, .. } | StreamConverter::PassAnthropic { usage, .. } => {
                 *usage
             }
             StreamConverter::OpenAiToAnthropic(state) => state.usage,
@@ -1106,9 +1133,8 @@ impl AnStreamState {
                 if let Some(id) = msg["id"].as_str() {
                     self.msg_id = id.to_string();
                 }
-                if let Some(m) = msg["model"].as_str() {
-                    self.model = m.to_string();
-                }
+                // model 不随上游 message_start 更新:保持客户端请求的模型名,
+                // 映射后的上游真实模型名不透传给终端用户。
                 self.usage.0 = msg["usage"]["input_tokens"].as_i64().unwrap_or(0) as i32;
                 self.usage.2 = self.usage.0 + self.usage.1;
                 vec![self.chunk(json!({"role": "assistant", "content": ""}), None, None)]
@@ -1414,6 +1440,33 @@ mod tests {
     }
 
     #[test]
+    fn response_model_rewritten_to_requested_model() {
+        // 配置了 model_mapping 的场景:上游返回映射后的真实模型名,
+        // 各协议分支(含直通)统一回写为客户端请求的模型名。
+        let upstream = json!({
+            "id": "chatcmpl-1",
+            "model": "real-gpt-4-2024",
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+        });
+        // 直通
+        let out = convert_response(&upstream, "openai", "openai", "gpt-4");
+        assert_eq!(out["model"], "gpt-4");
+        // OpenAI → Anthropic
+        let out = convert_response(&upstream, "openai", "anthropic", "gpt-4");
+        assert_eq!(out["model"], "gpt-4");
+        // Anthropic → OpenAI
+        let upstream_an = json!({
+            "id": "msg_1", "model": "claude-real",
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 2}
+        });
+        let out = convert_response(&upstream_an, "anthropic", "openai", "claude-alias");
+        assert_eq!(out["model"], "claude-alias");
+    }
+
+    #[test]
     fn response_openai_to_anthropic_invalid_choices() {
         // choices 为空或缺 message（如上游错误体）时按上游错误处理
         for bad in [
@@ -1535,6 +1588,44 @@ mod tests {
         assert_eq!(c.usage(), (7, 0, 7));
         c.push(&sse_typed("message_delta", r#"{"type":"message_delta","usage":{"output_tokens":4}}"#));
         assert_eq!(c.usage(), (7, 4, 11));
+    }
+
+    #[test]
+    fn stream_pass_openai_rewrites_chunk_model() {
+        // 映射场景:chunk 里的上游真实模型名回写为请求模型名。
+        let mut c = StreamConverter::new("openai", "openai", "gpt-4");
+        let outs = c.push(&sse(r#"{"model":"real-gpt-4-2024","choices":[{"delta":{"content":"x"}}]}"#));
+        assert_eq!(outs.len(), 1);
+        let chunk: Value = serde_json::from_str(&outs[0].data).unwrap();
+        assert_eq!(chunk["model"], "gpt-4");
+        assert_eq!(chunk["choices"][0]["delta"]["content"], "x");
+        // [DONE] 等非 JSON 帧原样直通
+        let outs = c.push(&sse("[DONE]"));
+        assert_eq!(outs[0].data, "[DONE]");
+    }
+
+    #[test]
+    fn stream_pass_anthropic_rewrites_message_model() {
+        let mut c = StreamConverter::new("anthropic", "anthropic", "claude-alias");
+        let outs = c.push(&sse_typed(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-real","usage":{"input_tokens":7}}}"#,
+        ));
+        let data: Value = serde_json::from_str(&outs[0].data).unwrap();
+        assert_eq!(data["message"]["model"], "claude-alias");
+        assert_eq!(c.usage(), (7, 0, 7));
+    }
+
+    #[test]
+    fn stream_anthropic_to_openai_keeps_requested_model() {
+        // 转换路径:上游 message_start 的真实模型名不覆盖请求模型名。
+        let mut c = StreamConverter::new("openai", "anthropic", "claude-alias");
+        let outs = c.push(&sse_typed(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-real","usage":{"input_tokens":9}}}"#,
+        ));
+        let chunk: Value = serde_json::from_str(&outs[0].data).unwrap();
+        assert_eq!(chunk["model"], "claude-alias");
     }
 
     // ---- StreamConverter: OpenAI upstream → Anthropic client ----

@@ -131,8 +131,8 @@ async function loadApiKeys() {
                 <td><span class="badge ${k.is_active && !isExpired(k) ? 'badge-green' : 'badge-red'}">${!k.is_active ? '已禁用' : isExpired(k) ? '已过期' : '活跃'}</span></td>
                 <td style="font-size:12.5px">${(k.models || []).length > 0 ? esc(k.models.join(', ')) : '<span style="color:var(--faint)">全部</span>'}</td>
                 <td style="font-size:12.5px">${fmtLimits(k)}</td>
-                <td style="color:var(--muted);font-size:12.5px">${k.expires_at ? esc(k.expires_at) : '<span style="color:var(--faint)">永不</span>'}</td>
-                <td style="color:var(--muted);font-size:12.5px">${k.last_used_at ? esc(k.last_used_at) : '<span style="color:var(--faint)">未使用</span>'}</td>
+                <td style="color:var(--muted);font-size:12.5px">${k.expires_at ? esc(fmtTime(k.expires_at)) : '<span style="color:var(--faint)">永不</span>'}</td>
+                <td style="color:var(--muted);font-size:12.5px">${k.last_used_at ? esc(fmtTime(k.last_used_at)) : '<span style="color:var(--faint)">未使用</span>'}</td>
                 <td>
                   <button class="btn-outline btn-sm" data-action="edit-api-key" data-id="${esc(k.id)}">编辑</button>
                   <button class="btn-outline btn-sm" data-action="toggle-api-key" data-id="${esc(k.id)}" data-active="${!k.is_active}">${k.is_active ? '禁用' : '启用'}</button>
@@ -149,14 +149,14 @@ async function loadApiKeys() {
 async function toggleApiKey(id, active) {
   const r = await api('PATCH', `/api/api-keys/${id}`, { is_active: active });
   if (r.ok) { toast(active ? '密钥已启用' : '密钥已禁用'); await loadApiKeys(); }
-  else toast('操作失败', 'error');
+  else toast(r.data.message || r.data.error || '操作失败', 'error');
 }
 
 async function deleteApiKey(id) {
   if (!confirm('确定要删除此密钥吗？')) return;
   const r = await api('DELETE', `/api/api-keys/${id}`);
   if (r.ok) { toast('密钥已删除'); await loadApiKeys(); }
-  else toast('删除失败', 'error');
+  else toast(r.data.message || r.data.error || '删除失败', 'error');
 }
 
 

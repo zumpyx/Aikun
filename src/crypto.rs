@@ -1,9 +1,11 @@
-//! providers.api_key 的静态加密:AES-256-GCM,密钥由 AIKUN_JWT_SECRET
-//! 经 SHA-256 派生。密文格式 `enc:v1:` + base64(nonce(12B) ‖ ciphertext)。
-//! 未带前缀的值按明文原样处理,兼容加密迁移完成前的旧行。
+//! providers.api_key 的静态加密:AES-256-GCM。密文格式 `enc:v1:` +
+//! base64(nonce(12B) ‖ ciphertext)。未带前缀的值按明文原样处理,兼容
+//! 加密迁移完成前的旧行。
 //!
-//! 注意:加密密钥派生自 JWT secret,更换 AIKUN_JWT_SECRET 会使已加密
-//! 的渠道 key 无法解密(与 JWT 失效同理,属于部署级变更)。
+//! 密钥来源:优先独立的 AIKUN_ENCRYPTION_KEY;未设置时回退为
+//! SHA-256(AIKUN_JWT_SECRET) 派生(兼容既有部署)。注意:回退模式下
+//! 更换 JWT secret 会使已加密的渠道 key 无法解密;固定
+//! AIKUN_ENCRYPTION_KEY 后即可自由轮换 JWT secret,渠道 key 不受影响。
 
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -25,6 +27,12 @@ impl KeyCipher {
         let mut key = [0u8; 32];
         key.copy_from_slice(&digest);
         Self { key }
+    }
+
+    /// 部署入口:优先独立的 AIKUN_ENCRYPTION_KEY;未设置时回退为
+    /// SHA-256(jwt_secret) 派生,与既有部署的密文保持兼容。
+    pub fn from_config(config: &crate::config::AppConfig) -> Self {
+        Self::from_secret(config.encryption_key.as_deref().unwrap_or(&config.jwt_secret))
     }
 
     pub fn encrypt(&self, plaintext: &str) -> String {
@@ -54,8 +62,9 @@ impl KeyCipher {
     }
 }
 
-/// 读取侧统一入口:明文原样返回;密文解密失败时返回空串并告警——
-/// 上游会因空凭证 401,日志里能看到明确根因(多半是 JWT secret 被换)。
+/// 读取侧统一入口:明文原样返回;密文解密失败时返回空串并告警(多半是
+/// AIKUN_ENCRYPTION_KEY/AIKUN_JWT_SECRET 被换)。代理选路(selector)会
+/// 另行标记解密失败的渠道并跳过,不会把空凭证发给上游。
 pub fn decrypt_or_plain(cipher: &KeyCipher, stored: &str) -> String {
     if !stored.starts_with(ENC_PREFIX) {
         return stored.to_string();
@@ -105,5 +114,28 @@ mod tests {
         let c = KeyCipher::from_secret("s");
         assert_eq!(c.decrypt("enc:v1:not-valid-base64!!"), None);
         assert_eq!(c.decrypt(&format!("{}{}", ENC_PREFIX, B64.encode([1u8, 2, 3]))), None);
+    }
+
+    #[test]
+    fn from_config_prefers_encryption_key_and_falls_back_to_jwt() {
+        let base = crate::config::AppConfig {
+            jwt_secret: "jwt-secret".to_string(),
+            ..Default::default()
+        };
+        // 缺省:与 from_secret(jwt_secret) 一致(能解既有密文)。
+        let fallback = KeyCipher::from_config(&base);
+        let legacy = KeyCipher::from_secret("jwt-secret");
+        let stored = legacy.encrypt("k");
+        assert_eq!(fallback.decrypt(&stored).as_deref(), Some("k"));
+
+        // 设置独立密钥后:解得开新密文,解不开 JWT secret 派生的旧密文。
+        let config = crate::config::AppConfig {
+            encryption_key: Some("enc-key".to_string()),
+            ..base
+        };
+        let dedicated = KeyCipher::from_config(&config);
+        let stored2 = dedicated.encrypt("k");
+        assert_eq!(dedicated.decrypt(&stored2).as_deref(), Some("k"));
+        assert_eq!(dedicated.decrypt(&stored), None);
     }
 }

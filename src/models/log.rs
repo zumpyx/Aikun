@@ -25,6 +25,10 @@ pub struct RequestLogResponse {
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
     pub provider_id: Option<String>,
+    /// JOIN users 得到;用户已删除时为 null(前端显示"已删除")。
+    pub username: Option<String>,
+    /// JOIN providers 得到;渠道已删除时为 null(前端显示"已删除")。
+    pub provider_name: Option<String>,
     pub model: String,
     pub request_type: String,
     pub prompt_tokens: i64,
@@ -45,6 +49,9 @@ impl From<RequestLog> for RequestLogResponse {
             user_id: l.user_id,
             api_key_id: l.api_key_id,
             provider_id: l.provider_id,
+            // JOIN 列由查询方另行填充(见 api/logs.rs)。
+            username: None,
+            provider_name: None,
             model: l.model,
             request_type: l.request_type,
             prompt_tokens: l.prompt_tokens,

@@ -289,7 +289,7 @@ async function deleteProvider(id) {
   if (!confirm('确定要删除此渠道吗？')) return;
   const r = await api('DELETE', `/api/admin/providers/${id}`);
   if (r.ok) { toast('渠道已删除'); await loadProviders(); }
-  else toast('删除失败', 'error');
+  else toast(r.data.message || r.data.error || '删除失败', 'error');
 }
 
 

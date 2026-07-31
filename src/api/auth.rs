@@ -1,10 +1,11 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
 use rusqlite::params;
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -291,13 +292,30 @@ pub async fn create_api_key(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListApiKeysQuery {
+    pub user_id: Option<String>,
+}
+
 pub async fn list_api_keys(
     State(state): State<AppState>,
     claims: Claims,
+    Query(query): Query<ListApiKeysQuery>,
 ) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+    };
+
+    // admin 带 ?user_id= 时查看指定用户的 key(后台跨用户管理);不带则与
+    // 普通用户一样只看自己的,语义不变。
+    let target_uid = if claims.role == "admin" {
+        query
+            .user_id
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| claims.sub.clone())
+    } else {
+        claims.sub.clone()
     };
 
     let mut stmt = match conn.prepare(
@@ -309,7 +327,7 @@ pub async fn list_api_keys(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"}))),
     };
 
-    let keys: Vec<ApiKeyResponse> = match stmt.query_map(params![claims.sub], |row| {
+    let keys: Vec<ApiKeyResponse> = match stmt.query_map(params![target_uid], |row| {
             Ok(ApiKey {
                 id: row.get(0)?,
                 user_id: row.get(1)?,
@@ -343,7 +361,8 @@ pub async fn list_api_keys(
 }
 
 /// Update an API key (rename, enable/disable, expiry, model whitelist).
-/// Only the owner can update their own keys.
+/// 只有 key 的属主可以修改;admin 不受属主限制(后台跨用户管理),
+/// 非 admin 操作他人 key 一律 404(不暴露 key 是否存在)。
 pub async fn update_api_key(
     State(state): State<AppState>,
     claims: Claims,
@@ -406,13 +425,20 @@ pub async fn update_api_key(
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "no_fields_to_update"})));
     }
 
-    let sql = format!(
-        "UPDATE api_keys SET {} WHERE id = ? AND user_id = ?",
-        updates.join(", ")
-    );
+    let is_admin = claims.role == "admin";
+    let sql = if is_admin {
+        format!("UPDATE api_keys SET {} WHERE id = ?", updates.join(", "))
+    } else {
+        format!(
+            "UPDATE api_keys SET {} WHERE id = ? AND user_id = ?",
+            updates.join(", ")
+        )
+    };
     let mut params: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
     params.push(&key_id);
-    params.push(&claims.sub);
+    if !is_admin {
+        params.push(&claims.sub);
+    }
 
     match conn.execute(&sql, params.as_slice()) {
         Ok(n) if n > 0 => (StatusCode::OK, Json(json!({"message": "updated"}))),
@@ -437,10 +463,15 @@ pub async fn delete_api_key(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
     };
 
-    match conn.execute(
-        "DELETE FROM api_keys WHERE id = ?1 AND user_id = ?2",
-        params![key_id, claims.sub],
-    ) {
+    match if claims.role == "admin" {
+        // admin 可删除任意用户的 key;非 admin 仅限自己的(否则 404)。
+        conn.execute("DELETE FROM api_keys WHERE id = ?1", params![key_id])
+    } else {
+        conn.execute(
+            "DELETE FROM api_keys WHERE id = ?1 AND user_id = ?2",
+            params![key_id, claims.sub],
+        )
+    } {
         Ok(n) if n > 0 => (StatusCode::OK, Json(json!({"message": "deleted"}))),
         Ok(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
         Err(e) => {

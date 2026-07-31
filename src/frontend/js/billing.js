@@ -7,11 +7,38 @@ async function renderBilling(container) {
     </div>
     <div id="prices-list"><div class="empty"><div class="spinner"></div><p>加载中...</p></div></div>
     <div class="page-head" style="margin-top:24px"><h2>调账记录</h2></div>
+    <div class="card" style="padding:14px 18px">
+      <div class="form-group" style="margin-bottom:0;max-width:220px">
+        <label>用户</label>
+        <select id="tx-filter-user" class="inline-select">
+          <option value="">全部用户</option>
+        </select>
+      </div>
+    </div>
     <div id="transactions-list"><div class="empty"><div class="spinner"></div><p>加载中...</p></div></div>`;
 
   document.getElementById('new-price-btn').onclick = () => showPriceModal();
+  document.getElementById('tx-filter-user').onchange = () => loadTransactions();
+
+  // 筛选下拉复用用户页缓存的 state.users,未访问过用户页时先拉一次
+  if (!state.users.length) {
+    api('GET', '/api/admin/users').then(r => {
+      if (r.ok) state.users = r.data;
+      fillTxUserFilter();
+    });
+  } else fillTxUserFilter();
 
   await Promise.all([loadPrices(), loadTransactions()]);
+}
+
+function fillTxUserFilter() {
+  const sel = document.getElementById('tx-filter-user');
+  if (!sel) return;
+  (state.users || []).forEach(u => {
+    const o = document.createElement('option');
+    o.value = u.id; o.textContent = u.username;
+    sel.appendChild(o);
+  });
 }
 
 async function loadPrices() {
@@ -36,7 +63,7 @@ async function loadPrices() {
                 <td><strong>${esc(p.model)}</strong></td>
                 <td>${fmtCost(p.prompt_price)}</td>
                 <td>${fmtCost(p.completion_price)}</td>
-                <td style="color:var(--muted);font-size:12.5px">${esc(p.updated_at)}</td>
+                <td style="color:var(--muted);font-size:12.5px">${esc(fmtTime(p.updated_at))}</td>
                 <td>
                   <button class="btn-outline btn-sm" data-action="edit-price" data-id="${esc(p.id)}">编辑</button>
                   <button class="btn-danger btn-sm" data-action="delete-price" data-id="${esc(p.id)}">删除</button>
@@ -92,11 +119,12 @@ async function deletePrice(id) {
   if (!confirm('确定要删除此价格吗?')) return;
   const r = await api('DELETE', `/api/admin/prices/${id}`);
   if (r.ok) { toast('价格已删除'); await loadPrices(); }
-  else toast('删除失败', 'error');
+  else toast(r.data.message || r.data.error || '删除失败', 'error');
 }
 
 async function loadTransactions() {
-  const r = await api('GET', '/api/admin/billing/transactions');
+  const uid = document.getElementById('tx-filter-user')?.value;
+  const r = await api('GET', '/api/admin/billing/transactions' + (uid ? '?user_id=' + encodeURIComponent(uid) : ''));
   const list = document.getElementById('transactions-list');
   if (!list) return;
   if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
@@ -113,7 +141,7 @@ async function loadTransactions() {
           <tbody>
             ${data.map(t => `
               <tr>
-                <td style="color:var(--muted);font-size:12.5px">${esc(t.created_at)}</td>
+                <td style="color:var(--muted);font-size:12.5px">${esc(fmtTime(t.created_at))}</td>
                 <td><strong>${esc(t.username || t.user_id)}</strong></td>
                 <td style="color:${t.amount >= 0 ? 'var(--ok,#10b981)' : 'var(--danger,#f43f5e)'}">${t.amount >= 0 ? '+' : ''}${fmtCost(t.amount)}</td>
                 <td>${fmtCost(t.balance_after)}</td>

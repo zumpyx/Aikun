@@ -126,13 +126,31 @@ async function loadLogStats(isAdmin) {
 // Guards against out-of-order responses when filters change quickly:
 // only the latest loadLogs call may write to the DOM.
 let loadLogsSeq = 0;
+const LOG_PAGE_SIZE = 200;
+let logsOffset = 0;
+
+function logRow(l, isAdmin) {
+  return `
+    <tr>
+      <td style="font-size:12.5px;white-space:nowrap;color:var(--muted)">${esc(fmtTime(l.created_at))}</td>
+      ${isAdmin ? '<td style="font-size:12.5px">' + esc(l.username || '已删除') + '</td>' : ''}
+      <td style="font-size:12.5px">${esc(l.provider_name || '已删除')}</td>
+      <td><code style="font-size:12.5px">${esc(l.model)}</code></td>
+      <td>${fmtNum(l.total_tokens)}</td>
+      <td>${fmtCost(l.cost)}</td>
+      <td>${l.latency_ms}ms</td>
+      <td><span class="badge ${l.success ? 'badge-green' : 'badge-red'}">${l.success ? '成功' : '失败'}</span></td>
+      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:12.5px;color:var(--danger)">${esc(l.error_message || '-')}</td>
+    </tr>`;
+}
 
 async function loadLogs(isAdmin) {
   const list = document.getElementById('logs-list');
   if (!list) return;
   const seq = ++loadLogsSeq;
+  logsOffset = 0;
 
-  const url = '/api/logs?limit=200' + logFilterQuery(isAdmin);
+  const url = `/api/logs?limit=${LOG_PAGE_SIZE}` + logFilterQuery(isAdmin);
 
   const r = await api('GET', url);
   if (seq !== loadLogsSeq) return; // a newer request is in flight — drop stale response
@@ -152,6 +170,7 @@ async function loadLogs(isAdmin) {
           <thead><tr>
             <th>时间</th>
             ${isAdmin ? '<th>用户</th>' : ''}
+            <th>渠道</th>
             <th>模型</th>
             <th>Token</th>
             <th>费用(元)</th>
@@ -159,25 +178,37 @@ async function loadLogs(isAdmin) {
             <th>状态</th>
             <th>错误</th>
           </tr></thead>
-          <tbody>
-            ${data.map(function(l) {
-              return `
-              <tr>
-                <td style="font-size:12.5px;white-space:nowrap;color:var(--muted)">${esc(l.created_at)}</td>
-                ${isAdmin ? '<td style="font-size:12.5px">' + (l.user_id ? esc(l.user_id.substring(0, 8)) + '...' : '-') + '</td>' : ''}
-                <td><code style="font-size:12.5px">${esc(l.model)}</code></td>
-                <td>${fmtNum(l.total_tokens)}</td>
-                <td>${fmtCost(l.cost)}</td>
-                <td>${l.latency_ms}ms</td>
-                <td><span class="badge ${l.success ? 'badge-green' : 'badge-red'}">${l.success ? '成功' : '失败'}</span></td>
-                <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:12.5px;color:var(--danger)">${esc(l.error_message || '-')}</td>
-              </tr>`;
-            }).join('')}
+          <tbody id="logs-tbody">
+            ${data.map(l => logRow(l, isAdmin)).join('')}
           </tbody>
         </table>
       </div>
-      <p style="font-size:12.5px;color:var(--muted);margin-top:10px">显示最近 200 条</p>
+      <div id="logs-more-wrap" style="text-align:center;margin-top:12px;${data.length < LOG_PAGE_SIZE ? 'display:none' : ''}">
+        <button class="btn-outline btn-sm" id="logs-more">加载更多</button>
+      </div>
     </div>`;
+
+  const moreBtn = document.getElementById('logs-more');
+  if (moreBtn) moreBtn.onclick = () => loadMoreLogs(isAdmin);
+}
+
+// 追加下一页:offset 累加,返回不足一页时隐藏按钮
+async function loadMoreLogs(isAdmin) {
+  const btn = document.getElementById('logs-more');
+  const tbody = document.getElementById('logs-tbody');
+  if (!btn || !tbody) return;
+  btn.disabled = true;
+  try {
+    const next = logsOffset + LOG_PAGE_SIZE;
+    const r = await api('GET', `/api/logs?limit=${LOG_PAGE_SIZE}&offset=${next}` + logFilterQuery(isAdmin));
+    if (!r.ok) { toast(r.data.message || r.data.error || '加载失败', 'error'); return; }
+    if (!document.getElementById('logs-tbody')) return; // 等待期间已切页/重筛
+    logsOffset = next;
+    tbody.insertAdjacentHTML('beforeend', r.data.map(l => logRow(l, isAdmin)).join(''));
+    if (r.data.length < LOG_PAGE_SIZE) document.getElementById('logs-more-wrap')?.remove();
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 

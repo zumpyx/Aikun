@@ -39,9 +39,10 @@ async function renderUsers(container) {
                 <td><span class="badge ${u.role === 'admin' ? 'badge-blue' : 'badge-gray'}">${u.role === 'admin' ? 'Admin' : 'User'}</span></td>
                 <td><span class="badge ${u.is_active ? 'badge-green' : 'badge-red'}">${u.is_active ? '活跃' : '禁用'}</span></td>
                 <td style="font-size:12.5px;color:${(u.balance ?? 0) < 0 ? 'var(--danger,#f43f5e)' : 'inherit'}">${fmtCost(u.balance ?? 0)}</td>
-                <td style="color:var(--muted);font-size:12.5px">${esc(u.created_at)}</td>
+                <td style="color:var(--muted);font-size:12.5px">${esc(fmtTime(u.created_at))}</td>
                 <td>
                   <button class="btn-outline btn-sm" data-action="edit-user" data-id="${esc(u.id)}">编辑</button>
+                  <button class="btn-outline btn-sm" data-action="user-keys" data-id="${esc(u.id)}">密钥</button>
                   <button class="btn-outline btn-sm" data-action="adjust-balance" data-id="${esc(u.id)}">调账</button>
                   <button class="btn-danger btn-sm" data-action="toggle-user" data-id="${esc(u.id)}" data-active="${!u.is_active}">${u.is_active ? '禁用' : '启用'}</button>
                 </td>
@@ -70,7 +71,7 @@ async function showUserModal(id) {
       <div class="form-group"><label>用户名</label><input id="uf-user" value="${esc(user?.username || '')}" ${user ? 'disabled' : ''}></div>
       <div class="form-group"><label>显示名称</label><input id="uf-name" value="${esc(user?.display_name || '')}"></div>
       <div class="form-group"><label>密码${user ? '（留空不修改）' : ''}</label><input id="uf-pass" type="password" ${user ? '' : 'required'}></div>
-      ${!user ? `<div class="form-group"><label>角色</label><select id="uf-role"><option value="user">User</option><option value="admin">Admin</option></select></div>` : ''}
+      <div class="form-group"><label>角色</label><select id="uf-role"><option value="user" ${user?.role === 'admin' ? '' : 'selected'}>User</option><option value="admin" ${user?.role === 'admin' ? 'selected' : ''}>Admin</option></select></div>
       <div class="form-actions">
         <button class="btn-primary" id="uf-save">${user ? '保存' : '创建'}</button>
         <button class="btn-outline" id="uf-cancel">取消</button>
@@ -92,6 +93,8 @@ async function showUserModal(id) {
       const pass = document.getElementById('uf-pass').value;
       if (name !== user.display_name) upd.display_name = name;
       if (pass) upd.password = pass;
+      const role = document.getElementById('uf-role').value;
+      if (role !== user.role) upd.role = role;
       if (Object.keys(upd).length === 0) return toast('没有修改', 'info');
       const r = await api('PATCH', `/api/admin/users/${user.id}`, upd);
       if (!r.ok) return toast(r.data.message || r.data.error || '操作失败', 'error');
@@ -118,7 +121,7 @@ async function showUserModal(id) {
 async function toggleUser(id, active) {
   const r = await api('PATCH', `/api/admin/users/${id}`, { is_active: active });
   if (r.ok) { toast(active ? '用户已启用' : '用户已禁用'); if (document.getElementById('users-list')) await renderUsers(document.getElementById('main-content')); }
-  else toast('操作失败', 'error');
+  else toast(r.data.message || r.data.error || '操作失败', 'error');
 }
 
 function showBatchUserModal() {
@@ -181,6 +184,78 @@ function showBatchUserModal() {
       btn.disabled = false; btn.textContent = '创建';
     }
   };
+}
+
+// ============ 用户密钥(admin 跨用户管理,只显示掩码)============
+async function showUserKeysModal(userId) {
+  const user = (state.users || []).find(u => u.id === userId);
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:760px">
+      <h2>用户密钥${user ? ' — ' + esc(user.username) : ''}</h2>
+      <div id="user-keys-body"><div class="empty"><div class="spinner"></div><p>加载中...</p></div></div>
+      <div class="form-actions">
+        <button class="btn-outline" id="uk-close">关闭</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  document.getElementById('uk-close').onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  await loadUserKeys(userId);
+}
+
+async function loadUserKeys(userId) {
+  const body = document.getElementById('user-keys-body');
+  if (!body) return;
+  const r = await api('GET', `/api/api-keys?user_id=${encodeURIComponent(userId)}`);
+  if (!r.ok) { body.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
+  const data = r.data;
+  if (data.length === 0) { body.innerHTML = '<div class="empty"><p>该用户暂无密钥</p></div>'; return; }
+
+  const isExpired = k => k.expires_at && new Date(k.expires_at) < new Date();
+  const fmtLimits = k => {
+    const parts = [];
+    if (k.rate_limit_rpm > 0) parts.push(`${fmtNum(k.rate_limit_rpm)}/分`);
+    if (k.quota_daily_tokens > 0) parts.push(`${fmtNum(k.quota_daily_tokens)}/日`);
+    return parts.length ? esc(parts.join(' · ')) : '<span style="color:var(--faint)">不限</span>';
+  };
+
+  body.innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>名称</th><th>密钥</th><th>状态</th><th>限额</th><th>过期时间</th><th>操作</th></tr></thead>
+        <tbody>
+          ${data.map(k => `
+            <tr>
+              <td><strong>${esc(k.name || '-')}</strong></td>
+              <td style="font-family:monospace;font-size:12.5px;color:var(--muted)">${esc(k.key)}</td>
+              <td><span class="badge ${k.is_active && !isExpired(k) ? 'badge-green' : 'badge-red'}">${!k.is_active ? '已禁用' : isExpired(k) ? '已过期' : '活跃'}</span></td>
+              <td style="font-size:12.5px">${fmtLimits(k)}</td>
+              <td style="color:var(--muted);font-size:12.5px">${k.expires_at ? esc(fmtTime(k.expires_at)) : '<span style="color:var(--faint)">永不</span>'}</td>
+              <td>
+                <button class="btn-outline btn-sm" data-action="toggle-user-key" data-id="${esc(k.id)}" data-user="${esc(userId)}" data-active="${!k.is_active}">${k.is_active ? '禁用' : '启用'}</button>
+                <button class="btn-danger btn-sm" data-action="delete-user-key" data-id="${esc(k.id)}" data-user="${esc(userId)}">删除</button>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+async function toggleUserKey(id, active, userId) {
+  const r = await api('PATCH', `/api/api-keys/${id}`, { is_active: active });
+  if (r.ok) { toast(active ? '密钥已启用' : '密钥已禁用'); await loadUserKeys(userId); }
+  else toast(r.data.message || r.data.error || '操作失败', 'error');
+}
+
+async function deleteUserKey(id, userId) {
+  if (!confirm('确定要删除此密钥吗？')) return;
+  const r = await api('DELETE', `/api/api-keys/${id}`);
+  if (r.ok) { toast('密钥已删除'); await loadUserKeys(userId); }
+  else toast(r.data.message || r.data.error || '删除失败', 'error');
 }
 
 
