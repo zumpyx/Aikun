@@ -197,6 +197,7 @@ function renderApp(container) {
           <div class="user-meta">
             <strong title="${esc(name)}">${esc(truncBytes(name, 8))}</strong>
           </div>
+          <div class="user-balance" id="user-balance" style="font-size:12px;color:var(--muted)" title="账户余额">余额 ¥${fmtCost(state.user?.balance ?? 0)}</div>
           <a href="#" id="logout-link" title="退出登录">退出</a>
         </div>
         ${state.version ? `<div class="sidebar-version">v${esc(state.version)}</div>` : ''}
@@ -215,7 +216,21 @@ function renderApp(container) {
     render();
   };
 
+  // 余额随每次页面切换后台刷新(扣费是实时的,渲染用的 state.user
+  // 是登录/初始化时的快照)。
+  refreshBalance();
+
   renderView(document.getElementById('main-content'));
+}
+
+async function refreshBalance() {
+  const el = document.getElementById('user-balance');
+  if (!el) return;
+  const r = await api('GET', '/api/me');
+  if (r.ok) {
+    state.user = { ...state.user, ...r.data };
+    el.textContent = `余额 ¥${fmtCost(r.data.balance ?? 0)}`;
+  }
 }
 
 function renderView(container) {

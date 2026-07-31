@@ -39,6 +39,8 @@ serde_json = "1"
 # Async
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+# CancellationToken:关停时主动收尾在途流式请求(先记账再退出)
+tokio-util = "0.7"
 
 # Logging
 tracing = "0.1"

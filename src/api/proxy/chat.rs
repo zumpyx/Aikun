@@ -636,6 +636,7 @@ fn stream_response(
 ) -> Response {
     let byte_stream = resp.bytes_stream();
     let pool = state.pool.clone();
+    let shutdown = state.shutdown.clone();
     let threshold = state.config.auto_disable_threshold;
     let model_log = model.clone();
     let start = Instant::now();
@@ -675,7 +676,16 @@ fn stream_response(
         let mut events: u32 = 0;
         let mut upstream = std::pin::pin!(byte_stream);
         loop {
-            let item = match tokio::time::timeout(idle_timeout, upstream.next()).await {
+            // 关停优先:收到取消立即跳出,走下方统一收尾——已捕获 usage
+            // 照常同步记账,而不是被 30s 强杀跳过收尾丢账。
+            let item = tokio::select! {
+                _ = shutdown.cancelled() => {
+                    debug!("Shutdown: ending in-flight stream from {} early", provider_id);
+                    break;
+                }
+                item = tokio::time::timeout(idle_timeout, upstream.next()) => item,
+            };
+            let item = match item {
                 Ok(Some(item)) => item,
                 Ok(None) => break,
                 Err(_) => {

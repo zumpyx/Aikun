@@ -88,21 +88,42 @@ pub async fn check_provider_health(
 
 /// Delete request logs older than the configured retention period.
 /// Runs inside `spawn_blocking` since it holds the DB mutex.
+/// 删除前先把将删明细按 (用户, 日) 聚合进 usage_daily(同一事务):
+/// 明细随保留期清除后,余额对账(Σ充值 − Σ消费)仍有永久依据。
 fn purge_old_request_logs(pool: &Arc<DbPool>, retention_days: u32) {
-    let conn = match pool.conn.lock() {
+    let mut conn = match pool.conn.lock() {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("Failed to lock DB for log purge: {}", e);
             return;
         }
     };
-    match conn.execute(
-        // request_logs.created_at 存的是 RFC3339（含 T），截止时间用同一格式比较
-        "DELETE FROM request_logs WHERE created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', '-' || ?1 || ' days')",
-        params![retention_days],
-    ) {
+    let result = (|| -> Result<usize, rusqlite::Error> {
+        let tx = conn.transaction()?;
+        // request_logs.created_at 存的是 RFC3339(含 T),截止时间用同一格式比较
+        tx.execute(
+            "INSERT INTO usage_daily (user_id, date, requests, tokens, cost)
+             SELECT user_id, substr(created_at, 1, 10), COUNT(*),
+                    COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost), 0)
+             FROM request_logs
+             WHERE created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', '-' || ?1 || ' days')
+             GROUP BY user_id, substr(created_at, 1, 10)
+             ON CONFLICT(user_id, date) DO UPDATE SET
+                requests = requests + excluded.requests,
+                tokens = tokens + excluded.tokens,
+                cost = cost + excluded.cost",
+            params![retention_days],
+        )?;
+        let n = tx.execute(
+            "DELETE FROM request_logs WHERE created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', '-' || ?1 || ' days')",
+            params![retention_days],
+        )?;
+        tx.commit()?;
+        Ok(n)
+    })();
+    match result {
         Ok(n) if n > 0 => {
-            info!("Purged {} request logs older than {} days", n, retention_days);
+            info!("Purged {} request logs older than {} days (aggregated into usage_daily)", n, retention_days);
         }
         Ok(_) => {}
         Err(e) => {
@@ -250,4 +271,76 @@ async fn run_health_check_round(
                 }
             }
         }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_pool() -> Arc<DbPool> {
+        let config = crate::config::AppConfig {
+            database_url: ":memory:".into(),
+            ..Default::default()
+        };
+        let pool = Arc::new(DbPool::new(&config).unwrap());
+        {
+            let conn = pool.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash) VALUES ('u1', 'u1', 'h')",
+                [],
+            )
+            .unwrap();
+            let insert = |id: &str, date: &str, tokens: i64, cost: f64| {
+                conn.execute(
+                    "INSERT INTO request_logs (id, user_id, model, total_tokens, cost, created_at)
+                     VALUES (?1, 'u1', 'm', ?2, ?3, ?4)",
+                    params![id, tokens, cost, date],
+                )
+                .unwrap();
+            };
+            insert("l1", "2020-01-15T10:00:00+00:00", 100, 0.01);
+            insert("l2", "2020-01-15T11:00:00+00:00", 200, 0.02);
+            insert("l3", "2020-01-16T10:00:00+00:00", 50, 0.005);
+            // 保留期内的一行不应被清理
+            insert("l4", &chrono::Utc::now().to_rfc3339(), 10, 0.001);
+        }
+        pool
+    }
+
+    #[test]
+    fn purge_aggregates_before_deleting() {
+        let pool = test_pool();
+        purge_old_request_logs(&pool, 30);
+        {
+            let conn = pool.conn.lock().unwrap();
+            let remaining: i64 = conn
+                .query_row("SELECT COUNT(*) FROM request_logs", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(remaining, 1);
+            let (requests, tokens, cost): (i64, i64, f64) = conn
+                .query_row(
+                    "SELECT requests, tokens, cost FROM usage_daily WHERE user_id = 'u1' AND date = '2020-01-15'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!((requests, tokens), (2, 300));
+            assert!((cost - 0.03).abs() < 1e-9);
+            let day2: i64 = conn
+                .query_row(
+                    "SELECT requests FROM usage_daily WHERE user_id = 'u1' AND date = '2020-01-16'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(day2, 1);
+        }
+        // 幂等:明细已删,再次 purge 不会重复累加
+        purge_old_request_logs(&pool, 30);
+        let conn = pool.conn.lock().unwrap();
+        let total: i64 = conn
+            .query_row("SELECT SUM(requests) FROM usage_daily", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 3);
+    }
 }

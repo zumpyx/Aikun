@@ -204,14 +204,20 @@ pub async fn get_current_user(
     };
 
     let user = conn.query_row(
-        "SELECT id, username, password_hash, display_name, role, is_active, created_at, updated_at
+        "SELECT id, username, password_hash, display_name, role, is_active, created_at, updated_at, balance
          FROM users WHERE id = ?1",
         params![claims.sub],
-        row_to_user,
+        |row| Ok((row_to_user(row)?, row.get::<_, f64>(8)?)),
     );
 
     match user {
-        Ok(u) => (StatusCode::OK, Json(json!(UserResponse::from(u)))),
+        // 余额对本人可见(只读):扣费是实时发生的,用户需要能自查。
+        Ok((u, balance)) => {
+            let mut v = serde_json::to_value(UserResponse::from(u))
+                .unwrap_or_else(|_| json!({}));
+            v["balance"] = json!(balance);
+            (StatusCode::OK, Json(v))
+        }
         Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "user_not_found"}))),
     }
 }

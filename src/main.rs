@@ -67,6 +67,9 @@ pub struct AppState {
     /// enforces api_keys.rate_limit_rpm. In-memory only: a restart resets the
     /// window, which is acceptable for a per-minute limit.
     pub api_key_rate: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
+    /// 关停信号:收到 SIGINT/SIGTERM 后取消,流式生成器据此主动收尾——
+    /// 已捕获 usage 照常记账,而不是被 30s 强杀跳过 Drop 丢账。
+    pub shutdown: tokio_util::sync::CancellationToken,
 }
 
 #[tokio::main]
@@ -101,6 +104,7 @@ async fn main() {
         clients: Arc::new(Mutex::new(HashMap::new())),
         login_attempts: Arc::new(Mutex::new(HashMap::new())),
         api_key_rate: Arc::new(Mutex::new(HashMap::new())),
+        shutdown: tokio_util::sync::CancellationToken::new(),
     };
 
     // --- Public routes (no auth) ---
@@ -198,6 +202,7 @@ async fn main() {
     });
 
     // Combine all routes
+    let shutdown_token = state.shutdown.clone();
     let mut app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
@@ -230,14 +235,14 @@ async fn main() {
 
     info!("Server listening on {}", config.host);
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown_token))
         .await
         .expect("Server failed");
 }
 
 /// Resolve when a shutdown signal arrives: Ctrl-C (SIGINT) or SIGTERM (the
 /// default from systemd/docker). Whichever comes first wins.
-async fn shutdown_signal() {
+async fn shutdown_signal(shutdown: tokio_util::sync::CancellationToken) {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     let terminate = async {
@@ -258,6 +263,10 @@ async fn shutdown_signal() {
         _ = ctrl_c => info!("Shutdown signal (SIGINT) received — draining open connections"),
         _ = terminate => info!("Shutdown signal (SIGTERM) received — draining open connections"),
     }
+
+    // 先取消在途流:流式生成器收到取消后走正常收尾(已捕获 usage 照常
+    // 记账),通常秒级完成;30s 上限只是兜底,正常用不到。
+    shutdown.cancel();
 
     // 排空连接最多等 30s,超时强制退出,避免进程被挂起的长连接拖住。
     tokio::spawn(async {

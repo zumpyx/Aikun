@@ -235,6 +235,17 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             created_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
+        -- 按 (用户, 日) 的消费汇总:purge 删除 request_logs 明细前先聚合到
+        -- 这里,保留期过后余额对账(Σ充值 − Σ消费)仍有永久依据。
+        CREATE TABLE IF NOT EXISTS usage_daily (
+            user_id     TEXT NOT NULL,
+            date        TEXT NOT NULL,
+            requests    INTEGER NOT NULL DEFAULT 0,
+            tokens      INTEGER NOT NULL DEFAULT 0,
+            cost        REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, date)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_request_logs_user_id ON request_logs(user_id);
         CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_request_logs_provider_id ON request_logs(provider_id);
