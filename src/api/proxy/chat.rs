@@ -921,51 +921,53 @@ fn insert_request_log(
     success: bool,
     error_message: Option<String>,
 ) {
-    if let Ok(conn) = pool.conn.lock() {
+    if let Ok(mut conn) = pool.conn.lock() {
         // 计费:成功且有用量时按价格表折算费用。价格查询、日志插入、
-        // 余额扣减同在一把写锁(单连接)内,天然同事务——不会出现
-        // "记了日志没扣费"或"扣了费没日志"的中间态。
-        let cost = if success && total_tokens > 0 {
-            crate::billing::find_price(&conn, model)
-                .map(|prices| crate::billing::compute_cost(prompt_tokens, completion_tokens, prices))
-                .unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        // 日志插入失败必须可见:此前静默吞错曾导致迁移中间态下日志全丢。
-        if let Err(e) = conn.execute(
-            "INSERT INTO request_logs (id, user_id, api_key_id, provider_id, model, request_type,
-             prompt_tokens, completion_tokens, total_tokens, latency_ms, status_code, success, error_message, cost, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            params![
-                Uuid::new_v4().to_string(),
-                Some(user_id),
-                api_key_id,
-                provider_id,
-                model,
-                request_type,
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-                latency_ms,
-                status_code,
-                success as i32,
-                error_message,
-                cost,
-                chrono::Utc::now().to_rfc3339(),
-            ],
-        ) {
-            warn!("Failed to insert request log: {}", e);
-            return;
-        }
-        // 余额不拦截语义:允许扣成负数,只记账。
-        if cost > 0.0 {
-            if let Err(e) = conn.execute(
-                "UPDATE users SET balance = balance - ?1 WHERE id = ?2",
-                params![cost, user_id],
-            ) {
-                warn!("Failed to deduct balance for user {}: {}", user_id, e);
+        // 余额扣减包在同一个显式事务里——任何一步失败整体回滚,
+        // 不会留下"记了日志没扣费"或"扣了费没日志"的中间态。
+        let result = (|| -> Result<(), rusqlite::Error> {
+            let cost = if success && total_tokens > 0 {
+                crate::billing::find_price(&conn, model)
+                    .map(|prices| crate::billing::compute_cost(prompt_tokens, completion_tokens, prices))
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let tx = conn.transaction()?;
+            tx.execute(
+                "INSERT INTO request_logs (id, user_id, api_key_id, provider_id, model, request_type,
+                 prompt_tokens, completion_tokens, total_tokens, latency_ms, status_code, success, error_message, cost, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    Some(user_id),
+                    api_key_id,
+                    provider_id,
+                    model,
+                    request_type,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    latency_ms,
+                    status_code,
+                    success as i32,
+                    error_message,
+                    cost,
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )?;
+            // 余额不拦截语义:允许扣成负数,只记账。
+            if cost > 0.0 {
+                tx.execute(
+                    "UPDATE users SET balance = balance - ?1 WHERE id = ?2",
+                    params![cost, user_id],
+                )?;
             }
+            tx.commit()
+        })();
+        // 记账失败必须可见:此前静默吞错曾导致迁移中间态下日志全丢。
+        if let Err(e) = result {
+            warn!("Failed to record request log / billing: {}", e);
         }
     }
 }

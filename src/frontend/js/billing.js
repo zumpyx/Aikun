@@ -135,7 +135,7 @@ function showAdjustBalanceModal(id) {
     <div class="modal">
       <h2>调账</h2>
       <div class="form-group"><label>用户</label><input value="${esc(user?.username || id)}" disabled></div>
-      <div class="form-group"><label>当前余额(元)</label><input value="${esc(fmtNum(user?.balance ?? 0))}" disabled></div>
+      <div class="form-group"><label>当前余额(元)</label><input value="${esc(fmtCost(user?.balance ?? 0))}" disabled></div>
       <div class="form-group"><label>金额(正为充值,负为扣减)</label><input id="bf-amount" type="number" step="any" placeholder="100 或 -50"></div>
       <div class="form-group"><label>备注</label><input id="bf-note" placeholder="选填"></div>
       <div class="form-actions">
@@ -158,7 +158,7 @@ function showAdjustBalanceModal(id) {
         note: document.getElementById('bf-note').value,
       });
       if (r.ok) {
-        toast(`调账成功,当前余额 ${fmtNum(r.data.balance)} 元`);
+        toast(`调账成功,当前余额 ${fmtCost(r.data.balance)} 元`);
         overlay.remove();
         if (document.getElementById('users-list')) await renderUsers(document.getElementById('main-content'));
       } else toast(r.data.message || r.data.error || '调账失败', 'error');

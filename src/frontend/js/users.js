@@ -38,7 +38,7 @@ async function renderUsers(container) {
                 <td>${esc(u.display_name)}</td>
                 <td><span class="badge ${u.role === 'admin' ? 'badge-blue' : 'badge-gray'}">${u.role === 'admin' ? 'Admin' : 'User'}</span></td>
                 <td><span class="badge ${u.is_active ? 'badge-green' : 'badge-red'}">${u.is_active ? '活跃' : '禁用'}</span></td>
-                <td style="font-size:12.5px;color:${(u.balance ?? 0) < 0 ? 'var(--danger,#f43f5e)' : 'inherit'}">${fmtNum(u.balance ?? 0)}</td>
+                <td style="font-size:12.5px;color:${(u.balance ?? 0) < 0 ? 'var(--danger,#f43f5e)' : 'inherit'}">${fmtCost(u.balance ?? 0)}</td>
                 <td style="color:var(--muted);font-size:12.5px">${esc(u.created_at)}</td>
                 <td>
                   <button class="btn-outline btn-sm" data-action="edit-user" data-id="${esc(u.id)}">编辑</button>

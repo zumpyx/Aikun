@@ -56,9 +56,14 @@ impl DbPool {
         let cipher = KeyCipher::from_secret(&config.jwt_secret);
         let conn = create_connection(config)?;
         migrate_encrypt_provider_keys(&conn, &cipher)?;
+        // :memory: 数据库每个连接是独立的空库,只读连接没有意义——
+        // 留空,read() 回退到写连接。
+        let is_memory = config.database_url.contains(":memory:");
         let mut readers = Vec::with_capacity(READ_POOL_SIZE);
-        for _ in 0..READ_POOL_SIZE {
-            readers.push(Mutex::new(open_reader(config)?));
+        if !is_memory {
+            for _ in 0..READ_POOL_SIZE {
+                readers.push(Mutex::new(open_reader(config)?));
+            }
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -69,7 +74,11 @@ impl DbPool {
     }
 
     /// 取一个只读连接(轮转)。只用于纯 SELECT;任何写必须走 `conn`。
+    /// :memory: 配置下回退写连接(读连接会是独立的空库)。
     pub fn read(&self) -> &Mutex<Connection> {
+        if self.readers.is_empty() {
+            return &self.conn;
+        }
         let i = self.rr.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         &self.readers[i % self.readers.len()]
     }
@@ -293,7 +302,6 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_column(conn, "api_keys", "quota_daily_tokens", "INTEGER NOT NULL DEFAULT 0")?;
     // 计费:用户余额(元,允许为负——不拦截语义)与每次请求的折算费用。
     ensure_column(conn, "users", "balance", "REAL NOT NULL DEFAULT 0")?;
-    ensure_column(conn, "request_logs", "cost", "REAL NOT NULL DEFAULT 0")?;
     // Backfill protocol fields from the legacy provider_type, gated by
     // user_version so it runs exactly once instead of on every startup.
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -338,6 +346,8 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // The UNIQUE constraint on api_keys.key already covers this lookup index.
     conn.execute_batch("DROP INDEX IF EXISTS idx_api_keys_key")?;
     migrate_request_logs_fk(conn)?;
+    // cost 必须在外键重建之后补:重建按旧 DDL 建新表,会把先加的列丢掉。
+    ensure_column(conn, "request_logs", "cost", "REAL NOT NULL DEFAULT 0")?;
     Ok(())
 }
 

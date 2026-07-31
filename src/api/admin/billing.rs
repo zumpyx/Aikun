@@ -59,15 +59,31 @@ pub struct UpsertPriceRequest {
     pub completion_price: Option<f64>,
 }
 
-/// 校验:model 非空(创建时必填),价格有限且非负。
+/// 校验:model 非空(创建时必填),价格有限且非负;通配条目的 *
+/// 只允许出现在末尾且前缀非空(否则永远不命中,属于配置错误)。
 fn valid_price_fields(req: &UpsertPriceRequest, creating: bool) -> Result<(), (StatusCode, Json<Value>)> {
-    if creating {
-        let m = req.model.as_deref().unwrap_or("").trim();
+    let model = req.model.as_deref().map(|m| m.trim());
+    if creating && model.unwrap_or("").is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({
+            "error": "invalid_model",
+            "message": "model 不能为空"
+        }))));
+    }
+    if let Some(m) = model {
         if m.is_empty() {
             return Err((StatusCode::BAD_REQUEST, Json(json!({
                 "error": "invalid_model",
                 "message": "model 不能为空"
             }))));
+        }
+        if m.contains('*') {
+            let prefix = m.trim_end_matches('*');
+            if !m.ends_with('*') || prefix.contains('*') || prefix.is_empty() {
+                return Err((StatusCode::BAD_REQUEST, Json(json!({
+                    "error": "invalid_model",
+                    "message": "通配只支持末尾单个 *,且前缀非空(如 gpt-*)"
+                }))));
+            }
         }
     }
     for v in [req.prompt_price, req.completion_price].into_iter().flatten() {
@@ -189,6 +205,14 @@ pub async fn update_price(
             }
         }
         Ok(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
+        Err(rusqlite::Error::SqliteFailure(err, _))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            (StatusCode::CONFLICT, Json(json!({
+                "error": "duplicate_model",
+                "message": "该模型(或通配)的价格已存在"
+            })))
+        }
         Err(e) => {
             tracing::error!("Failed to update price: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "update_failed"})))
@@ -235,45 +259,51 @@ pub async fn adjust_balance(
             "message": "amount 必须是非零有限数"
         })));
     }
-    let conn = match state.pool.conn.lock() {
+    let mut conn = match state.pool.conn.lock() {
         Ok(c) => c,
         Err(_) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
         }
     };
-    let updated = conn.execute(
-        "UPDATE users SET balance = balance + ?1, updated_at = datetime('now') WHERE id = ?2",
-        params![req.amount, user_id],
-    );
-    match updated {
-        Ok(0) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
-        Ok(_) => {
-            let balance: f64 = conn
-                .query_row(
-                    "SELECT balance FROM users WHERE id = ?1",
-                    params![user_id],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0.0);
-            let kind = if req.amount > 0.0 { "recharge" } else { "adjust" };
-            if let Err(e) = conn.execute(
-                "INSERT INTO billing_transactions (id, user_id, amount, balance_after, kind, note)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    Uuid::new_v4().to_string(),
-                    user_id,
-                    req.amount,
-                    balance,
-                    kind,
-                    req.note.unwrap_or_default().trim().to_string()
-                ],
-            ) {
-                tracing::error!("Failed to record billing transaction: {}", e);
-            }
-            (StatusCode::OK, Json(json!({
-                "balance": balance,
-                "kind": kind
-            })))
+    // UPDATE 余额与 INSERT 流水包在同一事务:失败整体回滚,
+    // 不会留下"余额变了但没流水"的中间态。
+    let result = (|| -> Result<(f64, &'static str), rusqlite::Error> {
+        let tx = conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE users SET balance = balance + ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![req.amount, user_id],
+        )?;
+        if updated == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let balance: f64 = tx.query_row(
+            "SELECT balance FROM users WHERE id = ?1",
+            params![user_id],
+            |row| row.get(0),
+        )?;
+        let kind = if req.amount > 0.0 { "recharge" } else { "adjust" };
+        tx.execute(
+            "INSERT INTO billing_transactions (id, user_id, amount, balance_after, kind, note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                Uuid::new_v4().to_string(),
+                user_id,
+                req.amount,
+                balance,
+                kind,
+                req.note.unwrap_or_default().trim().to_string()
+            ],
+        )?;
+        tx.commit()?;
+        Ok((balance, kind))
+    })();
+    match result {
+        Ok((balance, kind)) => (StatusCode::OK, Json(json!({
+            "balance": balance,
+            "kind": kind
+        }))),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"})))
         }
         Err(e) => {
             tracing::error!("Failed to adjust balance: {}", e);
