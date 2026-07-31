@@ -173,10 +173,12 @@ async fn enforce_key_limits(state: &AppState, key_id: &str) -> Option<String> {
     let limits = tokio::task::spawn_blocking(move || {
         let conn = pool.read().lock().ok()?;
         conn.query_row(
+            // created_at 时间格式混存(RFC3339 带 T 与旧空格格式),
+            // 按日期前缀比较才能同时命中两种格式的当天行。
             "SELECT rate_limit_rpm, quota_daily_tokens,
                     (SELECT COALESCE(SUM(total_tokens), 0) FROM request_logs
                      WHERE api_key_id = ?1
-                       AND created_at >= strftime('%Y-%m-%dT00:00:00', 'now'))
+                       AND substr(created_at, 1, 10) = date('now'))
              FROM api_keys WHERE id = ?1",
             rusqlite::params![key],
             |row| {
@@ -375,10 +377,14 @@ async fn attempt_loop(
             }
             // 流式不在此记录成功：流结束时统一记一次 record_request_result /
             // record_failure（中途失败），避免指标重复或自相矛盾。
+            // 客户端是否自己请求了 include_usage:未请求时转发前剥掉
+            // 网关注入的 usage chunk。
+            let client_wants_usage =
+                body["stream_options"]["include_usage"].as_bool().unwrap_or(false);
             return stream_response(
                 state, resp, client_protocol, provider_protocol,
                 provider.id.clone(), provider.timeout_secs, model, user_id,
-                api_key_id,
+                api_key_id, client_wants_usage,
             );
         }
 
@@ -567,13 +573,15 @@ fn stream_response(
     model: String,
     user_id: String,
     api_key_id: Option<String>,
+    client_wants_usage: bool,
 ) -> Response {
     let byte_stream = resp.bytes_stream();
     let pool = state.pool.clone();
     let threshold = state.config.auto_disable_threshold;
     let model_log = model.clone();
     let start = Instant::now();
-    let mut converter = StreamConverter::new(client_protocol, provider_protocol, &model);
+    let mut converter = StreamConverter::new(client_protocol, provider_protocol, &model)
+        .strip_usage_chunk(!client_wants_usage);
     // idle_timeout_secs<=0 的遗留渠道先回退全局 request_timeout_secs 再
     // clamp，与 client.rs 的非流式超时语义一致（避免退化为 1 秒误 abort）。
     let idle_secs = if idle_timeout_secs > 0 {
@@ -662,6 +670,9 @@ fn stream_response(
                 model_log.clone(), &client_protocol,
                 p, c, t, latency as i32, 502, false, Some(err_msg.clone()),
             );
+            // 502 已记账,立即标记 guard 完成:否则客户端在下面 yield 期间
+            // 断开会触发 StreamAbortGuard::drop 再记一条 499,重复记账。
+            guard.finish();
             // 通知客户端流异常终止：协议对应的错误事件 + converter 收尾事件。
             // finish() 对转换型 converter 已含终止帧([DONE]/message_stop),
             // 仅在其缺失时补一个,避免客户端收到双重终止。
@@ -676,7 +687,6 @@ fn stream_response(
             if !has_terminal {
                 yield Ok(to_axum_event(stream_terminal_event(&client_protocol)));
             }
-            guard.finish();
             return;
         }
 
@@ -697,9 +707,10 @@ fn stream_response(
                 model_log.clone(), &client_protocol,
                 0, 0, 0, latency as i32, 502, false, Some(err_msg.clone()),
             );
+            // 同上面的 stream_error 路径:先标记完成再 yield,防止重复记账。
+            guard.finish();
             yield Ok(to_axum_event(stream_error_event(&client_protocol, &err_msg)));
             yield Ok(to_axum_event(stream_terminal_event(&client_protocol)));
-            guard.finish();
             return;
         }
         for out in converter.finish() {
@@ -710,11 +721,14 @@ fn stream_response(
         let latency = start.elapsed().as_millis() as f64;
         spawn_record_result(pool.clone(), provider_id.clone(), latency, true);
         let (p, c, t) = converter.usage();
-        spawn_request_log(
+        // 计费级:与非流式一致,流结束时同步等待日志与扣费落库,
+        // fire-and-forget 在进程退出时会丢账。
+        request_log_sync(
             &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
             model_log.clone(), &client_protocol,
             p, c, t, latency as i32, 200, true, None,
-        );
+        )
+        .await;
         debug!(
             "Stream completed: model={} provider={} latency={}ms tokens={}",
             model_log, provider_id, latency as i64, t
@@ -847,7 +861,9 @@ fn stream_terminal_event(client_protocol: &str) -> SseOut {
 }
 
 /// Fire-and-forget 版本：异步上下文写请求日志时投递到 blocking 线程池，
-/// 避免持 DB mutex 的同步写阻塞 async executor。用于不涉计费的失败路径。
+/// 避免持 DB mutex 的同步写阻塞 async executor。用于失败路径与流中途
+/// 断连(StreamAbortGuard)等无法 await 的场景;成功计费路径必须改用
+/// request_log_sync 等待落库,进程退出时 fire-and-forget 会丢账。
 #[allow(clippy::too_many_arguments)]
 fn spawn_request_log(
     pool: &Arc<DbPool>,
@@ -895,14 +911,18 @@ async fn request_log_sync(
 ) {
     let pool = pool.clone();
     let request_type = request_type.to_string();
-    let _ = tokio::task::spawn_blocking(move || {
+    if let Err(e) = tokio::task::spawn_blocking(move || {
         insert_request_log(
             &pool, &user_id, api_key_id.as_deref(), provider_id.as_deref(),
             &model, &request_type, prompt_tokens, completion_tokens, total_tokens,
             latency_ms, status_code, success, error_message,
         );
     })
-    .await;
+    .await
+    {
+        // JoinError 意味着 blocking 任务 panic/被取消:日志与扣费可能未落库。
+        warn!("request log blocking task failed to join: {}", e);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -921,15 +941,33 @@ fn insert_request_log(
     success: bool,
     error_message: Option<String>,
 ) {
-    if let Ok(mut conn) = pool.conn.lock() {
-        // 计费:成功且有用量时按价格表折算费用。价格查询、日志插入、
-        // 余额扣减包在同一个显式事务里——任何一步失败整体回滚,
-        // 不会留下"记了日志没扣费"或"扣了费没日志"的中间态。
+    let mut conn = match pool.conn.lock() {
+        Ok(conn) => conn,
+        Err(e) => {
+            // 锁中毒:日志与扣费整体丢失,必须可见。
+            warn!("Failed to lock DB connection for request log: {}", e);
+            return;
+        }
+    };
+    {
+        // 计费:有用量即按价格表折算费用。上游 token 已真实消耗,
+        // 客户端中途断连(499)或流中途错误(502)时已捕获的 usage 照扣;
+        // 429/400/上游错误路径 total_tokens 本就为 0,不受影响。
+        // 价格查询、日志插入、余额扣减包在同一个显式事务里——任何一步
+        // 失败整体回滚,不会留下"记了日志没扣费"或"扣了费没日志"的中间态。
         let result = (|| -> Result<(), rusqlite::Error> {
-            let cost = if success && total_tokens > 0 {
-                crate::billing::find_price(&conn, model)
-                    .map(|prices| crate::billing::compute_cost(prompt_tokens, completion_tokens, prices))
-                    .unwrap_or(0.0)
+            let cost = if total_tokens > 0 {
+                match crate::billing::find_price(&conn, model) {
+                    Some(prices) => crate::billing::compute_cost(prompt_tokens, completion_tokens, prices),
+                    None => {
+                        // 有用量但无价格配置:静默免费必须可见。
+                        warn!(
+                            "No price configured for model '{}' — {} tokens billed at 0",
+                            model, total_tokens
+                        );
+                        0.0
+                    }
+                }
             } else {
                 0.0
             };
@@ -974,14 +1012,24 @@ fn insert_request_log(
 
 /// List available models aggregated from all healthy providers.
 /// Returns OpenAI-compatible model list format.
+/// 受限 API key 只返回其白名单内的模型,过滤口径与 chat 请求的
+/// model_not_allowed 判定一致(精确匹配或 `*` 后缀前缀匹配)。
 pub async fn list_models(
     State(state): State<AppState>,
     _claims: Claims,
+    auth_ctx: AuthContext,
 ) -> impl IntoResponse {
     let models = list_available_models_async(state.pool.clone()).await;
 
     let data: Vec<Value> = models
         .into_iter()
+        .filter(|id| match &auth_ctx.allowed_models {
+            None => true,
+            Some(allowed) => allowed.iter().any(|m| match m.strip_suffix('*') {
+                Some(prefix) => id.starts_with(prefix),
+                None => m == id,
+            }),
+        })
         .map(|id| json!({
             "id": id,
             "object": "model",

@@ -9,34 +9,57 @@
 use rusqlite::Connection;
 
 /// 查模型价格,返回 (prompt_price, completion_price)(每 1M tokens)。
+/// 查询/解码失败打 warn 并返回 None(按无价格处理),不再静默吞错。
 pub fn find_price(conn: &Connection, model: &str) -> Option<(f64, f64)> {
-    // 精确命中优先
-    let exact: Option<(f64, f64)> = conn
-        .query_row(
-            "SELECT prompt_price, completion_price FROM model_prices WHERE model = ?1",
-            rusqlite::params![model],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .ok();
+    // 精确命中优先;QueryReturnedNoRows 是正常的"无精确匹配",不算错误。
+    let exact: Option<(f64, f64)> = match conn.query_row(
+        "SELECT prompt_price, completion_price FROM model_prices WHERE model = ?1",
+        rusqlite::params![model],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ) {
+        Ok(v) => Some(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => {
+            tracing::warn!("find_price: exact price query failed for model '{}': {}", model, e);
+            return None;
+        }
+    };
     if exact.is_some() {
         return exact;
     }
 
     // 通配:取最长前缀(最具体)的 * 条目
     let mut best: Option<(usize, f64, f64)> = None;
-    let mut stmt = conn
+    let mut stmt = match conn
         .prepare("SELECT model, prompt_price, completion_price FROM model_prices WHERE model LIKE '%*'")
-        .ok()?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, f64>(2)?,
-            ))
-        })
-        .ok()?;
-    for r in rows.filter_map(|r| r.ok()) {
+    {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            tracing::warn!("find_price: wildcard price query prepare failed: {}", e);
+            return None;
+        }
+    };
+    let rows = match stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, f64>(1)?,
+            row.get::<_, f64>(2)?,
+        ))
+    }) {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("find_price: wildcard price query failed: {}", e);
+            return None;
+        }
+    };
+    for r in rows {
+        let r = match r {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("find_price: failed to decode price row: {}", e);
+                continue;
+            }
+        };
         let prefix = r.0.trim_end_matches('*');
         if !prefix.is_empty() && model.starts_with(prefix) {
             let len = prefix.len();

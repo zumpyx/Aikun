@@ -20,6 +20,7 @@ async function loadPrices() {
   if (!list) return;
   if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
   const data = r.data;
+  state.prices = data;
   if (data.length === 0) {
     list.innerHTML = '<div class="card"><div class="empty"><p>暂无价格,未计费的请求按 0 元记账</p></div></div>';
     return;
@@ -33,8 +34,8 @@ async function loadPrices() {
             ${data.map(p => `
               <tr>
                 <td><strong>${esc(p.model)}</strong></td>
-                <td>${fmtNum(p.prompt_price)}</td>
-                <td>${fmtNum(p.completion_price)}</td>
+                <td>${fmtCost(p.prompt_price)}</td>
+                <td>${fmtCost(p.completion_price)}</td>
                 <td style="color:var(--muted);font-size:12.5px">${esc(p.updated_at)}</td>
                 <td>
                   <button class="btn-outline btn-sm" data-action="edit-price" data-id="${esc(p.id)}">编辑</button>
@@ -46,7 +47,6 @@ async function loadPrices() {
         </table>
       </div>
     </div>`;
-  state.prices = data;
 }
 
 function showPriceModal(id) {
@@ -115,8 +115,8 @@ async function loadTransactions() {
               <tr>
                 <td style="color:var(--muted);font-size:12.5px">${esc(t.created_at)}</td>
                 <td><strong>${esc(t.username || t.user_id)}</strong></td>
-                <td style="color:${t.amount >= 0 ? 'var(--ok,#10b981)' : 'var(--danger,#f43f5e)'}">${t.amount >= 0 ? '+' : ''}${fmtNum(t.amount)}</td>
-                <td>${fmtNum(t.balance_after)}</td>
+                <td style="color:${t.amount >= 0 ? 'var(--ok,#10b981)' : 'var(--danger,#f43f5e)'}">${t.amount >= 0 ? '+' : ''}${fmtCost(t.amount)}</td>
+                <td>${fmtCost(t.balance_after)}</td>
                 <td><span class="badge ${t.kind === 'recharge' ? 'badge-green' : 'badge-gray'}">${t.kind === 'recharge' ? '充值' : '调整'}</span></td>
                 <td style="font-size:12.5px">${esc(t.note) || '<span style="color:var(--faint)">-</span>'}</td>
               </tr>

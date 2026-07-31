@@ -62,8 +62,16 @@ impl DbPool {
         let mut readers = Vec::with_capacity(READ_POOL_SIZE);
         if !is_memory {
             for _ in 0..READ_POOL_SIZE {
-                readers.push(Mutex::new(open_reader(config)?));
+                match open_reader(config) {
+                    Ok(conn) => readers.push(Mutex::new(conn)),
+                    // 单个 reader 失败不应拖垮整个进程:跳过即可。
+                    Err(e) => {
+                        tracing::warn!("Failed to open read-only DB connection, skipping: {}", e);
+                    }
+                }
             }
+            // 全部失败时 readers 为空,read() 回退写连接
+            // (读写退化为互斥,但服务可用)。
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -123,6 +131,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
                 CHECK(role IN ('admin', 'user')),
             is_active       INTEGER NOT NULL DEFAULT 1,
             token_version   INTEGER NOT NULL DEFAULT 0,
+            balance         REAL NOT NULL DEFAULT 0,
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -137,6 +146,8 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             last_used_at    TEXT,
             expires_at      TEXT,
             models          TEXT NOT NULL DEFAULT '',
+            rate_limit_rpm  INTEGER NOT NULL DEFAULT 0,
+            quota_daily_tokens INTEGER NOT NULL DEFAULT 0,
             created_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -185,6 +196,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             status_code     INTEGER NOT NULL DEFAULT 0,
             success         INTEGER NOT NULL DEFAULT 1,
             error_message   TEXT,
+            cost            REAL NOT NULL DEFAULT 0,
             created_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -226,6 +238,8 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_request_logs_user_id ON request_logs(user_id);
         CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_request_logs_provider_id ON request_logs(provider_id);
+        -- enforce_key_limits 的每请求日额度子查询按 (api_key_id, 当天) 过滤。
+        CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_created ON request_logs(api_key_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_providers_health ON providers(health_status);
         ",
     )?;
@@ -346,9 +360,24 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // The UNIQUE constraint on api_keys.key already covers this lookup index.
     conn.execute_batch("DROP INDEX IF EXISTS idx_api_keys_key")?;
     migrate_request_logs_fk(conn)?;
-    // cost 必须在外键重建之后补:重建按旧 DDL 建新表,会把先加的列丢掉。
+    // FK 重建会 DROP 旧表(索引随之丢失),重建后统一补建全部 request_logs
+    // 索引;新库路径下 IF NOT EXISTS 为 no-op。
+    ensure_request_logs_indexes(conn)?;
+    // cost 已并入 CREATE TABLE 与重建 DDL;此调用兜底"重建早已完成、
+    // cost 尚未加"的中间态旧库。
     ensure_column(conn, "request_logs", "cost", "REAL NOT NULL DEFAULT 0")?;
     Ok(())
+}
+
+/// request_logs 全部索引的统一补建:与 initialize_schema 中的索引 DDL
+/// 保持一致,任何一条缺失都在这里补齐。
+fn ensure_request_logs_indexes(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_request_logs_user_id ON request_logs(user_id);
+         CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at);
+         CREATE INDEX IF NOT EXISTS idx_request_logs_provider_id ON request_logs(provider_id);
+         CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_created ON request_logs(api_key_id, created_at);",
+    )
 }
 
 /// Hash any remaining plaintext API keys in place (SHA-256 hex) and record
@@ -383,6 +412,15 @@ fn migrate_api_key_hashes(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// PRAGMA table_info 枚举列名(按表定义顺序)。
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let cols = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(cols)
+}
+
 /// Existing databases created before the FK fix have request_logs foreign keys
 /// without ON DELETE SET NULL, which makes deleting a provider/api_key/user
 /// that has any logs fail with a constraint error. SQLite cannot alter FK
@@ -411,39 +449,55 @@ fn migrate_request_logs_fk(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
 
     // request_type 等后加列已由 run_migrations 无条件补齐,此处直接重建。
+    // 重建表 DDL 与 initialize_schema 的 CREATE TABLE 保持一致。
     tracing::info!("Migrating request_logs: rebuilding with ON DELETE SET NULL foreign keys");
-    conn.execute_batch(
-        "PRAGMA foreign_keys=OFF;
-         BEGIN IMMEDIATE;
-         CREATE TABLE request_logs_mig (
-            id              TEXT PRIMARY KEY,
-            user_id         TEXT REFERENCES users(id) ON DELETE SET NULL,
-            api_key_id      TEXT REFERENCES api_keys(id) ON DELETE SET NULL,
-            provider_id     TEXT REFERENCES providers(id) ON DELETE SET NULL,
-            model           TEXT NOT NULL,
-            request_type    TEXT NOT NULL DEFAULT 'chat',
-            prompt_tokens   INTEGER NOT NULL DEFAULT 0,
-            completion_tokens INTEGER NOT NULL DEFAULT 0,
-            total_tokens    INTEGER NOT NULL DEFAULT 0,
-            latency_ms      INTEGER NOT NULL DEFAULT 0,
-            status_code     INTEGER NOT NULL DEFAULT 0,
-            success         INTEGER NOT NULL DEFAULT 1,
-            error_message   TEXT,
-            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
-         );
-         INSERT INTO request_logs_mig
-            SELECT id, user_id, api_key_id, provider_id, model, request_type,
-                   prompt_tokens, completion_tokens, total_tokens, latency_ms,
-                   status_code, success, error_message, created_at
-            FROM request_logs;
-         DROP TABLE request_logs;
-         ALTER TABLE request_logs_mig RENAME TO request_logs;
-         CREATE INDEX IF NOT EXISTS idx_request_logs_user_id ON request_logs(user_id);
-         CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at);
-         CREATE INDEX IF NOT EXISTS idx_request_logs_provider_id ON request_logs(provider_id);
-         COMMIT;
-         PRAGMA foreign_keys=ON;",
-    )?;
+    conn.execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;")?;
+    let rebuild = (|| -> Result<(), rusqlite::Error> {
+        conn.execute_batch(
+            "CREATE TABLE request_logs_mig (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT REFERENCES users(id) ON DELETE SET NULL,
+                api_key_id      TEXT REFERENCES api_keys(id) ON DELETE SET NULL,
+                provider_id     TEXT REFERENCES providers(id) ON DELETE SET NULL,
+                model           TEXT NOT NULL,
+                request_type    TEXT NOT NULL DEFAULT 'chat',
+                prompt_tokens   INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens    INTEGER NOT NULL DEFAULT 0,
+                latency_ms      INTEGER NOT NULL DEFAULT 0,
+                status_code     INTEGER NOT NULL DEFAULT 0,
+                success         INTEGER NOT NULL DEFAULT 1,
+                error_message   TEXT,
+                cost            REAL NOT NULL DEFAULT 0,
+                created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        )?;
+        // 列清单动态枚举:新旧表共有的列全部复制,未来加列忘了同步这里的
+        // INSERT 也不会静默丢数据。
+        let new_cols = table_columns(conn, "request_logs_mig")?;
+        let old_cols = table_columns(conn, "request_logs")?;
+        let common: Vec<&str> = new_cols
+            .iter()
+            .filter(|c| old_cols.contains(c))
+            .map(String::as_str)
+            .collect();
+        let cols = common.join(", ");
+        conn.execute_batch(&format!(
+            "INSERT INTO request_logs_mig ({cols}) SELECT {cols} FROM request_logs;
+             DROP TABLE request_logs;
+             ALTER TABLE request_logs_mig RENAME TO request_logs;"
+        ))?;
+        Ok(())
+    })();
+    match rebuild {
+        Ok(()) => conn.execute_batch("COMMIT; PRAGMA foreign_keys=ON;")?,
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK; PRAGMA foreign_keys=ON;");
+            return Err(e);
+        }
+    }
+    // 索引不在此补建:DROP TABLE 会带走旧表索引,由 run_migrations 在本
+    // 函数之后调 ensure_request_logs_indexes 统一补齐。
     tracing::info!("request_logs migration complete");
     Ok(())
 }

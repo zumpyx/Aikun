@@ -90,7 +90,7 @@ async function showUserModal(id) {
       const upd = {};
       const name = document.getElementById('uf-name').value;
       const pass = document.getElementById('uf-pass').value;
-      if (name && name !== user.display_name) upd.display_name = name;
+      if (name !== user.display_name) upd.display_name = name;
       if (pass) upd.password = pass;
       if (Object.keys(upd).length === 0) return toast('没有修改', 'info');
       const r = await api('PATCH', `/api/admin/users/${user.id}`, upd);

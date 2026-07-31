@@ -26,14 +26,16 @@ pub fn provider_protocol(provider_type: &str) -> &'static str {
 pub fn convert_request(body: &Value, from: &str, to: &str) -> Value {
     if from == to {
         // OpenAI→OpenAI pass-through: ask the upstream to report token usage
-        // in the final SSE chunk so the gateway can log it. The extra usage
-        // chunk is part of the OpenAI spec and is forwarded as-is.
-        if from == PROTOCOL_OPENAI
-            && body["stream"].as_bool().unwrap_or(false)
-            && body["stream_options"].is_null()
-        {
+        // in the final SSE chunk so the gateway can log it. include_usage is
+        // forced on even when the client explicitly disabled it — otherwise a
+        // client could stream for free. Other stream_options keys are kept.
+        if from == PROTOCOL_OPENAI && body["stream"].as_bool().unwrap_or(false) {
             let mut b = body.clone();
-            b["stream_options"] = json!({"include_usage": true});
+            if let Some(opts) = b["stream_options"].as_object_mut() {
+                opts.insert("include_usage".into(), json!(true));
+            } else {
+                b["stream_options"] = json!({"include_usage": true});
+            }
             return b;
         }
         return body.clone();
@@ -593,21 +595,25 @@ fn openai_resp_to_anthropic(resp: &Value) -> Value {
 
 /// Extract (prompt, completion, total) token usage from a response in either
 /// protocol (OpenAI `prompt_tokens`/`completion_tokens` or Anthropic
-/// `input_tokens`/`output_tokens`).
+/// `input_tokens`/`output_tokens`). 上游数值不可信:负数按 0 处理,
+/// 超出 i32 范围的值做饱和转换,避免污染计费与统计。
 pub fn extract_usage_any(resp: &Value) -> (i32, i32, i32) {
+    let clamp = |v: Option<i64>| v.unwrap_or(0).clamp(0, i32::MAX as i64) as i32;
     let u = &resp["usage"];
-    let prompt = u["prompt_tokens"]
-        .as_i64()
-        .or_else(|| u["input_tokens"].as_i64())
-        .unwrap_or(0) as i32;
-    let completion = u["completion_tokens"]
-        .as_i64()
-        .or_else(|| u["output_tokens"].as_i64())
-        .unwrap_or(0) as i32;
+    let prompt = clamp(
+        u["prompt_tokens"]
+            .as_i64()
+            .or_else(|| u["input_tokens"].as_i64()),
+    );
+    let completion = clamp(
+        u["completion_tokens"]
+            .as_i64()
+            .or_else(|| u["output_tokens"].as_i64()),
+    );
     let total = u["total_tokens"]
         .as_i64()
-        .map(|t| t as i32)
-        .unwrap_or(prompt + completion);
+        .map(|t| clamp(Some(t)))
+        .unwrap_or(prompt.saturating_add(completion));
     (prompt, completion, total)
 }
 
@@ -715,7 +721,9 @@ impl SseOut {
 /// `finish` is called when the upstream stream ends.
 pub enum StreamConverter {
     /// Same protocol, OpenAI: pass events through, capturing usage.
-    PassOpenAi { usage: (i32, i32, i32) },
+    /// strip_usage_chunk 为 true 时剥掉仅含 usage 的结尾 chunk
+    /// (客户端未请求 include_usage,由网关注入时不应多送一个 chunk)。
+    PassOpenAi { usage: (i32, i32, i32), strip_usage_chunk: bool },
     /// Same protocol, Anthropic: pass events through, capturing usage.
     PassAnthropic { usage: (i32, i32, i32) },
     /// OpenAI upstream → Anthropic client.
@@ -727,7 +735,10 @@ pub enum StreamConverter {
 impl StreamConverter {
     pub fn new(client_protocol: &str, provider_protocol: &str, model: &str) -> Self {
         match (client_protocol, provider_protocol) {
-            (PROTOCOL_OPENAI, PROTOCOL_OPENAI) => StreamConverter::PassOpenAi { usage: (0, 0, 0) },
+            (PROTOCOL_OPENAI, PROTOCOL_OPENAI) => StreamConverter::PassOpenAi {
+                usage: (0, 0, 0),
+                strip_usage_chunk: false,
+            },
             (PROTOCOL_ANTHROPIC, PROTOCOL_ANTHROPIC) => {
                 StreamConverter::PassAnthropic { usage: (0, 0, 0) }
             }
@@ -737,23 +748,47 @@ impl StreamConverter {
             (PROTOCOL_OPENAI, PROTOCOL_ANTHROPIC) => {
                 StreamConverter::AnthropicToOpenAi(AnStreamState::new(model))
             }
-            _ => StreamConverter::PassOpenAi { usage: (0, 0, 0) },
+            _ => StreamConverter::PassOpenAi {
+                usage: (0, 0, 0),
+                strip_usage_chunk: false,
+            },
         }
+    }
+
+    /// 设置是否剥掉仅含 usage 的结尾 chunk(仅对 OpenAI 直通生效)。
+    /// 客户端自己请求了 include_usage 时应传 false,usage chunk 原样转发。
+    pub fn strip_usage_chunk(mut self, strip: bool) -> Self {
+        if let StreamConverter::PassOpenAi { strip_usage_chunk, .. } = &mut self {
+            *strip_usage_chunk = strip;
+        }
+        self
     }
 
     pub fn push(&mut self, ev: &SseEvent) -> Vec<SseOut> {
         match self {
-            StreamConverter::PassOpenAi { usage } => {
+            StreamConverter::PassOpenAi { usage, strip_usage_chunk } => {
+                let mut forward = true;
                 if let Ok(chunk) = serde_json::from_str::<Value>(&ev.data) {
                     let (p, c, t) = extract_usage_any(&chunk);
                     if t > 0 {
                         *usage = (p, c, t);
                     }
+                    // 仅含 usage 的结尾 chunk:choices 缺失或为空且带 usage。
+                    if *strip_usage_chunk
+                        && !chunk["usage"].is_null()
+                        && chunk["choices"].as_array().map(|a| a.is_empty()).unwrap_or(true)
+                    {
+                        forward = false;
+                    }
                 }
-                vec![SseOut {
-                    event: ev.event.clone(),
-                    data: ev.data.clone(),
-                }]
+                if forward {
+                    vec![SseOut {
+                        event: ev.event.clone(),
+                        data: ev.data.clone(),
+                    }]
+                } else {
+                    vec![]
+                }
             }
             StreamConverter::PassAnthropic { usage } => {
                 if let Ok(data) = serde_json::from_str::<Value>(&ev.data) {
@@ -792,7 +827,7 @@ impl StreamConverter {
 
     pub fn usage(&self) -> (i32, i32, i32) {
         match self {
-            StreamConverter::PassOpenAi { usage } | StreamConverter::PassAnthropic { usage } => {
+            StreamConverter::PassOpenAi { usage, .. } | StreamConverter::PassAnthropic { usage } => {
                 *usage
             }
             StreamConverter::OpenAiToAnthropic(state) => state.usage,
@@ -1216,11 +1251,22 @@ mod tests {
         let body = json!({"model": "gpt-4", "stream": true, "messages": []});
         let out = convert_request(&body, "openai", "openai");
         assert_eq!(out["stream_options"], json!({"include_usage": true}));
-        // Non-streaming and already-set stream_options stay untouched.
+        // Non-streaming requests stay untouched.
         let plain = json!({"model": "gpt-4", "messages": []});
         assert!(convert_request(&plain, "openai", "openai")["stream_options"].is_null());
+        // Other stream_options keys are kept, but include_usage is always
+        // forced on — an explicit client-side `false` must not disable
+        // usage reporting (that would let streams go unbilled).
         let preset = json!({"model": "gpt-4", "stream": true, "stream_options": {"x": 1}});
-        assert_eq!(convert_request(&preset, "openai", "openai")["stream_options"], json!({"x": 1}));
+        assert_eq!(
+            convert_request(&preset, "openai", "openai")["stream_options"],
+            json!({"x": 1, "include_usage": true})
+        );
+        let disabled = json!({"model": "gpt-4", "stream": true, "stream_options": {"include_usage": false}});
+        assert_eq!(
+            convert_request(&disabled, "openai", "openai")["stream_options"],
+            json!({"include_usage": true})
+        );
     }
 
     #[test]
@@ -1463,6 +1509,17 @@ mod tests {
         c.push(&sse(r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#));
         assert_eq!(c.usage(), (1, 2, 3));
         assert!(c.finish().is_empty());
+    }
+
+    #[test]
+    fn stream_pass_openai_strips_unrequested_usage_chunk() {
+        // 客户端未请求 include_usage(由网关注入):usage chunk 只记账、不转发。
+        let mut c = StreamConverter::new("openai", "openai", "m").strip_usage_chunk(true);
+        let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"x"}}]}"#));
+        assert_eq!(outs.len(), 1);
+        let outs = c.push(&sse(r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#));
+        assert!(outs.is_empty(), "usage-only chunk must not reach the client");
+        assert_eq!(c.usage(), (1, 2, 3));
     }
 
     #[test]
