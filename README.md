@@ -40,7 +40,7 @@
 ./aikun --host 0.0.0.0:3000      # 需要对外提供服务时
 ```
 
-浏览器打开 `http://localhost:3000` 即为管理端。首次启动会创建管理员账号 `admin`,**随机密码只在启动日志中打印一次**,请立即登录并修改。
+浏览器打开 `http://localhost:3000` 即为管理端。首次启动会创建管理员账号 `admin`,**随机密码只在启动日志中打印一次**,请立即登录并修改。注意:Docker 部署下 `docker logs aikun` 在容器存活期内可随时回捞该密码,改密后按需清理/滚动容器日志。
 
 ### 3. Docker 部署(可选)
 
@@ -79,6 +79,8 @@ cargo zigbuild --release --target x86_64-unknown-linux-musl  # 静态交叉编�
 export AIKUN_JWT_SECRET=$(openssl rand -hex 32)
 ```
 
+密钥至少 32 字符,过短将拒绝启动。`--jwt-secret` 命令行传参会暴露在进程列表(`ps`)中,生产环境请用环境变量。
+
 该密钥缺省时同时用于派生渠道上游 key 的静态加密密钥(AES-256-GCM,密文以
 `enc:v1:` 前缀落库):回退模式下**部署后请勿更换**,否则已加密的渠道 key
 无法解密,所有已签发 JWT 也会同时失效。设置独立的 `AIKUN_ENCRYPTION_KEY`
@@ -108,6 +110,8 @@ export AIKUN_JWT_SECRET=$(openssl rand -hex 32)
 
 也可将 `AIKUN_*` 变量写入工作目录的 `.env` 文件(参考 [env.example](env.example)),启动时自动加载,效果等同于 shell 环境变量(shell 中已存在的同名变量优先,不会被 `.env` 覆盖)。`.env` 已被 `.gitignore` 排除,不会被提交。
 
+日志级别由 `RUST_LOG`(tracing EnvFilter,无 `AIKUN_` 前缀)控制,默认 `aikun=info,tower_http=info`;排查时可设 `RUST_LOG=aikun=debug`。
+
 ## 使用
 
 接入方式与官方 API 完全兼容,将 base_url 指向网关即可。
@@ -132,6 +136,10 @@ curl http://localhost:3000/v1/messages \
 ```
 
 无论上游渠道是哪种协议,网关都会自动双向转换——客户端协议与渠道协议可自由组合。
+
+**协议转换边界**:跨协议转换时部分对方协议特有的字段会被静默丢弃——OpenAI→Anthropic 丢 `response_format`/`logit_bias`/`n`/`seed`/两个 penalty,`max_tokens` 缺省 4096(长输出需显式设置);Anthropic→OpenAI 丢 `thinking`/`cache_control`/`top_k`/`metadata`;`reasoning_content`(推理流)双向均不转发。客户端与渠道同协议时不存在此问题。
+
+API Key 的 `expires_at` 建议传带时区的 RFC3339;无时区的输入(如 `2026-08-01 12:00`)按 **UTC** 解释。
 
 管理端功能:渠道管理(一键获取模型列表、创建副本)、模型健康矩阵、请求测试(流式/非流式)、API Key 管理、日志统计、用户管理(仅管理员创建,支持批量)、计费(价格表、余额调账)。
 

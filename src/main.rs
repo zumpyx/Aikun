@@ -94,6 +94,15 @@ async fn main() {
              Set the AIKUN_JWT_SECRET environment variable to a long random string before starting."
         );
     }
+    if config.jwt_secret.len() < 32 {
+        // 弱 secret 可被爆破:它既是 HS256 签名密钥,缺省时又派生渠道 key
+        // 的 AES 加密密钥,双重暴露面,拒绝启动。
+        panic!(
+            "AIKUN_JWT_SECRET is too short ({} chars, need at least 32). \
+             Generate one with: openssl rand -hex 32",
+            config.jwt_secret.len()
+        );
+    }
 
     let pool = Arc::new(DbPool::new(&config).expect("Failed to initialize database"));
     info!("Database initialized");

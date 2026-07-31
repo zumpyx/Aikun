@@ -177,6 +177,8 @@ fn find_providers_for_model(
 }
 
 /// List all unique models available across all active providers.
+/// 除 models 列表外,model_mapping 的 key(请求侧模型名)也并入——仅靠
+/// 映射路由的模型调得通却看不到,客户端无法发现。
 pub fn list_available_models(pool: &DbPool) -> Vec<String> {
     let conn = match pool.read().lock() {
         Ok(c) => c,
@@ -184,19 +186,31 @@ pub fn list_available_models(pool: &DbPool) -> Vec<String> {
     };
 
     let mut stmt = match conn.prepare(
-        "SELECT models FROM providers WHERE is_active = 1 AND health_status != 'unhealthy'"
+        "SELECT models, model_mapping FROM providers WHERE is_active = 1 AND health_status != 'unhealthy'"
     ) {
         Ok(s) => s,
         Err(_) => return vec![],
     };
 
     let mut models: Vec<String> = vec![];
-    if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+    if let Ok(rows) = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) {
         for row in rows.flatten() {
-            if let Ok(ms) = serde_json::from_str::<Vec<String>>(&row) {
+            if let Ok(ms) = serde_json::from_str::<Vec<String>>(&row.0) {
                 for m in ms {
                     if !models.contains(&m) {
                         models.push(m);
+                    }
+                }
+            }
+            if let Ok(map) =
+                serde_json::from_str::<std::collections::HashMap<String, String>>(&row.1)
+            {
+                for k in map.keys() {
+                    // 空 key 与 provider_supports_model 口径一致:不匹配任何模型
+                    if !k.is_empty() && !models.contains(k) {
+                        models.push(k.clone());
                     }
                 }
             }
@@ -551,5 +565,23 @@ mod tests {
         let (_, _, active, reason) = provider_state(&pool);
         assert!(!active);
         assert!(reason.contains("认证失败"));
+    }
+
+    #[test]
+    fn available_models_include_mapping_keys() {
+        let pool = test_pool();
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET models = '[\"gpt-4\"]', model_mapping = '{\"claude-\":\"gpt-4\",\"\":\"x\"}' WHERE id = 'p'",
+                [],
+            )
+            .unwrap();
+        let models = list_available_models(&pool);
+        assert!(models.contains(&"gpt-4".to_string()));
+        // mapping 的 key(请求侧模型名)也要出现在列表里;空 key 除外
+        assert!(models.contains(&"claude-".to_string()));
+        assert!(!models.contains(&"".to_string()));
     }
 }
