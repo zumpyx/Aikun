@@ -527,6 +527,26 @@ async fn admin_prices_crud_and_wildcard_billing() {
 }
 
 #[tokio::test]
+async fn default_prices_seeded_when_table_empty_on_startup() {
+    // spawn 已清空价格表(见 tests/common);重启等价于空表启动 → 重新 seed
+    let mut app = TestApp::spawn().await;
+    app.restart().await;
+    let (n, gpt4o_prompt): (i64, f64) = app
+        .db()
+        .query_row(
+            "SELECT COUNT(*),
+                    (SELECT prompt_price FROM model_prices WHERE model = 'gpt-4o')
+             FROM model_prices",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(n > 100, "expected seeded default prices, got {}", n);
+    // gpt-4o 刊例价 $2.5/1M × 汇率 7.2 = 18 元
+    assert_eq!(gpt4o_prompt, 18.0);
+}
+
+#[tokio::test]
 async fn admin_adjust_balance_records_transaction() {
     let app = TestApp::spawn().await;
     seed_api_key(&app.db());

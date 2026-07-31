@@ -20,6 +20,12 @@ pub fn create_connection(config: &AppConfig) -> Result<Connection, rusqlite::Err
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")?;
     initialize_schema(&conn)?;
     seed_default_admin(&conn)?;
+    // 价格表为空时导入内置默认价格(LiteLLM 刊例价快照),便于开箱即计费
+    match crate::billing::seed_default_prices(&conn) {
+        Ok(n) if n > 0 => tracing::info!("已导入 {} 条内置默认模型价格", n),
+        Ok(_) => {}
+        Err(e) => tracing::error!("导入内置默认模型价格失败: {}", e),
+    }
     Ok(conn)
 }
 

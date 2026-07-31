@@ -200,6 +200,11 @@ impl TestApp {
             dir,
         };
         app.wait_ready().await;
+        // 全新库启动时会 seed 内置默认价格(见 billing::seed_default_prices);
+        // 各用例自行维护价格数据,这里清空以保证隔离。
+        app.db()
+            .execute("DELETE FROM model_prices", [])
+            .unwrap();
         app
     }
 

@@ -1,6 +1,7 @@
 //! 计费:模型价格匹配与费用计算。
 //! 价格存 model_prices 表,单位为每 1M tokens 的价格(元)。
-//! 匹配规则:精确命中优先;否则取以 `*` 结尾的通配条目中最长的前缀。
+//! 匹配规则:精确命中优先;否则取以 `*` 结尾的通配条目中最长的前缀;
+//! 单独的 `*` 是兜底条目,匹配一切但优先级最低。
 //! 无匹配返回 None,调用方按 cost=0 处理(不动用户余额)。
 //!
 //! 金额用 REAL(浮点):每请求费用极小,累计误差只影响展示分位;
@@ -61,7 +62,8 @@ pub fn find_price(conn: &Connection, model: &str) -> Option<(f64, f64)> {
             }
         };
         let prefix = r.0.trim_end_matches('*');
-        if !prefix.is_empty() && model.starts_with(prefix) {
+        // 空前缀(条目为 *)是兜底价:匹配一切,但优先级最低(长度 0)
+        if prefix.is_empty() || model.starts_with(prefix) {
             let len = prefix.len();
             if best.as_ref().is_none_or(|(l, _, _)| len > *l) {
                 best = Some((len, r.1, r.2));
@@ -75,6 +77,65 @@ pub fn find_price(conn: &Connection, model: &str) -> Option<(f64, f64)> {
 pub fn compute_cost(prompt_tokens: i32, completion_tokens: i32, prices: (f64, f64)) -> f64 {
     prompt_tokens as f64 / 1_000_000.0 * prices.0
         + completion_tokens as f64 / 1_000_000.0 * prices.1
+}
+
+/// 内置默认价格快照(src/default_prices.json):
+/// 源自 LiteLLM 的 model_prices_and_context_window.json(官方刊例价),
+/// 筛选主流 chat 模型,单位为 USD / 1M tokens。属售价基准,非渠道成本价。
+const DEFAULT_PRICES_JSON: &str = include_str!("default_prices.json");
+
+/// 快照换算汇率(USD → CNY)。价格表以元计费,seed 时一次性折算;
+/// 汇率漂移不会回溯,管理员可在价格表页面手工改价。
+const USD_TO_CNY_RATE: f64 = 7.2;
+
+/// 兜底价(元/1M tokens):LiteLLM 快照未收录的模型按此计费,
+/// 以 * 通配条目入库,优先级最低,可在「计费」页修改或删除
+/// (删除后无匹配模型回到按 0 元记账)。
+const FALLBACK_PRICE: (f64, f64) = (3.0, 7.0);
+
+/// 仅在价格表为空时导入内置默认价格(用户已有任何条目即跳过,
+/// 不覆盖手工维护的数据,也不会复活被删除的内置条目)。
+pub fn seed_default_prices(conn: &Connection) -> Result<usize, rusqlite::Error> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM model_prices", [], |row| row.get(0))?;
+    if count > 0 {
+        return Ok(0);
+    }
+    let prices: Vec<(String, f64, f64)> = match serde_json::from_str::<
+        std::collections::BTreeMap<String, (f64, f64)>,
+    >(DEFAULT_PRICES_JSON)
+    {
+        Ok(map) => map
+            .into_iter()
+            .map(|(model, (p, c))| {
+                (
+                    model,
+                    // 保留 4 位小数:低价模型折算后仍有有效精度
+                    (p * USD_TO_CNY_RATE * 1e4).round() / 1e4,
+                    (c * USD_TO_CNY_RATE * 1e4).round() / 1e4,
+                )
+            })
+            .collect(),
+        Err(e) => {
+            // 快照文件随二进制编译内嵌,解析失败是构建期问题,不该在运行期发生
+            tracing::error!("seed_default_prices: embedded price snapshot is invalid: {}", e);
+            return Ok(0);
+        }
+    };
+    let n = prices.len();
+    let mut stmt = conn.prepare(
+        "INSERT INTO model_prices (id, model, prompt_price, completion_price) VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for (model, prompt, completion) in prices {
+        stmt.execute(rusqlite::params![uuid::Uuid::new_v4().to_string(), model, prompt, completion])?;
+    }
+    // 兜底价直接以元入库(不经汇率换算)
+    stmt.execute(rusqlite::params![
+        uuid::Uuid::new_v4().to_string(),
+        "*",
+        FALLBACK_PRICE.0,
+        FALLBACK_PRICE.1
+    ])?;
+    Ok(n + 1)
 }
 
 #[cfg(test)]
@@ -93,7 +154,8 @@ mod tests {
                 ('1', 'gpt-4', 10.0, 30.0),
                 ('2', 'gpt-*', 1.0, 2.0),
                 ('3', 'gpt-4o-*', 3.0, 6.0),
-                ('4', 'claude-*', 15.0, 75.0);",
+                ('4', 'claude-*', 15.0, 75.0),
+                ('5', '*', 3.0, 7.0);",
         )
         .unwrap();
         conn
@@ -115,10 +177,21 @@ mod tests {
     }
 
     #[test]
-    fn no_match_returns_none() {
+    fn fallback_also_matches_edge_inputs() {
         let conn = setup();
-        assert_eq!(find_price(&conn, "llama-3"), None);
-        assert_eq!(find_price(&conn, ""), None);
+        // 不以任何通配前缀开头的输入只命中兜底
+        assert_eq!(find_price(&conn, "gp"), Some((3.0, 7.0)));
+        assert_eq!(find_price(&conn, ""), Some((3.0, 7.0)));
+    }
+
+    #[test]
+    fn bare_star_is_lowest_priority_fallback() {
+        let conn = setup();
+        // 未知模型命中兜底价
+        assert_eq!(find_price(&conn, "llama-3"), Some((3.0, 7.0)));
+        // 有更具体的通配/精确条目时兜底不生效
+        assert_eq!(find_price(&conn, "gpt-3.5-turbo"), Some((1.0, 2.0)));
+        assert_eq!(find_price(&conn, "gpt-4"), Some((10.0, 30.0)));
     }
 
     #[test]
@@ -126,5 +199,44 @@ mod tests {
         // 5 prompt + 3 completion tokens @ (10, 30)/1M = 0.00014 元
         let cost = compute_cost(5, 3, (10.0, 30.0));
         assert!((cost - 0.00014).abs() < 1e-12);
+    }
+
+    #[test]
+    fn seed_imports_defaults_only_into_empty_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE model_prices (
+                id TEXT PRIMARY KEY, model TEXT NOT NULL UNIQUE,
+                prompt_price REAL NOT NULL DEFAULT 0,
+                completion_price REAL NOT NULL DEFAULT 0
+            );",
+        )
+        .unwrap();
+        // 空表:全量导入
+        let n = seed_default_prices(&conn).unwrap();
+        assert!(n > 100, "expected a substantial default price set, got {}", n);
+        let gpt4o: (f64, f64) = conn
+            .query_row(
+                "SELECT prompt_price, completion_price FROM model_prices WHERE model = 'gpt-4o'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        // gpt-4o 刊例价 $2.5/$10 × 7.2 = 18/72 元
+        assert_eq!(gpt4o, (18.0, 72.0));
+        // 兜底条目:* → 3/7 元,未知模型按此计费
+        assert_eq!(find_price(&conn, "some-unknown-model"), Some((3.0, 7.0)));
+        // 非空表:跳过,不覆盖手工数据
+        conn.execute("DELETE FROM model_prices WHERE model != 'gpt-4o'", [])
+            .unwrap();
+        conn.execute("UPDATE model_prices SET prompt_price = 1.0 WHERE model = 'gpt-4o'", [])
+            .unwrap();
+        assert_eq!(seed_default_prices(&conn).unwrap(), 0);
+        let kept: f64 = conn
+            .query_row("SELECT prompt_price FROM model_prices WHERE model = 'gpt-4o'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(kept, 1.0);
     }
 }
