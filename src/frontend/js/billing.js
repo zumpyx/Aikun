@@ -122,13 +122,33 @@ async function deletePrice(id) {
   else toast(r.data.message || r.data.error || '删除失败', 'error');
 }
 
-async function loadTransactions() {
+const TX_PAGE_SIZE = 200;
+let txOffset = 0;
+
+function txQuerySuffix() {
   const uid = document.getElementById('tx-filter-user')?.value;
-  const r = await api('GET', '/api/admin/billing/transactions' + (uid ? '?user_id=' + encodeURIComponent(uid) : ''));
+  return uid ? '&user_id=' + encodeURIComponent(uid) : '';
+}
+
+function txRow(t) {
+  return `
+    <tr>
+      <td style="color:var(--muted);font-size:12.5px">${esc(fmtTime(t.created_at))}</td>
+      <td><strong>${esc(t.username || t.user_id)}</strong></td>
+      <td style="color:${t.amount >= 0 ? 'var(--ok,#10b981)' : 'var(--danger,#f43f5e)'}">${t.amount >= 0 ? '+' : ''}${fmtCost(t.amount)}</td>
+      <td>${fmtCost(t.balance_after)}</td>
+      <td><span class="badge ${t.kind === 'recharge' ? 'badge-green' : 'badge-gray'}">${t.kind === 'recharge' ? '充值' : '调整'}</span></td>
+      <td style="font-size:12.5px">${esc(t.note) || '<span style="color:var(--faint)">-</span>'}</td>
+    </tr>`;
+}
+
+async function loadTransactions() {
+  const r = await api('GET', '/api/admin/billing/transactions?offset=0' + txQuerySuffix());
   const list = document.getElementById('transactions-list');
   if (!list) return;
   if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
   const data = r.data;
+  txOffset = 0;
   if (data.length === 0) {
     list.innerHTML = '<div class="card"><div class="empty"><p>暂无调账记录</p></div></div>';
     return;
@@ -138,21 +158,36 @@ async function loadTransactions() {
       <div class="table-wrap">
         <table>
           <thead><tr><th>时间</th><th>用户</th><th>金额(元)</th><th>调后余额(元)</th><th>类型</th><th>备注</th></tr></thead>
-          <tbody>
-            ${data.map(t => `
-              <tr>
-                <td style="color:var(--muted);font-size:12.5px">${esc(fmtTime(t.created_at))}</td>
-                <td><strong>${esc(t.username || t.user_id)}</strong></td>
-                <td style="color:${t.amount >= 0 ? 'var(--ok,#10b981)' : 'var(--danger,#f43f5e)'}">${t.amount >= 0 ? '+' : ''}${fmtCost(t.amount)}</td>
-                <td>${fmtCost(t.balance_after)}</td>
-                <td><span class="badge ${t.kind === 'recharge' ? 'badge-green' : 'badge-gray'}">${t.kind === 'recharge' ? '充值' : '调整'}</span></td>
-                <td style="font-size:12.5px">${esc(t.note) || '<span style="color:var(--faint)">-</span>'}</td>
-              </tr>
-            `).join('')}
+          <tbody id="tx-tbody">
+            ${data.map(txRow).join('')}
           </tbody>
         </table>
       </div>
+      <div id="tx-more-wrap" style="text-align:center;margin-top:12px;${data.length < TX_PAGE_SIZE ? 'display:none' : ''}">
+        <button class="btn-outline btn-sm" id="tx-more">加载更多</button>
+      </div>
     </div>`;
+  const moreBtn = document.getElementById('tx-more');
+  if (moreBtn) moreBtn.onclick = () => loadMoreTransactions();
+}
+
+// 追加下一页:offset 累加,返回不足一页时隐藏按钮
+async function loadMoreTransactions() {
+  const btn = document.getElementById('tx-more');
+  const tbody = document.getElementById('tx-tbody');
+  if (!btn || !tbody) return;
+  btn.disabled = true;
+  try {
+    const next = txOffset + TX_PAGE_SIZE;
+    const r = await api('GET', `/api/admin/billing/transactions?offset=${next}` + txQuerySuffix());
+    if (!r.ok) { toast(r.data.message || r.data.error || '加载失败', 'error'); return; }
+    if (!document.getElementById('tx-tbody')) return; // 等待期间已切页/重筛
+    txOffset = next;
+    tbody.insertAdjacentHTML('beforeend', r.data.map(txRow).join(''));
+    if (r.data.length < TX_PAGE_SIZE) document.getElementById('tx-more-wrap')?.remove();
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function showAdjustBalanceModal(id) {

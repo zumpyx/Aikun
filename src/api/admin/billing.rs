@@ -315,6 +315,7 @@ pub async fn adjust_balance(
 #[derive(Debug, Deserialize)]
 pub struct TransactionQuery {
     pub user_id: Option<String>,
+    pub offset: Option<i64>,
 }
 
 pub async fn list_transactions(
@@ -328,21 +329,23 @@ pub async fn list_transactions(
         }
     };
     let uid = query.user_id.as_deref().unwrap_or("").trim();
+    // 分页:limit 固定 200,offset 防负(前端"加载更多"按页累加)。
+    let offset = query.offset.unwrap_or(0).max(0);
     let (sql, p): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if uid.is_empty() {
         (
             "SELECT t.id, t.user_id, u.username, t.amount, t.balance_after, t.kind, t.note, t.created_at
              FROM billing_transactions t LEFT JOIN users u ON u.id = t.user_id
-             ORDER BY t.created_at DESC, t.rowid DESC LIMIT 200"
+             ORDER BY t.created_at DESC, t.rowid DESC LIMIT 200 OFFSET ?"
                 .to_string(),
-            vec![],
+            vec![Box::new(offset)],
         )
     } else {
         (
             "SELECT t.id, t.user_id, u.username, t.amount, t.balance_after, t.kind, t.note, t.created_at
              FROM billing_transactions t LEFT JOIN users u ON u.id = t.user_id
-             WHERE t.user_id = ? ORDER BY t.created_at DESC, t.rowid DESC LIMIT 200"
+             WHERE t.user_id = ? ORDER BY t.created_at DESC, t.rowid DESC LIMIT 200 OFFSET ?"
                 .to_string(),
-            vec![Box::new(uid.to_string())],
+            vec![Box::new(uid.to_string()), Box::new(offset)],
         )
     };
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = p.iter().map(|x| x.as_ref()).collect();
