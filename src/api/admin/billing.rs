@@ -58,8 +58,23 @@ pub struct UpsertPriceRequest {
     pub model: Option<String>,
     pub prompt_price: Option<f64>,
     pub completion_price: Option<f64>,
-    /// 缓存 token 单价(可空):null/缺省 = 缓存按输入价计费。
-    pub cached_price: Option<f64>,
+    /// 缓存 token 单价(可空)。双层 Option 区分三种 PATCH 语义:
+    /// 缺省 = 不改动;显式 null = 清回 NULL(缓存按输入价);数值 = 更新。
+    /// 创建时 None/Some(None) 都存 NULL。
+    /// deserialize_some:serde 默认会把显式 null 也解析成外层 None,
+    /// 必须自定义反序列化把"字段存在"这一事实包进外层 Some。
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub cached_price: Option<Option<f64>>,
+}
+
+/// 字段存在即包一层 Some(显式 null → Some(None));缺省时 serde(default)
+/// 兜底为 None,不经过本函数。
+fn deserialize_some<'de, T, D>(de: D) -> Result<Option<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(de).map(Some)
 }
 
 /// 校验:model 非空(创建时必填),价格有限且非负;通配条目的 *
@@ -89,7 +104,11 @@ fn valid_price_fields(req: &UpsertPriceRequest, creating: bool) -> Result<(), (S
             }
         }
     }
-    for v in [req.prompt_price, req.completion_price, req.cached_price].into_iter().flatten() {
+    for v in [req.prompt_price, req.completion_price]
+        .into_iter()
+        .flatten()
+        .chain(req.cached_price.into_iter().flatten())
+    {
         if !v.is_finite() || v < 0.0 {
             return Err((StatusCode::BAD_REQUEST, Json(json!({
                 "error": "invalid_price",
@@ -122,7 +141,7 @@ pub async fn create_price(
             model,
             req.prompt_price.unwrap_or(0.0),
             req.completion_price.unwrap_or(0.0),
-            req.cached_price
+            req.cached_price.flatten()
         ],
     );
     match result {
@@ -181,8 +200,8 @@ pub async fn update_price(
         updates.push("completion_price = ?");
         params_vec.push(Box::new(c));
     }
-    // cached_price 可空:PATCH 传值即更新;缺省/null 不改动既有值
-    // (与 Option 字段语义一致,清空缓存价需删除重建)。
+    // cached_price 双层 Option:缺省(None)不改动;显式 null(Some(None))
+    // 清回 NULL,缓存恢复按输入价计;数值正常更新。
     if let Some(k) = req.cached_price {
         updates.push("cached_price = ?");
         params_vec.push(Box::new(k));

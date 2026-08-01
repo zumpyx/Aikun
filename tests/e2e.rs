@@ -555,6 +555,31 @@ async fn admin_prices_crud_and_wildcard_billing() {
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.json::<serde_json::Value>().await.unwrap()["prompt_price"], 5.0);
 
+    // cached_price 双层语义:显式 null 清回 NULL(缓存按输入价),缺省不改动
+    let resp = app
+        .client()
+        .patch(format!("{}/api/admin/prices/{}", app.base, id))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"cached_price": 1.5}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.json::<serde_json::Value>().await.unwrap()["cached_price"], 1.5);
+    let resp = app
+        .client()
+        .patch(format!("{}/api/admin/prices/{}", app.base, id))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"cached_price": null}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.json::<serde_json::Value>().await.unwrap();
+    assert!(body["cached_price"].is_null(), "显式 null 应清空缓存价: {}", body);
+    // 缺省字段不影响已有值(prompt_price 仍是 5.0)
+    assert_eq!(body["prompt_price"], 5.0);
+
     let resp = app
         .client()
         .delete(format!("{}/api/admin/prices/{}", app.base, id))
