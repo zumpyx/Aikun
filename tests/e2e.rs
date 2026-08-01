@@ -399,7 +399,8 @@ async fn successful_request_deducts_user_balance() {
     let resp = chat_completions(&app).await;
     assert_eq!(resp.status(), 200);
 
-    // mock usage: 5 prompt + 3 completion → cost = 5×10/1M + 3×30/1M = 0.00014
+    // mock usage: 5 prompt(含 2 缓存)+ 3 completion;无 cached_price 时缓存
+    // 按输入价计 → cost = (3+2)×10/1M + 3×30/1M = 0.00014
     wait_until("cost recorded and balance deducted", WAIT, || {
         let (cost, balance): (f64, f64) = app
             .db()
@@ -411,6 +412,41 @@ async fn successful_request_deducts_user_balance() {
             )
             .unwrap();
         (cost - 0.00014).abs() < 1e-9 && (balance - (100.0 - 0.00014)).abs() < 1e-9
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn cached_tokens_billed_at_cached_price() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+    // gpt-4 价格:输入 10、输出 30、缓存 1 元/1M
+    app.db()
+        .execute(
+            "INSERT INTO model_prices (id, model, prompt_price, completion_price, cached_price)
+             VALUES ('mp1', 'gpt-4', 10.0, 30.0, 1.0)",
+            [],
+        )
+        .unwrap();
+
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 200);
+
+    // mock usage: 5 prompt 中 2 个命中缓存 → 未缓存 3、缓存 2、输出 3
+    // cost = 3×10/1M + 2×1/1M + 3×30/1M = 0.000122
+    wait_until("cached tokens billed at cached price", WAIT, || {
+        let (cost, cached): (f64, i64) = app
+            .db()
+            .query_row(
+                "SELECT COALESCE(SUM(cost), 0), COALESCE(SUM(cached_tokens), 0)
+                 FROM request_logs WHERE user_id = 'u-e2e'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        cached == 2 && (cost - 0.000122).abs() < 1e-9
     })
     .await;
 }
@@ -464,6 +500,8 @@ async fn admin_prices_crud_and_wildcard_billing() {
     assert_eq!(resp.status(), 201);
     let price: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(price["model"], "gpt-*");
+    // 未传 cached_price:序列化输出 null(缓存按输入价计)
+    assert!(price["cached_price"].is_null());
 
     // 重复创建同一 model → 409
     let resp = app
@@ -476,7 +514,8 @@ async fn admin_prices_crud_and_wildcard_billing() {
         .unwrap();
     assert_eq!(resp.status(), 409);
 
-    // 请求命中通配价格:cost = 5×1/1M + 3×2/1M = 0.000011
+    // 请求命中通配价格:cost = (3+2)×1/1M + 3×2/1M = 0.000011
+    // (mock 5 个输入含 2 缓存,无 cached_price 时缓存按输入价计)
     let resp = chat_completions(&app).await;
     assert_eq!(resp.status(), 200);
     wait_until("wildcard price applied", WAIT, || {

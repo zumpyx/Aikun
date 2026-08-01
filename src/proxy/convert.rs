@@ -600,28 +600,43 @@ fn openai_resp_to_anthropic(resp: &Value) -> Value {
     })
 }
 
-/// Extract (prompt, completion, total) token usage from a response in either
-/// protocol (OpenAI `prompt_tokens`/`completion_tokens` or Anthropic
-/// `input_tokens`/`output_tokens`). 上游数值不可信:负数按 0 处理,
-/// 超出 i32 范围的值做饱和转换,避免污染计费与统计。
-pub fn extract_usage_any(resp: &Value) -> (i32, i32, i32) {
+/// Extract (prompt_uncached, completion, total, cached) token usage from a
+/// response in either protocol (OpenAI `prompt_tokens`/`completion_tokens` or
+/// Anthropic `input_tokens`/`output_tokens`)。
+/// 缓存拆分:OpenAI 的 prompt_tokens 含命中缓存的部分,按
+/// prompt_tokens_details.cached_tokens 拆出单独计价;Anthropic 的
+/// input_tokens 本就不含缓存,cache_read_input_tokens 记为缓存,
+/// cache_creation_input_tokens(写缓存)按输入价并入未缓存输入(近似)。
+/// 上游数值不可信:负数按 0 处理,超出 i32 范围的值做饱和转换,避免污染计费与统计。
+pub fn extract_usage_any(resp: &Value) -> (i32, i32, i32, i32) {
     let clamp = |v: Option<i64>| v.unwrap_or(0).clamp(0, i32::MAX as i64) as i32;
     let u = &resp["usage"];
-    let prompt = clamp(
-        u["prompt_tokens"]
-            .as_i64()
-            .or_else(|| u["input_tokens"].as_i64()),
-    );
     let completion = clamp(
         u["completion_tokens"]
             .as_i64()
             .or_else(|| u["output_tokens"].as_i64()),
     );
-    let total = u["total_tokens"]
-        .as_i64()
-        .map(|t| clamp(Some(t)))
-        .unwrap_or(prompt.saturating_add(completion));
-    (prompt, completion, total)
+    if !u["prompt_tokens"].is_null() {
+        // OpenAI:prompt_tokens 含缓存,拆出后不得为负(上游数据不可信)
+        let prompt = clamp(u["prompt_tokens"].as_i64());
+        let cached = clamp(u["prompt_tokens_details"]["cached_tokens"].as_i64());
+        let prompt_uncached = (prompt - cached).max(0);
+        let total = u["total_tokens"]
+            .as_i64()
+            .map(|t| clamp(Some(t)))
+            .unwrap_or(prompt.saturating_add(completion));
+        (prompt_uncached, completion, total, cached)
+    } else {
+        // Anthropic:input_tokens 不含缓存;cache_read 按缓存价,
+        // cache_creation 按输入价并入未缓存输入(近似)
+        let cached = clamp(u["cache_read_input_tokens"].as_i64());
+        let prompt_uncached = clamp(u["input_tokens"].as_i64())
+            .saturating_add(clamp(u["cache_creation_input_tokens"].as_i64()));
+        let total = prompt_uncached
+            .saturating_add(cached)
+            .saturating_add(completion);
+        (prompt_uncached, completion, total, cached)
+    }
 }
 
 // ============================================================================
@@ -731,10 +746,11 @@ pub enum StreamConverter {
     /// strip_usage_chunk 为 true 时剥掉仅含 usage 的结尾 chunk
     /// (客户端未请求 include_usage,由网关注入时不应多送一个 chunk)。
     /// model 为客户端请求的模型名:转发前回写 chunk 的 model 字段。
-    PassOpenAi { usage: (i32, i32, i32), strip_usage_chunk: bool, model: String },
+    /// usage 4 元组:(未缓存输入, 输出, 总计, 缓存),见 extract_usage_any。
+    PassOpenAi { usage: (i32, i32, i32, i32), strip_usage_chunk: bool, model: String },
     /// Same protocol, Anthropic: pass events through, capturing usage.
     /// model 用途同上(message_start 事件的 message.model 回写)。
-    PassAnthropic { usage: (i32, i32, i32), model: String },
+    PassAnthropic { usage: (i32, i32, i32, i32), model: String },
     /// OpenAI upstream → Anthropic client.
     OpenAiToAnthropic(OaStreamState),
     /// Anthropic upstream → OpenAI client.
@@ -745,12 +761,12 @@ impl StreamConverter {
     pub fn new(client_protocol: &str, provider_protocol: &str, model: &str) -> Self {
         match (client_protocol, provider_protocol) {
             (PROTOCOL_OPENAI, PROTOCOL_OPENAI) => StreamConverter::PassOpenAi {
-                usage: (0, 0, 0),
+                usage: (0, 0, 0, 0),
                 strip_usage_chunk: false,
                 model: model.to_string(),
             },
             (PROTOCOL_ANTHROPIC, PROTOCOL_ANTHROPIC) => {
-                StreamConverter::PassAnthropic { usage: (0, 0, 0), model: model.to_string() }
+                StreamConverter::PassAnthropic { usage: (0, 0, 0, 0), model: model.to_string() }
             }
             (PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI) => {
                 StreamConverter::OpenAiToAnthropic(OaStreamState::new(model))
@@ -759,7 +775,7 @@ impl StreamConverter {
                 StreamConverter::AnthropicToOpenAi(AnStreamState::new(model))
             }
             _ => StreamConverter::PassOpenAi {
-                usage: (0, 0, 0),
+                usage: (0, 0, 0, 0),
                 strip_usage_chunk: false,
                 model: model.to_string(),
             },
@@ -783,9 +799,9 @@ impl StreamConverter {
                 // (如 [DONE])原样直通。
                 let mut rewritten: Option<String> = None;
                 if let Ok(mut chunk) = serde_json::from_str::<Value>(&ev.data) {
-                    let (p, c, t) = extract_usage_any(&chunk);
+                    let (p, c, t, k) = extract_usage_any(&chunk);
                     if t > 0 {
-                        *usage = (p, c, t);
+                        *usage = (p, c, t, k);
                     }
                     // 仅含 usage 的结尾 chunk:choices 缺失或为空且带 usage。
                     if *strip_usage_chunk
@@ -815,9 +831,12 @@ impl StreamConverter {
                 if let Ok(mut data) = serde_json::from_str::<Value>(&ev.data) {
                     match data["type"].as_str() {
                         Some("message_start") => {
-                            usage.0 = data["message"]["usage"]["input_tokens"]
-                                .as_i64()
-                                .unwrap_or(0) as i32;
+                            let mu = &data["message"]["usage"];
+                            // input_tokens 不含缓存;cache_creation(写缓存)按输入价
+                            // 并入未缓存输入,cache_read 记入缓存维度单独计价。
+                            usage.0 = (mu["input_tokens"].as_i64().unwrap_or(0) as i32)
+                                .saturating_add(mu["cache_creation_input_tokens"].as_i64().unwrap_or(0) as i32);
+                            usage.3 = mu["cache_read_input_tokens"].as_i64().unwrap_or(0) as i32;
                             // message_start 携带上游真实模型名,同样回写为
                             // 客户端请求的模型名。
                             if data["message"].is_object() {
@@ -826,11 +845,21 @@ impl StreamConverter {
                             }
                         }
                         Some("message_delta") => {
-                            usage.1 = data["usage"]["output_tokens"].as_i64().unwrap_or(0) as i32;
+                            let du = &data["usage"];
+                            usage.1 = du["output_tokens"].as_i64().unwrap_or(0) as i32;
+                            // 部分上游在 message_delta 里才补缓存字段,出现时同步更新
+                            // (实践中只在 message_start 上报;两处重复上报会高估,
+                            // 与 cache_creation 的近似口径一致,可接受)。
+                            if let Some(v) = du["cache_read_input_tokens"].as_i64() {
+                                usage.3 = v as i32;
+                            }
+                            if let Some(v) = du["cache_creation_input_tokens"].as_i64() {
+                                usage.0 = usage.0.saturating_add(v as i32);
+                            }
                         }
                         _ => {}
                     }
-                    usage.2 = usage.0 + usage.1;
+                    usage.2 = usage.0 + usage.1 + usage.3;
                 }
                 vec![SseOut {
                     event: ev.event.clone(),
@@ -852,7 +881,7 @@ impl StreamConverter {
         }
     }
 
-    pub fn usage(&self) -> (i32, i32, i32) {
+    pub fn usage(&self) -> (i32, i32, i32, i32) {
         match self {
             StreamConverter::PassOpenAi { usage, .. } | StreamConverter::PassAnthropic { usage, .. } => {
                 *usage
@@ -877,7 +906,7 @@ pub struct OaStreamState {
     tool_blocks: HashMap<u64, usize>,
     open_tool_block: Option<usize>,
     stop_reason: Option<&'static str>,
-    usage: (i32, i32, i32),
+    usage: (i32, i32, i32, i32),
 }
 
 impl OaStreamState {
@@ -892,7 +921,7 @@ impl OaStreamState {
             tool_blocks: HashMap::new(),
             open_tool_block: None,
             stop_reason: None,
-            usage: (0, 0, 0),
+            usage: (0, 0, 0, 0),
         }
     }
 
@@ -931,9 +960,9 @@ impl OaStreamState {
         }
 
         // Capture usage (present in the final chunk when include_usage is set).
-        let (p, c, t) = extract_usage_any(&chunk);
+        let (p, c, t, k) = extract_usage_any(&chunk);
         if t > 0 {
-            self.usage = (p, c, t);
+            self.usage = (p, c, t, k);
         }
 
         if let Some(choices) = chunk["choices"].as_array() {
@@ -1087,7 +1116,7 @@ pub struct AnStreamState {
     created: i64,
     block_to_tc: HashMap<usize, usize>,
     next_tc: usize,
-    usage: (i32, i32, i32),
+    usage: (i32, i32, i32, i32),
 }
 
 impl AnStreamState {
@@ -1098,7 +1127,7 @@ impl AnStreamState {
             created: chrono::Utc::now().timestamp(),
             block_to_tc: HashMap::new(),
             next_tc: 0,
-            usage: (0, 0, 0),
+            usage: (0, 0, 0, 0),
         }
     }
 
@@ -1135,8 +1164,13 @@ impl AnStreamState {
                 }
                 // model 不随上游 message_start 更新:保持客户端请求的模型名,
                 // 映射后的上游真实模型名不透传给终端用户。
-                self.usage.0 = msg["usage"]["input_tokens"].as_i64().unwrap_or(0) as i32;
-                self.usage.2 = self.usage.0 + self.usage.1;
+                // 缓存拆分口径同 PassAnthropic:cache_creation 并入未缓存输入,
+                // cache_read 记入缓存维度。
+                let mu = &msg["usage"];
+                self.usage.0 = (mu["input_tokens"].as_i64().unwrap_or(0) as i32)
+                    .saturating_add(mu["cache_creation_input_tokens"].as_i64().unwrap_or(0) as i32);
+                self.usage.3 = mu["cache_read_input_tokens"].as_i64().unwrap_or(0) as i32;
+                self.usage.2 = self.usage.0 + self.usage.1 + self.usage.3;
                 vec![self.chunk(json!({"role": "assistant", "content": ""}), None, None)]
             }
             "content_block_start" => {
@@ -1196,15 +1230,24 @@ impl AnStreamState {
                 }
             }
             "message_delta" => {
-                if let Some(out_tokens) = data["usage"]["output_tokens"].as_i64() {
+                let du = &data["usage"];
+                if let Some(out_tokens) = du["output_tokens"].as_i64() {
                     self.usage.1 = out_tokens as i32;
-                    self.usage.2 = self.usage.0 + self.usage.1;
                 }
+                // 缓存字段若在 message_delta 才上报,同步更新(口径同 PassAnthropic)
+                if let Some(v) = du["cache_read_input_tokens"].as_i64() {
+                    self.usage.3 = v as i32;
+                }
+                if let Some(v) = du["cache_creation_input_tokens"].as_i64() {
+                    self.usage.0 = self.usage.0.saturating_add(v as i32);
+                }
+                self.usage.2 = self.usage.0 + self.usage.1 + self.usage.3;
                 let mut out = Vec::new();
                 if let Some(stop) = data["delta"]["stop_reason"].as_str() {
                     let finish = anthropic_stop_to_openai(stop);
+                    // 客户端可见的 prompt_tokens 维持 OpenAI 口径(含缓存部分)
                     let usage = json!({
-                        "prompt_tokens": self.usage.0,
+                        "prompt_tokens": self.usage.0 + self.usage.3,
                         "completion_tokens": self.usage.1,
                         "total_tokens": self.usage.2,
                     });
@@ -1485,11 +1528,37 @@ mod tests {
     #[test]
     fn usage_extraction_both_protocols() {
         let oa = json!({"usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}});
-        assert_eq!(extract_usage_any(&oa), (1, 2, 3));
+        assert_eq!(extract_usage_any(&oa), (1, 2, 3, 0));
         let an = json!({"usage": {"input_tokens": 4, "output_tokens": 5}});
-        assert_eq!(extract_usage_any(&an), (4, 5, 9)); // total derived
+        assert_eq!(extract_usage_any(&an), (4, 5, 9, 0)); // total derived
         let none = json!({});
-        assert_eq!(extract_usage_any(&none), (0, 0, 0));
+        assert_eq!(extract_usage_any(&none), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn usage_extraction_splits_cached_tokens() {
+        // OpenAI:prompt_tokens 含缓存,按 prompt_tokens_details.cached_tokens 拆出
+        let oa = json!({"usage": {
+            "prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12,
+            "prompt_tokens_details": {"cached_tokens": 4}
+        }});
+        assert_eq!(extract_usage_any(&oa), (6, 2, 12, 4));
+        // cached 超过 prompt_tokens 时未缓存部分饱和为 0(上游数据不可信)
+        let oa_bad = json!({"usage": {
+            "prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3,
+            "prompt_tokens_details": {"cached_tokens": 5}
+        }});
+        assert_eq!(extract_usage_any(&oa_bad), (0, 2, 3, 5));
+        // Anthropic:cache_read 按缓存价,cache_creation 按输入价并入未缓存输入;
+        // total = 未缓存输入 + 缓存 + 输出
+        let an = json!({"usage": {
+            "input_tokens": 4, "output_tokens": 5,
+            "cache_read_input_tokens": 7, "cache_creation_input_tokens": 3
+        }});
+        assert_eq!(extract_usage_any(&an), (7, 5, 19, 7));
+        // 负数缓存字段按 0 钳制
+        let an_neg = json!({"usage": {"input_tokens": 4, "output_tokens": 5, "cache_read_input_tokens": -2}});
+        assert_eq!(extract_usage_any(&an_neg), (4, 5, 9, 0));
     }
 
     // ---- SSE parsing ----
@@ -1564,9 +1633,9 @@ mod tests {
         let mut c = StreamConverter::new("openai", "openai", "m");
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"x"}}]}"#));
         assert_eq!(outs.len(), 1);
-        assert_eq!(c.usage(), (0, 0, 0));
+        assert_eq!(c.usage(), (0, 0, 0, 0));
         c.push(&sse(r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#));
-        assert_eq!(c.usage(), (1, 2, 3));
+        assert_eq!(c.usage(), (1, 2, 3, 0));
         assert!(c.finish().is_empty());
     }
 
@@ -1578,16 +1647,27 @@ mod tests {
         assert_eq!(outs.len(), 1);
         let outs = c.push(&sse(r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#));
         assert!(outs.is_empty(), "usage-only chunk must not reach the client");
-        assert_eq!(c.usage(), (1, 2, 3));
+        assert_eq!(c.usage(), (1, 2, 3, 0));
     }
 
     #[test]
     fn stream_pass_anthropic_captures_usage() {
         let mut c = StreamConverter::new("anthropic", "anthropic", "m");
         c.push(&sse_typed("message_start", r#"{"type":"message_start","message":{"usage":{"input_tokens":7}}}"#));
-        assert_eq!(c.usage(), (7, 0, 7));
+        assert_eq!(c.usage(), (7, 0, 7, 0));
         c.push(&sse_typed("message_delta", r#"{"type":"message_delta","usage":{"output_tokens":4}}"#));
-        assert_eq!(c.usage(), (7, 4, 11));
+        assert_eq!(c.usage(), (7, 4, 11, 0));
+    }
+
+    #[test]
+    fn stream_pass_anthropic_splits_cache_usage() {
+        // message_start 携带缓存字段:cache_creation 并入未缓存输入,
+        // cache_read 记入缓存维度;total = 三者之和
+        let mut c = StreamConverter::new("anthropic", "anthropic", "m");
+        c.push(&sse_typed("message_start", r#"{"type":"message_start","message":{"usage":{"input_tokens":7,"cache_creation_input_tokens":3,"cache_read_input_tokens":5}}}"#));
+        assert_eq!(c.usage(), (10, 0, 15, 5));
+        c.push(&sse_typed("message_delta", r#"{"type":"message_delta","usage":{"output_tokens":4}}"#));
+        assert_eq!(c.usage(), (10, 4, 19, 5));
     }
 
     #[test]
@@ -1613,7 +1693,7 @@ mod tests {
         ));
         let data: Value = serde_json::from_str(&outs[0].data).unwrap();
         assert_eq!(data["message"]["model"], "claude-alias");
-        assert_eq!(c.usage(), (7, 0, 7));
+        assert_eq!(c.usage(), (7, 0, 7, 0));
     }
 
     #[test]
@@ -1641,7 +1721,7 @@ mod tests {
         assert_eq!(out_types(&outs), vec!["content_block_delta"]);
 
         c.push(&sse(r#"{"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#));
-        assert_eq!(c.usage(), (5, 2, 7));
+        assert_eq!(c.usage(), (5, 2, 7, 0));
 
         let outs = c.push(&sse("[DONE]"));
         assert_eq!(out_types(&outs), vec!["content_block_stop", "message_delta", "message_stop"]);
@@ -1736,7 +1816,7 @@ mod tests {
         let chunk: Value = serde_json::from_str(&outs[0].data).unwrap();
         assert_eq!(chunk["choices"][0]["finish_reason"], "stop");
         assert_eq!(chunk["usage"], json!({"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}));
-        assert_eq!(c.usage(), (9, 3, 12));
+        assert_eq!(c.usage(), (9, 3, 12, 0));
 
         let outs = c.finish();
         assert_eq!(outs.len(), 1);

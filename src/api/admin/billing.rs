@@ -20,12 +20,13 @@ fn row_to_price(row: &rusqlite::Row) -> rusqlite::Result<Value> {
         "model": row.get::<_, String>(1)?,
         "prompt_price": row.get::<_, f64>(2)?,
         "completion_price": row.get::<_, f64>(3)?,
-        "created_at": row.get::<_, String>(4)?,
-        "updated_at": row.get::<_, String>(5)?,
+        "cached_price": row.get::<_, Option<f64>>(4)?,
+        "created_at": row.get::<_, String>(5)?,
+        "updated_at": row.get::<_, String>(6)?,
     }))
 }
 
-const PRICE_COLS: &str = "id, model, prompt_price, completion_price, created_at, updated_at";
+const PRICE_COLS: &str = "id, model, prompt_price, completion_price, cached_price, created_at, updated_at";
 
 pub async fn list_prices(State(state): State<AppState>) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
@@ -57,6 +58,8 @@ pub struct UpsertPriceRequest {
     pub model: Option<String>,
     pub prompt_price: Option<f64>,
     pub completion_price: Option<f64>,
+    /// 缓存 token 单价(可空):null/缺省 = 缓存按输入价计费。
+    pub cached_price: Option<f64>,
 }
 
 /// 校验:model 非空(创建时必填),价格有限且非负;通配条目的 *
@@ -86,7 +89,7 @@ fn valid_price_fields(req: &UpsertPriceRequest, creating: bool) -> Result<(), (S
             }
         }
     }
-    for v in [req.prompt_price, req.completion_price].into_iter().flatten() {
+    for v in [req.prompt_price, req.completion_price, req.cached_price].into_iter().flatten() {
         if !v.is_finite() || v < 0.0 {
             return Err((StatusCode::BAD_REQUEST, Json(json!({
                 "error": "invalid_price",
@@ -113,12 +116,13 @@ pub async fn create_price(
         }
     };
     let result = conn.execute(
-        "INSERT INTO model_prices (id, model, prompt_price, completion_price) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO model_prices (id, model, prompt_price, completion_price, cached_price) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             id,
             model,
             req.prompt_price.unwrap_or(0.0),
-            req.completion_price.unwrap_or(0.0)
+            req.completion_price.unwrap_or(0.0),
+            req.cached_price
         ],
     );
     match result {
@@ -176,6 +180,12 @@ pub async fn update_price(
     if let Some(c) = req.completion_price {
         updates.push("completion_price = ?");
         params_vec.push(Box::new(c));
+    }
+    // cached_price 可空:PATCH 传值即更新;缺省/null 不改动既有值
+    // (与 Option 字段语义一致,清空缓存价需删除重建)。
+    if let Some(k) = req.cached_price {
+        updates.push("cached_price = ?");
+        params_vec.push(Box::new(k));
     }
     if updates.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "no_fields_to_update"})));

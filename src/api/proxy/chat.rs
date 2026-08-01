@@ -60,7 +60,7 @@ pub async fn proxy_completion(
         // 缺 model 的 400 也写一条失败日志，保证审计完整
         spawn_request_log(
             &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-            model.clone(), client_protocol, 0, 0, 0, 0, 400, false,
+            model.clone(), client_protocol, 0, 0, 0, 0, 0, 400, false,
             Some("missing model in request body".to_string()),
         );
         return (
@@ -80,7 +80,7 @@ pub async fn proxy_completion(
         if !model_allowed {
             spawn_request_log(
                 &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-                model.clone(), client_protocol, 0, 0, 0, 0, 403, false,
+                model.clone(), client_protocol, 0, 0, 0, 0, 0, 403, false,
                 Some(format!("model '{}' not allowed for this API key", model)),
             );
             return (
@@ -100,7 +100,7 @@ pub async fn proxy_completion(
         if let Some(msg) = enforce_key_limits(&state, key_id).await {
             spawn_request_log(
                 &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-                model.clone(), client_protocol, 0, 0, 0, 0, 429, false,
+                model.clone(), client_protocol, 0, 0, 0, 0, 0, 429, false,
                 Some(msg.clone()),
             );
             return (
@@ -184,7 +184,7 @@ pub async fn proxy_completion(
             }
             spawn_request_log(
                 &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), last_provider,
-                model.clone(), client_protocol, 0, 0, 0, 0, 504, false,
+                model.clone(), client_protocol, 0, 0, 0, 0, 0, 504, false,
                 Some(format!("overall timeout after {}s", overall_timeout.as_secs())),
             );
             (
@@ -347,7 +347,7 @@ async fn attempt_loop(
                     spawn_request_log(
                         &state.pool, user_id.clone(), api_key_id.clone(),
                         Some(provider.id.clone()), model.clone(), client_protocol,
-                        0, 0, 0, latency as i32, status as i32, false,
+                        0, 0, 0, 0, latency as i32, status as i32, false,
                         Some("upstream transport error".to_string()),
                     );
                     last_error = Some((err_body, status));
@@ -364,12 +364,12 @@ async fn attempt_loop(
                 match read_json_limited(resp).await {
                     Ok(resp_body) if valid_response_shape(&resp_body, provider_protocol) => {
                         spawn_record_result(state.pool.clone(), provider.id.clone(), latency, true);
-                        let (p, c, t) = extract_usage_any(&resp_body);
+                        let (p, c, t, k) = extract_usage_any(&resp_body);
                         // 计费级:响应返回前日志与扣费已落库(await)。
                         request_log_sync(
                             &state.pool, user_id.clone(), api_key_id.clone(),
                             Some(provider.id.clone()), model.clone(), client_protocol,
-                            p, c, t, latency as i32, 200, true, None,
+                            p, c, t, k, latency as i32, 200, true, None,
                         )
                         .await;
                         debug!(
@@ -402,7 +402,7 @@ async fn attempt_loop(
                         spawn_request_log(
                             &state.pool, user_id.clone(), api_key_id.clone(),
                             Some(provider.id.clone()), model.clone(), client_protocol,
-                            0, 0, 0, latency as i32, 502, false, Some(detail),
+                            0, 0, 0, 0, latency as i32, 502, false, Some(detail),
                         );
                         last_error = Some((
                             json!({"error": {"message": msg, "type": "upstream_error"}}),
@@ -441,7 +441,7 @@ async fn attempt_loop(
                 spawn_request_log(
                     &state.pool, user_id.clone(), api_key_id.clone(),
                     Some(provider.id.clone()), model.clone(), client_protocol,
-                    0, 0, 0, latency as i32, 502, false, Some(detail),
+                    0, 0, 0, 0, latency as i32, 502, false, Some(detail),
                 );
                 last_error = Some((
                     json!({"error": {"message": msg, "type": "upstream_error"}}),
@@ -486,7 +486,7 @@ async fn attempt_loop(
         spawn_request_log(
             &state.pool, user_id.clone(), api_key_id.clone(),
             Some(provider.id.clone()), model.clone(), client_protocol,
-            0, 0, 0, latency as i32, status as i32, false, Some(log_msg),
+            0, 0, 0, 0, latency as i32, status as i32, false, Some(log_msg),
         );
 
         // Retryable: rate limits, server errors, timeouts, and dead channels
@@ -528,7 +528,7 @@ async fn attempt_loop(
             // ones.
             spawn_request_log(
                 &state.pool, user_id.clone(), api_key_id.clone(), None,
-                model.clone(), client_protocol, 0, 0, 0, 0, 503, false,
+                model.clone(), client_protocol, 0, 0, 0, 0, 0, 503, false,
                 Some(format!("no available provider for model '{}'", model)),
             );
             (
@@ -589,7 +589,7 @@ struct StreamAbortGuard {
     model: String,
     request_type: String,
     start: Instant,
-    usage: Arc<Mutex<(i32, i32, i32)>>,
+    usage: Arc<Mutex<(i32, i32, i32, i32)>>,
     finished: bool,
 }
 
@@ -605,7 +605,7 @@ impl Drop for StreamAbortGuard {
             return;
         }
         let latency = self.start.elapsed().as_millis() as i32;
-        let (p, c, t) = self.usage.lock().map(|u| *u).unwrap_or((0, 0, 0));
+        let (p, c, t, k) = self.usage.lock().map(|u| *u).unwrap_or((0, 0, 0, 0));
         // The DB write takes a blocking mutex; dispatch it to the blocking
         // pool so a Drop on the async executor never stalls the runtime.
         let pool = self.pool.clone();
@@ -617,7 +617,7 @@ impl Drop for StreamAbortGuard {
         let write = move || {
             insert_request_log(
                 &pool, &user_id, api_key_id.as_deref(), Some(&provider_id),
-                &model, &request_type, p, c, t, latency, 499, false,
+                &model, &request_type, p, c, t, k, latency, 499, false,
                 Some("client disconnected".to_string()),
             );
         };
@@ -672,7 +672,7 @@ fn stream_response(
     const MAX_SSE_BUF: usize = 1024 * 1024;
 
     let sse_stream = async_stream::stream! {
-        let usage_cell = Arc::new(Mutex::new((0, 0, 0)));
+        let usage_cell = Arc::new(Mutex::new((0, 0, 0, 0)));
         let mut guard = StreamAbortGuard {
             pool: pool.clone(),
             user_id: user_id.clone(),
@@ -748,11 +748,11 @@ fn stream_response(
             // The upstream stream was unusable — count it as a provider failure.
             let latency = start.elapsed().as_millis() as f64;
             spawn_record_failure(pool.clone(), provider_id.clone(), latency, 0, threshold, true);
-            let (p, c, t) = converter.usage();
+            let (p, c, t, k) = converter.usage();
             spawn_request_log(
                 &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
                 model_log.clone(), &client_protocol,
-                p, c, t, latency as i32, 502, false, Some(err_msg.clone()),
+                p, c, t, k, latency as i32, 502, false, Some(err_msg.clone()),
             );
             // 502 已记账,立即标记 guard 完成:否则客户端在下面 yield 期间
             // 断开会触发 StreamAbortGuard::drop 再记一条 499,重复记账。
@@ -789,7 +789,7 @@ fn stream_response(
             spawn_request_log(
                 &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
                 model_log.clone(), &client_protocol,
-                0, 0, 0, latency as i32, 502, false, Some(err_msg.clone()),
+                0, 0, 0, 0, latency as i32, 502, false, Some(err_msg.clone()),
             );
             // 同上面的 stream_error 路径:先标记完成再 yield,防止重复记账。
             guard.finish();
@@ -804,13 +804,13 @@ fn stream_response(
         // Stream finished — record metrics and request log.
         let latency = start.elapsed().as_millis() as f64;
         spawn_record_result(pool.clone(), provider_id.clone(), latency, true);
-        let (p, c, t) = converter.usage();
+        let (p, c, t, k) = converter.usage();
         // 计费级:与非流式一致,流结束时同步等待日志与扣费落库,
         // fire-and-forget 在进程退出时会丢账。
         request_log_sync(
             &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
             model_log.clone(), &client_protocol,
-            p, c, t, latency as i32, 200, true, None,
+            p, c, t, k, latency as i32, 200, true, None,
         )
         .await;
         debug!(
@@ -959,6 +959,7 @@ fn spawn_request_log(
     prompt_tokens: i32,
     completion_tokens: i32,
     total_tokens: i32,
+    cached_tokens: i32,
     latency_ms: i32,
     status_code: i32,
     success: bool,
@@ -970,7 +971,7 @@ fn spawn_request_log(
         insert_request_log(
             &pool, &user_id, api_key_id.as_deref(), provider_id.as_deref(),
             &model, &request_type, prompt_tokens, completion_tokens, total_tokens,
-            latency_ms, status_code, success, error_message,
+            cached_tokens, latency_ms, status_code, success, error_message,
         );
     });
 }
@@ -988,6 +989,7 @@ async fn request_log_sync(
     prompt_tokens: i32,
     completion_tokens: i32,
     total_tokens: i32,
+    cached_tokens: i32,
     latency_ms: i32,
     status_code: i32,
     success: bool,
@@ -999,7 +1001,7 @@ async fn request_log_sync(
         insert_request_log(
             &pool, &user_id, api_key_id.as_deref(), provider_id.as_deref(),
             &model, &request_type, prompt_tokens, completion_tokens, total_tokens,
-            latency_ms, status_code, success, error_message,
+            cached_tokens, latency_ms, status_code, success, error_message,
         );
     })
     .await
@@ -1020,6 +1022,7 @@ fn insert_request_log(
     prompt_tokens: i32,
     completion_tokens: i32,
     total_tokens: i32,
+    cached_tokens: i32,
     latency_ms: i32,
     status_code: i32,
     success: bool,
@@ -1042,7 +1045,7 @@ fn insert_request_log(
         let result = (|| -> Result<(), rusqlite::Error> {
             let cost = if total_tokens > 0 {
                 match crate::billing::find_price(&conn, model) {
-                    Some(prices) => crate::billing::compute_cost(prompt_tokens, completion_tokens, prices),
+                    Some(prices) => crate::billing::compute_cost(prompt_tokens, cached_tokens, completion_tokens, prices),
                     None => {
                         // 有用量但无价格配置:静默免费必须可见。
                         warn!(
@@ -1083,8 +1086,8 @@ fn insert_request_log(
             let api_key_id = fk_downgrade("api_keys", api_key_id);
             tx.execute(
                 "INSERT INTO request_logs (id, user_id, api_key_id, provider_id, model, request_type,
-                 prompt_tokens, completion_tokens, total_tokens, latency_ms, status_code, success, error_message, cost, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 prompt_tokens, completion_tokens, total_tokens, cached_tokens, latency_ms, status_code, success, error_message, cost, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     Uuid::new_v4().to_string(),
                     Some(user_id),
@@ -1095,6 +1098,7 @@ fn insert_request_log(
                     prompt_tokens,
                     completion_tokens,
                     total_tokens,
+                    cached_tokens,
                     latency_ms,
                     status_code,
                     success as i32,

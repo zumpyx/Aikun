@@ -198,6 +198,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             prompt_tokens   INTEGER NOT NULL DEFAULT 0,
             completion_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens    INTEGER NOT NULL DEFAULT 0,
+            cached_tokens   INTEGER NOT NULL DEFAULT 0,
             latency_ms      INTEGER NOT NULL DEFAULT 0,
             status_code     INTEGER NOT NULL DEFAULT 0,
             success         INTEGER NOT NULL DEFAULT 1,
@@ -218,12 +219,14 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         );
 
         -- 模型价格:每 1M tokens 的价格(元)。model 支持 * 前缀通配
-        -- (如 gpt-*),匹配规则见 src/billing.rs。
+        -- (如 gpt-*),匹配规则见 src/billing.rs。cached_price 可空:
+        -- NULL 时缓存 token 按 prompt_price 计费。
         CREATE TABLE IF NOT EXISTS model_prices (
             id                  TEXT PRIMARY KEY,
             model               TEXT NOT NULL UNIQUE,
             prompt_price        REAL NOT NULL DEFAULT 0,
             completion_price    REAL NOT NULL DEFAULT 0,
+            cached_price        REAL,
             created_at          TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -383,6 +386,10 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // cost 已并入 CREATE TABLE 与重建 DDL;此调用兜底"重建早已完成、
     // cost 尚未加"的中间态旧库。
     ensure_column(conn, "request_logs", "cost", "REAL NOT NULL DEFAULT 0")?;
+    // 缓存 token 单独计价:request_logs 记缓存用量,model_prices 记缓存价
+    // (可空,NULL 按输入价计)。
+    ensure_column(conn, "request_logs", "cached_tokens", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "model_prices", "cached_price", "REAL")?;
     Ok(())
 }
 
@@ -481,6 +488,7 @@ fn migrate_request_logs_fk(conn: &Connection) -> Result<(), rusqlite::Error> {
                 prompt_tokens   INTEGER NOT NULL DEFAULT 0,
                 completion_tokens INTEGER NOT NULL DEFAULT 0,
                 total_tokens    INTEGER NOT NULL DEFAULT 0,
+                cached_tokens   INTEGER NOT NULL DEFAULT 0,
                 latency_ms      INTEGER NOT NULL DEFAULT 0,
                 status_code     INTEGER NOT NULL DEFAULT 0,
                 success         INTEGER NOT NULL DEFAULT 1,

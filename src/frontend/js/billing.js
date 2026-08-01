@@ -56,13 +56,14 @@ async function loadPrices() {
     <div class="card">
       <div class="table-wrap">
         <table>
-          <thead><tr><th>模型</th><th>输入价(元/1M)</th><th>输出价(元/1M)</th><th>更新时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>模型</th><th>输入价(元/1M)</th><th>输出价(元/1M)</th><th>缓存价(元/1M)</th><th>更新时间</th><th>操作</th></tr></thead>
           <tbody>
             ${data.map(p => `
               <tr>
                 <td><strong>${esc(p.model)}</strong></td>
                 <td>${fmtCost(p.prompt_price)}</td>
                 <td>${fmtCost(p.completion_price)}</td>
+                <td>${p.cached_price == null ? '<span style="color:var(--faint)">同输入价</span>' : fmtCost(p.cached_price)}</td>
                 <td style="color:var(--muted);font-size:12.5px">${esc(fmtTime(p.updated_at))}</td>
                 <td>
                   <button class="btn-outline btn-sm" data-action="edit-price" data-id="${esc(p.id)}">编辑</button>
@@ -86,6 +87,7 @@ function showPriceModal(id) {
       <div class="form-group"><label>模型</label><input id="pf-model" value="${esc(price?.model || '')}" placeholder="gpt-4 或 gpt-*"></div>
       <div class="form-group"><label>输入价(元/1M tokens)</label><input id="pf-prompt" type="number" min="0" step="any" value="${price ? esc(String(price.prompt_price)) : ''}"></div>
       <div class="form-group"><label>输出价(元/1M tokens)</label><input id="pf-completion" type="number" min="0" step="any" value="${price ? esc(String(price.completion_price)) : ''}"></div>
+      <div class="form-group"><label>缓存价(元/1M tokens,留空按输入价)</label><input id="pf-cached" type="number" min="0" step="any" value="${price?.cached_price != null ? esc(String(price.cached_price)) : ''}"></div>
       <div class="form-actions">
         <button class="btn-primary" id="pf-save">${price ? '保存' : '创建'}</button>
         <button class="btn-outline" id="pf-cancel">取消</button>
@@ -99,10 +101,13 @@ function showPriceModal(id) {
     const btn = document.getElementById('pf-save');
     btn.disabled = true;
     try {
+      const cachedRaw = document.getElementById('pf-cached').value.trim();
       const body = {
         model: document.getElementById('pf-model').value.trim(),
         prompt_price: parseFloat(document.getElementById('pf-prompt').value) || 0,
         completion_price: parseFloat(document.getElementById('pf-completion').value) || 0,
+        // 缓存价留空传 null:缓存 token 按输入价计费
+        cached_price: cachedRaw === '' ? null : (parseFloat(cachedRaw) || 0),
       };
       const r = price
         ? await api('PATCH', `/api/admin/prices/${price.id}`, body)

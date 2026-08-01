@@ -154,7 +154,13 @@ pub fn openai_completion(text: &str) -> Value {
             "message": {"role": "assistant", "content": text},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+        "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 3,
+            "total_tokens": 8,
+            // 5 个输入 token 中 2 个命中缓存:记账按 (3 未缓存, 3 输出, 2 缓存) 拆分
+            "prompt_tokens_details": {"cached_tokens": 2}
+        }
     })
 }
 

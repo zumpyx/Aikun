@@ -112,7 +112,7 @@ pub async fn list_logs(
     // (前端显示"已删除"),日志本身因 ON DELETE SET NULL 仍保留。
     let sql = format!(
         "SELECT l.id, l.user_id, l.api_key_id, l.provider_id, l.model, l.request_type,
-                l.prompt_tokens, l.completion_tokens, l.total_tokens, l.latency_ms,
+                l.prompt_tokens, l.completion_tokens, l.total_tokens, l.cached_tokens, l.latency_ms,
                 l.status_code, l.success, l.error_message, l.cost, l.created_at,
                 u.username, p.name
          FROM request_logs l
@@ -147,15 +147,16 @@ pub async fn list_logs(
                 prompt_tokens: row.get(6)?,
                 completion_tokens: row.get(7)?,
                 total_tokens: row.get(8)?,
-                latency_ms: row.get(9)?,
-                status_code: row.get(10)?,
-                success: row.get(11)?,
-                error_message: row.get(12)?,
-                cost: row.get(13)?,
-                created_at: row.get(14)?,
+                cached_tokens: row.get(9)?,
+                latency_ms: row.get(10)?,
+                status_code: row.get(11)?,
+                success: row.get(12)?,
+                error_message: row.get(13)?,
+                cost: row.get(14)?,
+                created_at: row.get(15)?,
             },
-            row.get::<_, Option<String>>(15)?,
             row.get::<_, Option<String>>(16)?,
+            row.get::<_, Option<String>>(17)?,
         ))
     }) {
         Ok(rows) => rows.filter_map(|r| match r {
