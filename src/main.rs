@@ -41,6 +41,7 @@ const STATIC_ASSETS: &[(&str, &str)] = &[
     ("style.css", include_str!("frontend/style.css")),
     ("js/core.js", include_str!("frontend/js/core.js")),
     ("js/dashboard.js", include_str!("frontend/js/dashboard.js")),
+    ("js/wallet.js", include_str!("frontend/js/wallet.js")),
     ("js/providers.js", include_str!("frontend/js/providers.js")),
     ("js/users.js", include_str!("frontend/js/users.js")),
     ("js/billing.js", include_str!("frontend/js/billing.js")),
