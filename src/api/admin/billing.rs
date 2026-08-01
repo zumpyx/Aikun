@@ -28,7 +28,41 @@ fn row_to_price(row: &rusqlite::Row) -> rusqlite::Result<Value> {
 
 const PRICE_COLS: &str = "id, model, prompt_price, completion_price, cached_price, created_at, updated_at";
 
-pub async fn list_prices(State(state): State<AppState>) -> impl IntoResponse {
+#[derive(Debug, Deserialize)]
+pub struct ListPricesQuery {
+    /// in_use=1:只返回渠道里已添加模型会命中的价格条目
+    /// (精确按名匹配;通配按前缀覆盖判断,单独的 * 恒命中)。
+    pub in_use: Option<String>,
+}
+
+/// 收集全部渠道(含禁用,只看"已添加")的模型名集合。
+fn channel_models(conn: &rusqlite::Connection) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT models FROM providers") {
+        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+            for r in rows.flatten() {
+                if let Ok(list) = serde_json::from_str::<Vec<String>>(&r) {
+                    set.extend(list);
+                }
+            }
+        }
+    }
+    set
+}
+
+/// 价格条目是否会被某个渠道模型命中(与 find_price 的匹配口径一致)。
+fn price_in_use(entry_model: &str, models: &std::collections::HashSet<String>) -> bool {
+    if let Some(prefix) = entry_model.strip_suffix('*') {
+        models.iter().any(|m| m.starts_with(prefix))
+    } else {
+        models.contains(entry_model)
+    }
+}
+
+pub async fn list_prices(
+    State(state): State<AppState>,
+    Query(query): Query<ListPricesQuery>,
+) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => {
@@ -45,7 +79,19 @@ pub async fn list_prices(State(state): State<AppState>) -> impl IntoResponse {
             Ok(rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
         });
     match result {
-        Ok(prices) => (StatusCode::OK, Json(json!(prices))),
+        Ok(prices) => {
+            if query.in_use.as_deref() == Some("1") {
+                let models = channel_models(&conn);
+                let prices: Vec<Value> = prices
+                    .into_iter()
+                    .filter(|p| {
+                        p["model"].as_str().is_some_and(|m| price_in_use(m, &models))
+                    })
+                    .collect();
+                return (StatusCode::OK, Json(json!(prices)));
+            }
+            (StatusCode::OK, Json(json!(prices)))
+        }
         Err(e) => {
             tracing::error!("Failed to list prices: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})))

@@ -1,9 +1,18 @@
 // ============ Billing ============
+// 价格表默认只显示渠道里已添加模型会命中的条目(内置默认价格有 200+ 条,
+// 全列出来没法看);勾选框可切回全部。
+let priceShowAll = false;
+
 async function renderBilling(container) {
   container.innerHTML = `
     <div class="card-header">
       <div class="page-head" style="margin-bottom:0"><h2>计费</h2><p>模型价格与调账记录,价格单位为每 1M tokens(元)</p></div>
-      <button class="btn-primary" id="new-price-btn">+ 添加价格</button>
+      <div style="display:flex;align-items:center;gap:14px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);cursor:pointer;user-select:none">
+          <input type="checkbox" id="price-show-all" ${priceShowAll ? 'checked' : ''}> 显示全部价格
+        </label>
+        <button class="btn-primary" id="new-price-btn">+ 添加价格</button>
+      </div>
     </div>
     <div id="prices-list"><div class="empty"><div class="spinner"></div><p>加载中...</p></div></div>
     <div class="page-head" style="margin-top:24px"><h2>调账记录</h2></div>
@@ -18,6 +27,10 @@ async function renderBilling(container) {
     <div id="transactions-list"><div class="empty"><div class="spinner"></div><p>加载中...</p></div></div>`;
 
   document.getElementById('new-price-btn').onclick = () => showPriceModal();
+  document.getElementById('price-show-all').onchange = (e) => {
+    priceShowAll = e.target.checked;
+    loadPrices();
+  };
   document.getElementById('tx-filter-user').onchange = () => loadTransactions();
 
   // 筛选下拉复用用户页缓存的 state.users,未访问过用户页时先拉一次
@@ -42,14 +55,14 @@ function fillTxUserFilter() {
 }
 
 async function loadPrices() {
-  const r = await api('GET', '/api/admin/prices');
+  const r = await api('GET', '/api/admin/prices' + (priceShowAll ? '' : '?in_use=1'));
   const list = document.getElementById('prices-list');
   if (!list) return;
   if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
   const data = r.data;
   state.prices = data;
   if (data.length === 0) {
-    list.innerHTML = '<div class="card"><div class="empty"><p>暂无价格,未计费的请求按 0 元记账</p></div></div>';
+    list.innerHTML = `<div class="card"><div class="empty"><p>${priceShowAll ? '暂无价格,未计费的请求按 0 元记账' : '渠道模型暂无价格条目,可切换"显示全部价格"或添加'}</p></div></div>`;
     return;
   }
   list.innerHTML = `

@@ -543,6 +543,49 @@ async fn admin_prices_crud_and_wildcard_billing() {
     let prices: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(prices.as_array().unwrap().len(), 1);
 
+    // in_use=1:只返回渠道模型(gpt-4)会命中的条目;other-* 无渠道模型命中被滤掉
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/prices", app.base))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"model": "other-*", "prompt_price": 1.0, "completion_price": 1.0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let other_id = resp.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = app
+        .client()
+        .get(format!("{}/api/admin/prices?in_use=1", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let in_use: serde_json::Value = resp.json().await.unwrap();
+    let in_use = in_use.as_array().unwrap();
+    assert_eq!(in_use.len(), 1);
+    assert_eq!(in_use[0]["model"], "gpt-*");
+    let resp = app
+        .client()
+        .get(format!("{}/api/admin/prices", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.json::<serde_json::Value>().await.unwrap().as_array().unwrap().len(), 2);
+    let resp = app
+        .client()
+        .delete(format!("{}/api/admin/prices/{}", app.base, other_id))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
     let id = price["id"].as_str().unwrap();
     let resp = app
         .client()
