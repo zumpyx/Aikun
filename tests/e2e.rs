@@ -611,6 +611,72 @@ async fn default_prices_seeded_when_table_empty_on_startup() {
 }
 
 #[tokio::test]
+async fn wallet_returns_own_balance_and_daily_costs() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+    app.db()
+        .execute("UPDATE users SET balance = 100.0 WHERE id = 'u-e2e'", [])
+        .unwrap();
+    app.db()
+        .execute(
+            "INSERT INTO model_prices (id, model, prompt_price, completion_price)
+             VALUES ('mp1', 'gpt-4', 10.0, 30.0)",
+            [],
+        )
+        .unwrap();
+
+    // 未登录 → 401
+    let resp = app
+        .client()
+        .get(format!("{}/api/wallet", app.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 200);
+    wait_until("cost recorded", WAIT, || {
+        let cost: f64 = app
+            .db()
+            .query_row(
+                "SELECT COALESCE(SUM(cost), 0) FROM request_logs WHERE user_id = 'u-e2e'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (cost - 0.00014).abs() < 1e-9
+    })
+    .await;
+
+    // 普通用户角色也能看自己的钱包(接口只按 claims.sub 取数)
+    let jwt = common::sign_jwt("u-e2e", "e2e", "user");
+    let resp = app
+        .client()
+        .get(format!("{}/api/wallet", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let w: serde_json::Value = resp.json().await.unwrap();
+    // 费用:3 未缓存×10 + 2 缓存×10(无缓存价按输入价)+ 3 输出×30 = 0.00014
+    assert!((w["balance"].as_f64().unwrap() - (100.0 - 0.00014)).abs() < 1e-6);
+    assert!((w["today"]["cost"].as_f64().unwrap() - 0.00014).abs() < 1e-9);
+    assert!((w["month"]["cost"].as_f64().unwrap() - 0.00014).abs() < 1e-9);
+    assert_eq!(w["daily"].as_array().unwrap().len(), 30);
+    let today_cost = w["daily"].as_array().unwrap().last().unwrap()["cost"]
+        .as_f64()
+        .unwrap();
+    assert!((today_cost - 0.00014).abs() < 1e-9);
+    let models = w["top_models"].as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["model"], "gpt-4");
+}
+
+#[tokio::test]
 async fn admin_adjust_balance_records_transaction() {
     let app = TestApp::spawn().await;
     seed_api_key(&app.db());

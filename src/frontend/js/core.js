@@ -111,6 +111,7 @@ const icons = {
   docs: I('<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4a2 2 0 0 0-2-2H6.5A2.5 2.5 0 0 0 4 4.5v15z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/>'),
   pulse: I('<path d="M2.5 12h4l2.5-6.5 4.5 13L16 12h5.5"/>'),
   billing: I('<circle cx="12" cy="12" r="9"/><path d="M12 7v10M15.5 9.5c-.7-1-2-1.5-3.5-1.5-1.9 0-3.5 1-3.5 2.5s1.3 2.2 3.5 2.5c2.2.3 3.5 1 3.5 2.5s-1.6 2.5-3.5 2.5c-1.5 0-2.8-.5-3.5-1.5"/>'),
+  wallet: I('<rect x="2.5" y="6" width="19" height="13" rx="2.5"/><path d="M2.5 10h19M16.5 14.5h2.5"/>'),
 };
 
 // ============ Router ============
@@ -179,6 +180,7 @@ function renderApp(container) {
   const isAdmin = state.user && state.user.role === 'admin';
   const menu = [
     { id: 'dashboard', label: '总览', icon: icons.dashboard, admin: true },
+    { id: 'wallet', label: '钱包', icon: icons.wallet, admin: false },
     { id: 'providers', label: '渠道', icon: icons.providers, admin: true },
     { id: 'users', label: '用户', icon: icons.users, admin: true },
     { id: 'billing', label: '计费', icon: icons.billing, admin: true },
@@ -205,7 +207,6 @@ function renderApp(container) {
           <div class="user-meta">
             <strong title="${esc(name)}">${esc(truncBytes(name, 8))}</strong>
           </div>
-          <div class="user-balance" id="user-balance" style="font-size:12px;color:var(--muted)" title="账户余额">余额 ¥${fmtCost(state.user?.balance ?? 0)}</div>
           <a href="#" id="logout-link" title="退出登录">退出</a>
         </div>
         ${state.version ? `<div class="sidebar-version">v${esc(state.version)}</div>` : ''}
@@ -224,28 +225,15 @@ function renderApp(container) {
     render();
   };
 
-  // 余额随每次页面切换后台刷新(扣费是实时的,渲染用的 state.user
-  // 是登录/初始化时的快照)。
-  refreshBalance();
-
   renderView(document.getElementById('main-content'));
-}
-
-async function refreshBalance() {
-  const el = document.getElementById('user-balance');
-  if (!el) return;
-  const r = await api('GET', '/api/me');
-  if (r.ok) {
-    state.user = { ...state.user, ...r.data };
-    el.textContent = `余额 ¥${fmtCost(r.data.balance ?? 0)}`;
-  }
 }
 
 function renderView(container) {
   const isAdmin = state.user && state.user.role === 'admin';
-  const fallback = isAdmin ? 'dashboard' : 'apikeys';
+  const fallback = isAdmin ? 'dashboard' : 'wallet';
   const view = state.view || fallback;
   if (view === 'dashboard') renderDashboard(container);
+  else if (view === 'wallet') renderWallet(container);
   else if (view === 'providers') renderProviders(container);
   else if (view === 'users') renderUsers(container);
   else if (view === 'billing') renderBilling(container);
@@ -255,7 +243,7 @@ function renderView(container) {
   else if (view === 'logs') renderLogs(container);
   else if (view === 'apidocs') renderApiDocs(container);
   else if (isAdmin) renderDashboard(container);
-  else renderApiKeys(container);
+  else renderWallet(container);
 }
 
 

@@ -412,3 +412,131 @@ pub async fn admin_stats(
         }
     }
 }
+
+/// 钱包:当前登录用户(任意角色)的余额与近 30 天消费分析。
+/// 只查本人数据(user_id = claims.sub),与 usage_stats 同口径(UTC 日期)。
+pub async fn wallet_stats(
+    State(state): State<AppState>,
+    claims: Claims,
+) -> impl IntoResponse {
+    let conn = match state.pool.read().lock() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))).into_response(),
+    };
+
+    let uid = &claims.sub;
+    let today = chrono::Utc::now().date_naive();
+    let fmt = |d: chrono::NaiveDate| d.format("%Y-%m-%d").to_string();
+    let today_s = fmt(today);
+    let week_s = fmt(today - chrono::Duration::days(6));
+    let month_s = fmt(today - chrono::Duration::days(29));
+
+    let balance = conn.query_row(
+        "SELECT balance FROM users WHERE id = ?1",
+        params![uid],
+        |row| row.get::<_, f64>(0),
+    );
+
+    // 近 30 天总额 + 今日/近 7 天拆出(与 usage_stats 同一段位手法)
+    let totals = conn.query_row(
+        "SELECT COALESCE(SUM(cost), 0), COALESCE(SUM(total_tokens), 0), COUNT(*),
+                COALESCE(SUM(CASE WHEN substr(created_at, 1, 10) = ?1 THEN cost ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN substr(created_at, 1, 10) = ?1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN substr(created_at, 1, 10) >= ?2 THEN cost ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN substr(created_at, 1, 10) >= ?2 THEN 1 ELSE 0 END), 0)
+         FROM request_logs
+         WHERE user_id = ?3 AND substr(created_at, 1, 10) >= ?4",
+        params![today_s, week_s, uid, month_s],
+        |row| {
+            Ok((
+                row.get::<_, f64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?,
+                row.get::<_, f64>(3)?, row.get::<_, i64>(4)?,
+                row.get::<_, f64>(5)?, row.get::<_, i64>(6)?,
+            ))
+        },
+    );
+
+    // 每日序列:费用、Token、请求数
+    let daily_rows = conn
+        .prepare(
+            "SELECT substr(created_at, 1, 10) AS d, COALESCE(SUM(cost), 0),
+                    COALESCE(SUM(total_tokens), 0), COUNT(*)
+             FROM request_logs
+             WHERE user_id = ?1 AND substr(created_at, 1, 10) >= ?2
+             GROUP BY d",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map(params![uid, month_s], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+        });
+
+    // 模型消费分布(近 30 天,按费用排序)
+    let model_rows = conn
+        .prepare(
+            "SELECT model, COALESCE(SUM(cost), 0) AS c, COUNT(*)
+             FROM request_logs
+             WHERE user_id = ?1 AND substr(created_at, 1, 10) >= ?2
+             GROUP BY model ORDER BY c DESC LIMIT 8",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map(params![uid, month_s], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+        });
+
+    let (Ok(balance), Ok((month_cost, month_tok, month_req, today_cost, today_req, week_cost, week_req)), Ok(daily_rows), Ok(model_rows)) =
+        (balance, totals, daily_rows, model_rows)
+    else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "error": "query_failed",
+            "message": "Internal server error"
+        }))).into_response();
+    };
+
+    // 补齐缺失日期为 0,保证图表是完整的 30 天序列
+    let daily_map: std::collections::HashMap<String, (f64, i64, i64)> =
+        daily_rows.into_iter().map(|(d, c, t, r)| (d, (c, t, r))).collect();
+    let daily: Vec<serde_json::Value> = (0..30)
+        .map(|i| {
+            let d = fmt(today - chrono::Duration::days(29 - i));
+            let (c, t, r) = daily_map.get(&d).copied().unwrap_or((0.0, 0, 0));
+            json!({
+                "date": d,
+                "cost": (c * 1_000_000.0).round() / 1_000_000.0,
+                "tokens": t,
+                "requests": r,
+            })
+        })
+        .collect();
+
+    let top_models: Vec<serde_json::Value> = model_rows
+        .into_iter()
+        .map(|(model, cost, requests)| json!({
+            "model": model,
+            "cost": (cost * 1_000_000.0).round() / 1_000_000.0,
+            "requests": requests,
+        }))
+        .collect();
+
+    let r2 = |v: f64| (v * 1_000_000.0).round() / 1_000_000.0;
+    (StatusCode::OK, Json(json!({
+        "balance": r2(balance),
+        "today": {"cost": r2(today_cost), "requests": today_req},
+        "week": {"cost": r2(week_cost), "requests": week_req},
+        "month": {"cost": r2(month_cost), "requests": month_req, "tokens": month_tok},
+        "daily": daily,
+        "top_models": top_models,
+    }))).into_response()
+}

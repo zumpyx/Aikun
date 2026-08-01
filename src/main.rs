@@ -157,6 +157,7 @@ async fn main() {
         .route("/api/api-keys/{id}", patch(api::auth::update_api_key))
         .route("/api/logs", get(api::logs::list_logs))
         .route("/api/logs/stats", get(api::logs::log_stats))
+        .route("/api/wallet", get(api::logs::wallet_stats))
         .route("/v1/chat/completions", post(api::proxy::chat::chat_completion))
         .route("/v1/messages", post(api::proxy::messages::messages))
         .route("/v1/models", get(api::proxy::chat::list_models))
