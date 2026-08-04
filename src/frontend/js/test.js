@@ -126,7 +126,8 @@ async function initTestCascade() {
   // await 期间页面可能已切换，选择器已不在文档中就直接放弃
   if (!provSel.isConnected) return;
   const provs = (r.ok ? (r.data || []) : []).filter(p => (p.models || []).length > 0);
-  const protosOf = p => (p.protocols && p.protocols.length) ? p.protocols : [p.provider_type];
+  // 实测探针只支持 chat 形状请求,responses 协议不进测试选项(由 /v1/responses 端点覆盖)。
+  const protosOf = p => ((p.protocols && p.protocols.length) ? p.protocols : [p.provider_type]).filter(t => t !== 'responses');
 
   provSel.innerHTML = provs.length
     ? provs.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')

@@ -87,12 +87,36 @@ impl std::fmt::Debug for Provider {
 }
 
 /// Wire protocols a channel may declare support for.
-pub const VALID_PROTOCOLS: [&str; 2] = ["openai", "anthropic"];
+pub const VALID_PROTOCOLS: [&str; 3] = ["openai", "anthropic", "responses"];
+
+/// Protocols eligible as a channel's default (upstream traffic protocol).
+/// responses 只作附加的支持协议声明,不能作为默认协议。
+pub const DEFAULTABLE_PROTOCOLS: [&str; 2] = ["openai", "anthropic"];
 
 /// A channel's declared protocol list must be non-empty and only contain
 /// known protocols.
 pub fn valid_protocol_list(list: &[String]) -> bool {
     !list.is_empty() && list.iter().all(|p| VALID_PROTOCOLS.contains(&p.as_str()))
+}
+
+/// responses 是附加协议,不能单独成渠道——其上游地址、凭证与默认协议
+/// 语义都依附于 openai/anthropic 配置,协议列表至少含一个可作默认的协议。
+pub fn has_defaultable_protocol(list: &[String]) -> bool {
+    list.iter().any(|p| DEFAULTABLE_PROTOCOLS.contains(&p.as_str()))
+}
+
+/// default_protocol 合法性:必须已勾选,且属于可作默认的协议。
+pub fn valid_default_protocol(default: &str, protocols: &[String]) -> bool {
+    DEFAULTABLE_PROTOCOLS.contains(&default) && protocols.iter().any(|p| p == default)
+}
+
+/// 协议列表中第一个可作默认的协议(调用前须经 has_defaultable_protocol 校验)。
+pub fn first_defaultable_protocol(protocols: &[String]) -> String {
+    protocols
+        .iter()
+        .find(|p| DEFAULTABLE_PROTOCOLS.contains(&p.as_str()))
+        .cloned()
+        .unwrap_or_else(|| "openai".to_string())
 }
 
 /// The protocol used to talk to this channel upstream: its configured
@@ -103,6 +127,19 @@ pub fn channel_protocol(p: &Provider) -> &'static str {
         "openai" => crate::proxy::convert::PROTOCOL_OPENAI,
         _ => crate::proxy::convert::provider_protocol(&p.provider_type),
     }
+}
+
+/// 决定与上游通话的协议:客户端为 Responses API 且渠道声明支持 responses
+/// 时原生直通;否则回退渠道默认协议,由 convert 层做协议转换降级。
+/// responses 只作支持协议声明,不作 default_protocol,故此处只需处理
+/// 客户端协议为 responses 的情形。
+pub fn upstream_protocol_for(p: &Provider, client_protocol: &str) -> &'static str {
+    if client_protocol == crate::proxy::convert::PROTOCOL_RESPONSES
+        && channel_protocols(p).iter().any(|x| x == "responses")
+    {
+        return crate::proxy::convert::PROTOCOL_RESPONSES;
+    }
+    channel_protocol(p)
 }
 
 /// 按上游协议选择对应的 base URL:有些供应商对 OpenAI / Anthropic 两种协议
@@ -361,5 +398,42 @@ mod tests {
         // Garbage in the JSON column falls back to provider_type.
         p.protocols = "not-json".into();
         assert_eq!(channel_protocols(&p), vec!["openai".to_string()]);
+    }
+
+    #[test]
+    fn upstream_protocol_prefers_native_responses() {
+        let mut p = bare_provider();
+        // 未声明 responses:responses 客户端走渠道默认协议(转换降级)
+        assert_eq!(upstream_protocol_for(&p, "responses"), "openai");
+        // 声明后:responses 客户端原生直通
+        p.protocols = "[\"openai\",\"responses\"]".into();
+        assert_eq!(upstream_protocol_for(&p, "responses"), "responses");
+        // 其他客户端协议不受 responses 声明影响
+        assert_eq!(upstream_protocol_for(&p, "openai"), "openai");
+        // anthropic 默认协议渠道:responses 客户端也走 anthropic(组合转换)
+        p.default_protocol = "anthropic".into();
+        p.protocols = "[\"anthropic\"]".into();
+        assert_eq!(upstream_protocol_for(&p, "responses"), "anthropic");
+    }
+
+    #[test]
+    fn defaultable_protocol_rules() {
+        let openai = || "openai".to_string();
+        let responses = || "responses".to_string();
+        let anthropic = || "anthropic".to_string();
+
+        // responses 不能单独成渠道,也不能作默认协议
+        assert!(!has_defaultable_protocol(&[responses()]));
+        assert!(has_defaultable_protocol(&[openai(), responses()]));
+        assert!(!valid_default_protocol("responses", &[openai(), responses()]));
+        assert!(valid_default_protocol("openai", &[openai(), responses()]));
+        // 默认必须已勾选
+        assert!(!valid_default_protocol("anthropic", &[openai(), responses()]));
+        // 兜底取第一个可作默认的协议
+        assert_eq!(
+            first_defaultable_protocol(&[responses(), anthropic()]),
+            "anthropic"
+        );
+        assert_eq!(first_defaultable_protocol(&[openai()]), "openai");
     }
 }

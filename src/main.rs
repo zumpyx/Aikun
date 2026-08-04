@@ -161,6 +161,7 @@ async fn main() {
         .route("/api/wallet", get(api::logs::wallet_stats))
         .route("/v1/chat/completions", post(api::proxy::chat::chat_completion))
         .route("/v1/messages", post(api::proxy::messages::messages))
+        .route("/v1/responses", post(api::proxy::responses::responses))
         .route("/v1/models", get(api::proxy::chat::list_models))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 

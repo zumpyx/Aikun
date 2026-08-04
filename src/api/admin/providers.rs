@@ -10,8 +10,9 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::models::{
-    channel_protocol, channel_protocols, row_to_provider, valid_protocol_list,
-    CreateProviderRequest, ProviderResponse, UpdateProviderRequest,
+    channel_protocol, channel_protocols, first_defaultable_protocol, has_defaultable_protocol,
+    row_to_provider, valid_default_protocol, valid_protocol_list, CreateProviderRequest,
+    ProviderResponse, UpdateProviderRequest,
 };
 use crate::router::health::check_provider_health;
 
@@ -103,7 +104,13 @@ pub async fn create_provider(
             if !valid_protocol_list(&list) {
                 return (StatusCode::BAD_REQUEST, Json(json!({
                     "error": "invalid_protocols",
-                    "message": "protocols 不能为空，且仅支持 openai / anthropic"
+                    "message": "protocols 不能为空，且仅支持 openai / anthropic / responses"
+                })));
+            }
+            if !has_defaultable_protocol(&list) {
+                return (StatusCode::BAD_REQUEST, Json(json!({
+                    "error": "invalid_protocols",
+                    "message": "responses 为附加协议，需同时勾选 openai 或 anthropic"
                 })));
             }
             list
@@ -111,14 +118,14 @@ pub async fn create_provider(
         None => vec!["openai".to_string()],
     };
     let default_protocol = match req.default_protocol {
-        Some(d) if protocols.contains(&d) => d,
+        Some(d) if valid_default_protocol(&d, &protocols) => d,
         Some(_) => {
             return (StatusCode::BAD_REQUEST, Json(json!({
                 "error": "invalid_default_protocol",
-                "message": "default_protocol 必须是已勾选协议之一"
+                "message": "default_protocol 必须是已勾选的 openai / anthropic 协议之一"
             })));
         }
-        None => protocols[0].clone(),
+        None => first_defaultable_protocol(&protocols),
     };
     let protocols_json = serde_json::to_string(&protocols)
         .unwrap_or_else(|_| "[\"openai\"]".to_string());
@@ -150,11 +157,11 @@ pub async fn create_provider(
         .trim()
         .trim_end_matches('/')
         .to_string();
-    // 勾选了哪个协议就必须填对应的上游地址。
-    if protocols.iter().any(|p| p == "openai") && openai_base_url.is_empty() {
+    // 勾选了哪个协议就必须填对应的上游地址;responses 复用 openai 地址。
+    if protocols.iter().any(|p| p == "openai" || p == "responses") && openai_base_url.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({
             "error": "invalid_base_url",
-            "message": "勾选 openai 协议时必须填写 openai_base_url"
+            "message": "勾选 openai / responses 协议时必须填写 openai_base_url"
         })));
     }
     if protocols.iter().any(|p| p == "anthropic") && anthropic_base_url.is_empty() {
@@ -420,7 +427,13 @@ pub async fn update_provider(
                 if !valid_protocol_list(list) {
                     return (StatusCode::BAD_REQUEST, Json(json!({
                         "error": "invalid_protocols",
-                        "message": "protocols 不能为空，且仅支持 openai / anthropic"
+                        "message": "protocols 不能为空，且仅支持 openai / anthropic / responses"
+                    })));
+                }
+                if !has_defaultable_protocol(list) {
+                    return (StatusCode::BAD_REQUEST, Json(json!({
+                        "error": "invalid_protocols",
+                        "message": "responses 为附加协议，需同时勾选 openai 或 anthropic"
                     })));
                 }
                 list.clone()
@@ -430,16 +443,19 @@ pub async fn update_provider(
         };
         let default_protocol = match &req.default_protocol {
             Some(d) => {
-                if !protocols.contains(d) {
+                if !valid_default_protocol(d, &protocols) {
                     return (StatusCode::BAD_REQUEST, Json(json!({
                         "error": "invalid_default_protocol",
-                        "message": "default_protocol 必须是已勾选协议之一"
+                        "message": "default_protocol 必须是已勾选的 openai / anthropic 协议之一"
                     })));
                 }
                 d.clone()
             }
-            // Stored default fell out of the new list: reset to the first one.
-            None if !protocols.contains(&stored_default) => protocols[0].clone(),
+            // Stored default fell out of the new list: reset to the first
+            // defaultable one.
+            None if !protocols.contains(&stored_default) => {
+                first_defaultable_protocol(&protocols)
+            }
             None => stored_default,
         };
         if req.protocols.is_some() {
@@ -485,10 +501,11 @@ pub async fn update_provider(
             .as_deref()
             .unwrap_or(&stored_anthropic)
             .trim();
-        if final_protocols.iter().any(|p| p == "openai") && final_openai.is_empty() {
+        // responses 复用 openai 地址,勾选其一即要求 openai_base_url。
+        if final_protocols.iter().any(|p| p == "openai" || p == "responses") && final_openai.is_empty() {
             return (StatusCode::BAD_REQUEST, Json(json!({
                 "error": "invalid_base_url",
-                "message": "勾选 openai 协议时必须填写 openai_base_url"
+                "message": "勾选 openai / responses 协议时必须填写 openai_base_url"
             })));
         }
         if final_protocols.iter().any(|p| p == "anthropic") && final_anthropic.is_empty() {

@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use tracing::{debug, warn};
 
 use crate::models::Provider;
-use crate::proxy::convert::PROTOCOL_ANTHROPIC;
+use crate::proxy::convert::{PROTOCOL_ANTHROPIC, PROTOCOL_RESPONSES};
 
 /// Build a proper URL path based on provider type and base URL.
 pub fn build_api_url(base_url: &str, path: &str) -> String {
@@ -34,7 +34,7 @@ pub fn build_api_url(base_url: &str, path: &str) -> String {
 
 /// base 是否已是完整端点（以已知端点路径结尾）。
 fn is_endpoint_url(base: &str) -> bool {
-    ["/chat/completions", "/messages", "/models"]
+    ["/chat/completions", "/messages", "/models", "/responses"]
         .iter()
         .any(|ep| base.ends_with(ep))
 }
@@ -183,6 +183,8 @@ pub async fn send_request(
 
     let path = if protocol == PROTOCOL_ANTHROPIC {
         "/messages"
+    } else if protocol == PROTOCOL_RESPONSES {
+        "/responses"
     } else {
         "/chat/completions"
     };

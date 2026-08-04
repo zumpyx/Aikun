@@ -896,3 +896,510 @@ async fn admin_manages_other_users_api_keys() {
         .unwrap();
     assert_eq!(n, 0);
 }
+
+// ---------------------------------------------------------------------------
+// OpenAI Responses API (/v1/responses)
+// ---------------------------------------------------------------------------
+
+fn responses_object(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "resp-mock",
+        "object": "response",
+        "created_at": 1_700_000_000,
+        "status": "completed",
+        "model": "real-upstream-model",
+        "output": [{
+            "id": "msg-mock",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text, "annotations": []}]
+        }],
+        "usage": {
+            "input_tokens": 10,
+            "input_tokens_details": {"cached_tokens": 6},
+            "output_tokens": 4,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 14
+        }
+    })
+}
+
+fn seed_responses_provider(app: &TestApp, mock: &MockUpstream, id: &str) {
+    seed_responses_provider_full(app, mock, id, 10, 10.0, "healthy", 0.0);
+}
+
+/// provider_type 受 CHECK 约束只能是 openai/anthropic/azure/custom;
+/// responses 原生渠道 = openai 类型 + protocols 声明 ["responses"]。
+fn seed_responses_provider_full(
+    app: &TestApp,
+    mock: &MockUpstream,
+    id: &str,
+    priority: i32,
+    weight: f64,
+    health_status: &str,
+    error_rate: f64,
+) {
+    seed_provider(
+        &app.db(),
+        &ProviderSeed {
+            id,
+            name: id,
+            protocol: "openai",
+            base_url: &mock.base,
+            models: "[\"gpt-4\"]",
+            priority,
+            weight,
+            health_status,
+            error_rate,
+        },
+    );
+    app.db()
+        .execute(
+            "UPDATE providers SET protocols = '[\"responses\"]' WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .unwrap();
+}
+
+async fn post_responses(app: &TestApp, body: serde_json::Value) -> reqwest::Response {
+    let req = app
+        .client()
+        .post(format!("{}/v1/responses", app.base))
+        .json(&body);
+    app.auth(req).send().await.unwrap()
+}
+
+/// 等待一条 success=1 的 responses 记账并返回 (prompt, completion, total, cached)。
+async fn wait_billing(app: &TestApp) -> (i64, i64, i64, i64) {
+    let mut out = (0, 0, 0, 0);
+    wait_until("responses request log recorded", WAIT, || {
+        let row: Option<(i64, i64, i64, i64)> = app
+            .db()
+            .query_row(
+                "SELECT prompt_tokens, completion_tokens, total_tokens, cached_tokens
+                 FROM request_logs WHERE success = 1 AND request_type = 'responses'
+                 ORDER BY created_at DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .ok();
+        if let Some(v) = row {
+            out = v;
+        }
+        row.is_some()
+    })
+    .await;
+    out
+}
+
+#[tokio::test]
+async fn responses_passthrough_non_stream() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_responses_provider(&app, &mock, "p1");
+    mock.push_json(200, responses_object("native ok"));
+
+    let resp = post_responses(
+        &app,
+        serde_json::json!({
+            "model": "gpt-4",
+            "store": false,
+            "input": [{"role": "user", "content": "hi"}]
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["output"][0]["content"][0]["text"], "native ok");
+    // 模型名统一回写为客户端请求名,不透传上游真实模型名
+    assert_eq!(body["model"], "gpt-4");
+
+    // 原生透传:body 原样到达 /v1/responses,不注入 chat 的 stream_options
+    let reqs = mock.requests();
+    let up = reqs
+        .iter()
+        .find(|r| r.path == "/v1/responses")
+        .expect("request must reach responses upstream");
+    let v: serde_json::Value = serde_json::from_str(&up.body).unwrap();
+    assert_eq!(v["store"], false);
+    assert!(v.get("stream_options").is_none());
+    assert!(v.get("messages").is_none(), "pass-through must not convert: {v}");
+
+    // input_tokens=10 含 6 缓存:记账拆分为 4 未缓存 + 6 缓存
+    assert_eq!(wait_billing(&app).await, (4, 4, 14, 6));
+}
+
+#[tokio::test]
+async fn responses_passthrough_stream() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_responses_provider(&app, &mock, "p1");
+    mock.push_sse(concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"model\":\"real-upstream-model\",\"status\":\"in_progress\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"model\":\"real-upstream-model\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":6},\"output_tokens\":4,\"total_tokens\":14}}}\n\n",
+    ));
+
+    let resp = post_responses(
+        &app,
+        serde_json::json!({
+            "model": "gpt-4",
+            "stream": true,
+            "input": "hi"
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    // 事件名保留透传,模型名回写
+    assert!(text.contains("event: response.created"), "{text}");
+    assert!(text.contains("response.output_text.delta"), "{text}");
+    assert!(text.contains("response.completed"), "{text}");
+    assert!(text.contains("\"gpt-4\""), "{text}");
+    assert!(!text.contains("real-upstream-model"), "{text}");
+
+    assert_eq!(wait_billing(&app).await, (4, 4, 14, 6));
+}
+
+#[tokio::test]
+async fn responses_converted_to_openai_non_stream() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+    // 模型映射:上游收到映射名,客户端仍看到请求名
+    app.db()
+        .execute(
+            "UPDATE providers SET model_mapping = '{\"gpt-4\":\"mapped-gpt-4\"}' WHERE id = 'p1'",
+            [],
+        )
+        .unwrap();
+    // 脚本耗尽后 mock 默认回 openai_completion("OK")(usage 5/3/8,缓存 2)
+
+    let resp = post_responses(
+        &app,
+        serde_json::json!({
+            "model": "gpt-4",
+            "instructions": "be terse",
+            "input": [
+                {"role": "user", "content": "hi"},
+                {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": "done"}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["model"], "gpt-4");
+    assert_eq!(body["output"][0]["content"][0]["text"], "OK");
+    assert!(body["id"].as_str().unwrap().starts_with("resp_"));
+
+    // 上游收到转换后的 chat/completions 请求
+    let reqs = mock.requests();
+    let up = reqs
+        .iter()
+        .find(|r| r.path == "/v1/chat/completions")
+        .expect("request must be converted to chat/completions");
+    let v: serde_json::Value = serde_json::from_str(&up.body).unwrap();
+    assert_eq!(v["model"], "mapped-gpt-4");
+    let msgs = v["messages"].as_array().unwrap();
+    assert_eq!(msgs[0], serde_json::json!({"role": "system", "content": "be terse"}));
+    assert_eq!(msgs[1], serde_json::json!({"role": "user", "content": "hi"}));
+    assert_eq!(msgs[2]["tool_calls"][0]["id"], "c1");
+    assert_eq!(msgs[3]["role"], "tool");
+
+    assert_eq!(wait_billing(&app).await, (3, 3, 8, 2));
+}
+
+#[tokio::test]
+async fn responses_converted_to_openai_stream() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+    mock.push_sse(concat!(
+        "data: {\"id\":\"c1\",\"model\":\"mapped\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"c1\",\"model\":\"mapped\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"c1\",\"model\":\"mapped\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"c1\",\"model\":\"mapped\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"id\":\"c1\",\"model\":\"mapped\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4,\"total_tokens\":14,\"prompt_tokens_details\":{\"cached_tokens\":6}}}\n\n",
+        "data: [DONE]\n\n",
+    ));
+
+    let resp = post_responses(
+        &app,
+        serde_json::json!({
+            "model": "gpt-4",
+            "stream": true,
+            "input": "hi"
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("event: response.created"), "{text}");
+    assert!(text.contains("event: response.output_text.delta"), "{text}");
+    assert!(text.contains("event: response.completed"), "{text}");
+    assert!(text.contains("\"Hello\""), "{text}");
+    // Responses 流没有 [DONE] 终止帧
+    assert!(!text.contains("[DONE]"), "{text}");
+
+    // 网关强制上游上报 usage(防免费白嫖)
+    let reqs = mock.requests();
+    let up = reqs
+        .iter()
+        .find(|r| r.path == "/v1/chat/completions")
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&up.body).unwrap();
+    assert_eq!(v["stream_options"], serde_json::json!({"include_usage": true}));
+
+    assert_eq!(wait_billing(&app).await, (4, 4, 14, 6));
+}
+
+#[tokio::test]
+async fn responses_converted_to_anthropic_non_stream() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_provider(
+        &app.db(),
+        &ProviderSeed {
+            id: "p1",
+            name: "p1",
+            protocol: "anthropic",
+            base_url: &mock.base,
+            models: "[\"gpt-4\"]",
+            priority: 10,
+            weight: 10.0,
+            health_status: "healthy",
+            error_rate: 0.0,
+        },
+    );
+    mock.push_json(
+        200,
+        serde_json::json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-x",
+            "content": [{"type": "text", "text": "anthropic hi"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 3, "output_tokens": 2}
+        }),
+    );
+
+    let resp = post_responses(
+        &app,
+        serde_json::json!({
+            "model": "gpt-4",
+            "instructions": "sys",
+            "input": "hi"
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["output"][0]["content"][0]["text"], "anthropic hi");
+    assert_eq!(body["model"], "gpt-4");
+
+    // responses→openai→anthropic 组合转换到达 /v1/messages
+    let reqs = mock.requests();
+    let up = reqs
+        .iter()
+        .find(|r| r.path == "/v1/messages")
+        .expect("request must be converted to anthropic messages");
+    let v: serde_json::Value = serde_json::from_str(&up.body).unwrap();
+    assert_eq!(v["system"], "sys");
+    assert_eq!(
+        v["messages"],
+        serde_json::json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
+    );
+
+    assert_eq!(wait_billing(&app).await, (3, 2, 5, 0));
+}
+
+#[tokio::test]
+async fn responses_converted_to_anthropic_stream() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_provider(
+        &app.db(),
+        &ProviderSeed {
+            id: "p1",
+            name: "p1",
+            protocol: "anthropic",
+            base_url: &mock.base,
+            models: "[\"gpt-4\"]",
+            priority: 10,
+            weight: 10.0,
+            health_status: "healthy",
+            error_rate: 0.0,
+        },
+    );
+    mock.push_sse(concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"usage\":{\"input_tokens\":9,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    ));
+
+    let resp = post_responses(
+        &app,
+        serde_json::json!({
+            "model": "gpt-4",
+            "stream": true,
+            "input": "hi"
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("event: response.created"), "{text}");
+    assert!(text.contains("event: response.output_text.delta"), "{text}");
+    assert!(text.contains("event: response.completed"), "{text}");
+    assert!(!text.contains("[DONE]"), "{text}");
+
+    assert_eq!(wait_billing(&app).await, (9, 3, 12, 0));
+}
+
+#[tokio::test]
+async fn responses_failover_to_second_channel() {
+    let bad_mock = MockUpstream::start().await;
+    bad_mock.push_json(500, serde_json::json!({"error": {"message": "internal"}}));
+    let good_mock = MockUpstream::start().await;
+    good_mock.push_json(200, responses_object("failover ok"));
+
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_responses_provider_full(&app, &bad_mock, "p-bad", 100, 1000.0, "healthy", 0.0);
+    seed_responses_provider_full(&app, &good_mock, "p-good", 10, 10.0, "unknown", 1.0);
+
+    let resp = post_responses(&app, serde_json::json!({"model": "gpt-4", "input": "hi"})).await;
+    assert_eq!(resp.status(), 200, "failover must deliver the good upstream");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["output"][0]["content"][0]["text"], "failover ok");
+
+    let count = |m: &MockUpstream| {
+        m.requests()
+            .iter()
+            .filter(|r| r.path == "/v1/responses")
+            .count()
+    };
+    assert_eq!(count(&bad_mock), 1);
+    assert_eq!(count(&good_mock), 1);
+}
+
+#[tokio::test]
+async fn responses_empty_sse_stream_is_failure() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+    mock.push_sse("");
+
+    let resp = post_responses(
+        &app,
+        serde_json::json!({"model": "gpt-4", "stream": true, "input": "hi"}),
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "stream already committed to 200");
+    let text = resp.text().await.unwrap();
+    // responses 协议:error 事件即终止,无 [DONE],也不得产出 response.completed
+    assert!(text.contains("event: error"), "{text}");
+    assert!(!text.contains("[DONE]"), "{text}");
+    assert!(!text.contains("response.completed"), "{text}");
+
+    wait_until("responses stream failure logged", WAIT, || {
+        let (logged, failures): (i64, i64) = app
+            .db()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM request_logs WHERE status_code = 502),
+                        (SELECT consecutive_failures FROM providers WHERE id = 'p1')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        logged >= 1 && failures >= 1
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn admin_provider_responses_protocol_validation() {
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    let admin = common::admin_jwt();
+    let base = serde_json::json!({
+        "name": "p",
+        "api_key": "k",
+        "models": ["gpt-4"],
+        "openai_base_url": "http://127.0.0.1:1"
+    });
+    let create = |body: serde_json::Value| {
+        let mut b = base.clone();
+        b.as_object_mut().unwrap().extend(body.as_object().unwrap().clone());
+        app.client()
+            .post(format!("{}/api/admin/providers", app.base))
+            .bearer_auth(&admin)
+            .json(&b)
+    };
+
+    // responses 不能单独成渠道(默认协议/上游地址语义依附 openai|anthropic)
+    let r = create(serde_json::json!({"protocols": ["responses"]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["error"], "invalid_protocols");
+
+    // responses 不能作为 default_protocol
+    let r = create(serde_json::json!({
+        "protocols": ["openai", "responses"],
+        "default_protocol": "responses"
+    }))
+    .send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["error"], "invalid_default_protocol");
+
+    // 合法组合:省略默认时落到第一个可作默认的协议(openai 而非 responses)
+    let r = create(serde_json::json!({"protocols": ["responses", "openai"]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["default_protocol"], "openai");
+    assert_eq!(
+        v["protocols"],
+        serde_json::json!(["responses", "openai"])
+    );
+
+    // 勾选 responses 但缺 openai 地址 → 400(responses 复用 openai 地址)
+    let r = create(serde_json::json!({
+        "protocols": ["anthropic", "responses"],
+        "anthropic_base_url": "http://127.0.0.1:1",
+        "openai_base_url": ""
+    }))
+    .send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["error"], "invalid_base_url");
+}

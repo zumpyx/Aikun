@@ -98,6 +98,9 @@ async function showProviderModal(id) {
           <input type="radio" name="pf-default" id="pf-default-anthropic" value="anthropic" style="width:auto;margin:0;justify-self:center">
           <label style="display:flex;gap:6px;align-items:center;font-weight:400;margin-bottom:0"><input type="checkbox" id="pf-proto-anthropic" value="anthropic" style="width:auto"> Anthropic</label>
           <input id="pf-url-anthropic" value="${esc(provider?.anthropic_base_url || '')}" placeholder="https://api.anthropic.com">
+          <span></span>
+          <label style="display:flex;gap:6px;align-items:center;font-weight:400;margin-bottom:0"><input type="checkbox" id="pf-proto-responses" value="responses" style="width:auto"> Responses</label>
+          <span style="font-size:12px;color:var(--text-3);align-self:center">复用 OpenAI Base URL（/v1/responses 原生透传，不作默认协议）</span>
         </div>
       </div>
       <div class="form-group"><label>API Key${provider ? '（留空不修改）' : ''}</label><input id="pf-key" value="${esc(provider?.api_key || '')}" placeholder="sk-..." type="password" ${provider ? '' : 'required'}></div>
@@ -127,8 +130,9 @@ async function showProviderModal(id) {
 
   // 复选=启用协议并放开对应 URL 输入(保存时必填);单选=默认协议。
   // 只有已勾选的协议能作为默认:取消勾选当前默认协议时,
-  // 默认自动落到仍勾选的协议上。
-  const protoBoxes = ['openai', 'anthropic'].map(t => document.getElementById('pf-proto-' + t));
+  // 默认自动落到仍勾选的协议上。Responses 仅作支持协议声明,
+  // 无独立 URL(复用 OpenAI 地址),也不能作为默认协议。
+  const protoBoxes = ['openai', 'anthropic', 'responses'].map(t => document.getElementById('pf-proto-' + t));
   const defaultRadios = ['openai', 'anthropic'].map(t => document.getElementById('pf-default-' + t));
   const urlInputs = {
     openai: document.getElementById('pf-url-openai'),
@@ -140,8 +144,10 @@ async function showProviderModal(id) {
   defaultRadios.forEach(r => { r.checked = r.value === savedDefault; });
   function syncProtoRows() {
     for (const b of protoBoxes) {
-      urlInputs[b.value].disabled = !b.checked;
-      defaultRadios.find(r => r.value === b.value).disabled = !b.checked;
+      const url = urlInputs[b.value];
+      if (url) url.disabled = !b.checked;
+      const radio = defaultRadios.find(r => r.value === b.value);
+      if (radio) radio.disabled = !b.checked;
     }
     const enabled = defaultRadios.filter(r => !r.disabled);
     if (!enabled.some(r => r.checked) && enabled.length > 0) enabled[0].checked = true;
@@ -193,12 +199,15 @@ async function showProviderModal(id) {
     const toInt = (v, d) => { const n = parseInt(v); return Number.isNaN(n) ? d : n; };
     const protocols = protoBoxes.filter(b => b.checked).map(b => b.value);
     if (protocols.length === 0) return toast('请至少勾选一个支持协议', 'error');
+    if (protocols.includes('responses') && !protocols.includes('openai') && !protocols.includes('anthropic'))
+      return toast('Responses 为附加协议，需同时勾选 OpenAI 或 Anthropic', 'error');
     const body = {
       name: document.getElementById('pf-name').value,
       note: document.getElementById('pf-note').value.trim(),
       website_url: document.getElementById('pf-website').value.trim(),
       protocols,
-      default_protocol: (defaultRadios.find(r => r.checked && !r.disabled) || {}).value || protocols[0],
+      default_protocol: (defaultRadios.find(r => r.checked && !r.disabled) || {}).value
+        || ['openai', 'anthropic'].find(t => protocols.includes(t)) || protocols[0],
       openai_base_url: document.getElementById('pf-url-openai').value.trim(),
       anthropic_base_url: document.getElementById('pf-url-anthropic').value.trim(),
       api_key: document.getElementById('pf-key').value,
@@ -217,7 +226,7 @@ async function showProviderModal(id) {
       body.model_mapping = {};
     }
     if (!body.name || (!provider && !body.api_key)) return toast('请填写名称和 API Key', 'error');
-    if (protocols.includes('openai') && !body.openai_base_url) return toast('已勾选 OpenAI 协议，请填写 OPENAI_BASE_URL', 'error');
+    if ((protocols.includes('openai') || protocols.includes('responses')) && !body.openai_base_url) return toast('已勾选 OpenAI/Responses 协议，请填写 OPENAI_BASE_URL', 'error');
     if (protocols.includes('anthropic') && !body.anthropic_base_url) return toast('已勾选 Anthropic 协议，请填写 ANTHROPIC_BASE_URL', 'error');
 
     if (provider) {

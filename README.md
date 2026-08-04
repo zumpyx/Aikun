@@ -14,7 +14,7 @@
 
 ## 特性
 
-- **双协议接入**:同时暴露 OpenAI(`/v1/chat/completions`)与 Anthropic(`/v1/messages`)兼容端点。请求在网关内部自动转换为渠道的原生协议,双向转换覆盖流式、工具调用与图片
+- **多协议接入**:同时暴露 OpenAI(`/v1/chat/completions`)、OpenAI Responses(`/v1/responses`,可用于 codex)与 Anthropic(`/v1/messages`)兼容端点。请求在网关内部自动转换为渠道的原生协议,双向转换覆盖流式、工具调用与图片
 - **多渠道聚合**:同一模型可挂多个渠道,按延迟、优先级、权重、健康度加权选路;失败自动故障转移,连续失败或凭证失效(401/403)自动禁用渠道
 - **渠道级代理**:每个渠道可单独配置 Socks5 / HTTP 代理,并可一键创建渠道副本,方便管理同渠道的多个账号
 - **健康观测**:渠道健康检查 + 模型级测试矩阵(绿/红/灰小方格一目了然),每 30 分钟自动探测,也可手动单点测试或一键全测
@@ -137,7 +137,18 @@ curl http://localhost:3000/v1/messages \
 
 无论上游渠道是哪种协议,网关都会自动双向转换——客户端协议与渠道协议可自由组合。
 
-**协议转换边界**:跨协议转换时部分对方协议特有的字段会被静默丢弃——OpenAI→Anthropic 丢 `response_format`/`logit_bias`/`n`/`seed`/两个 penalty,`max_tokens` 缺省 4096(长输出需显式设置);Anthropic→OpenAI 丢 `thinking`/`cache_control`/`top_k`/`metadata`;`reasoning_content`(推理流)双向均不转发。客户端与渠道同协议时不存在此问题。
+**OpenAI Responses 协议**(codex 等客户端使用)
+
+```bash
+curl http://localhost:3000/v1/responses \
+  -H "Authorization: Bearer sk-你的APIKey" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-5", "input": "hi", "stream": true}'
+```
+
+渠道勾选 `Responses` 支持协议时按原生透传(复用该渠道的 OpenAI Base URL,保留 reasoning 等 responses 专有特性);未勾选时自动降级为协议转换——openai 渠道转成 `/chat/completions`,anthropic 渠道经组合转换承接。
+
+**协议转换边界**:跨协议转换时部分对方协议特有的字段会被静默丢弃——OpenAI→Anthropic 丢 `response_format`/`logit_bias`/`n`/`seed`/两个 penalty,`max_tokens` 缺省 4096(长输出需显式设置);Anthropic→OpenAI 丢 `thinking`/`cache_control`/`top_k`/`metadata`;`reasoning_content`(推理流)双向均不转发;Responses→chat/completions 丢 `store`/`include`/`reasoning`/`previous_response_id` 与 `web_search` 等内置工具。客户端与渠道同协议时不存在此问题。
 
 API Key 的 `expires_at` 建议传带时区的 RFC3339;无时区的输入(如 `2026-08-01 12:00`)按 **UTC** 解释。
 

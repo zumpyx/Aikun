@@ -25,6 +25,7 @@ use crate::proxy::client::{extract_model, send_request};
 use crate::proxy::convert::{
     convert_request, convert_response, extract_usage_any, parse_sse_events,
     parse_sse_remaining, valid_response_shape, StreamConverter, SseOut, PROTOCOL_OPENAI,
+    PROTOCOL_RESPONSES,
 };
 use crate::router::selector::{
     list_available_models_async, select_provider_async, spawn_record_failure, spawn_record_result,
@@ -323,7 +324,7 @@ async fn attempt_loop(
             continue;
         }
 
-        let provider_protocol = crate::models::channel_protocol(&provider);
+        let provider_protocol = crate::models::upstream_protocol_for(&provider, client_protocol);
         debug!(
             "Routing '{}' ({} client) → provider '{}' ({} upstream, health={} latency={}ms)",
             model, client_protocol, provider.name, provider_protocol,
@@ -761,14 +762,21 @@ fn stream_response(
             // finish() 对转换型 converter 已含终止帧([DONE]/message_stop),
             // 仅在其缺失时补一个,避免客户端收到双重终止。
             yield Ok(to_axum_event(stream_error_event(&client_protocol, &err_msg)));
-            let finish_outs = converter.finish();
+            // responses 客户端:error 事件即终止,跳过 converter 收尾——收尾
+            // 会产出与错误矛盾的 *.done/response.completed(部分输出被当成
+            // 成功完成),codex 等客户端会误判流正常结束。
+            let finish_outs = if client_protocol == PROTOCOL_RESPONSES {
+                vec![]
+            } else {
+                converter.finish()
+            };
             let has_terminal = finish_outs
                 .iter()
                 .any(|o| o.data == "[DONE]" || o.data.contains("message_stop"));
             for out in finish_outs {
                 yield Ok(to_axum_event(out));
             }
-            if !has_terminal {
+            if !has_terminal && client_protocol != PROTOCOL_RESPONSES {
                 yield Ok(to_axum_event(stream_terminal_event(&client_protocol)));
             }
             return;
@@ -794,7 +802,9 @@ fn stream_response(
             // 同上面的 stream_error 路径:先标记完成再 yield,防止重复记账。
             guard.finish();
             yield Ok(to_axum_event(stream_error_event(&client_protocol, &err_msg)));
-            yield Ok(to_axum_event(stream_terminal_event(&client_protocol)));
+            if client_protocol != PROTOCOL_RESPONSES {
+                yield Ok(to_axum_event(stream_terminal_event(&client_protocol)));
+            }
             return;
         }
         for out in converter.finish() {
@@ -918,6 +928,17 @@ fn stream_error_event(client_protocol: &str, message: &str) -> SseOut {
             })
             .to_string(),
         }
+    } else if client_protocol == PROTOCOL_RESPONSES {
+        // Responses API 的错误事件本身就是终止帧(其后流直接结束)。
+        SseOut {
+            event: Some("error".to_string()),
+            data: json!({
+                "type": "error",
+                "code": "upstream_error",
+                "message": message
+            })
+            .to_string(),
+        }
     } else {
         SseOut {
             event: None,
@@ -930,6 +951,8 @@ fn stream_error_event(client_protocol: &str, message: &str) -> SseOut {
 }
 
 /// 协议对应的流终止帧：OpenAI 为 `[DONE]`，Anthropic 为 `message_stop`。
+/// Responses API 无终止帧(response.completed 或 error 事件后流直接结束),
+/// 调用方对 responses 客户端应跳过此函数。
 fn stream_terminal_event(client_protocol: &str) -> SseOut {
     if client_protocol == crate::proxy::convert::PROTOCOL_ANTHROPIC {
         SseOut {
