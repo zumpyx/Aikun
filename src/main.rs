@@ -45,6 +45,7 @@ const STATIC_ASSETS: &[(&str, &str)] = &[
     ("js/providers.js", include_str!("frontend/js/providers.js")),
     ("js/users.js", include_str!("frontend/js/users.js")),
     ("js/billing.js", include_str!("frontend/js/billing.js")),
+    ("js/redemption.js", include_str!("frontend/js/redemption.js")),
     ("js/keys.js", include_str!("frontend/js/keys.js")),
     ("js/models.js", include_str!("frontend/js/models.js")),
     ("js/test.js", include_str!("frontend/js/test.js")),
@@ -68,6 +69,11 @@ pub struct AppState {
     /// enforces api_keys.rate_limit_rpm. In-memory only: a restart resets the
     /// window, which is acceptable for a per-minute limit.
     pub api_key_rate: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
+    /// 兑换码失败滑动窗口(keyed by user id):防爆破,10 分钟 5 次失败即 429。
+    pub redeem_attempts: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
+    /// API key 并发在途计数(keyed by api_keys.id):max_concurrent 的执行层。
+    /// 请求结束时由 ConcurrencyGuard 的 Drop 归还槽位;内存口径,重启清零。
+    pub api_key_inflight: Arc<Mutex<HashMap<String, usize>>>,
     /// 关停信号:收到 SIGINT/SIGTERM 后取消,流式生成器据此主动收尾——
     /// 已捕获 usage 照常记账,而不是被 30s 强杀跳过 Drop 丢账。
     pub shutdown: tokio_util::sync::CancellationToken,
@@ -138,6 +144,8 @@ async fn main() {
         clients: Arc::new(Mutex::new(HashMap::new())),
         login_attempts: Arc::new(Mutex::new(HashMap::new())),
         api_key_rate: Arc::new(Mutex::new(HashMap::new())),
+        redeem_attempts: Arc::new(Mutex::new(HashMap::new())),
+        api_key_inflight: Arc::new(Mutex::new(HashMap::new())),
         shutdown: tokio_util::sync::CancellationToken::new(),
     };
 
@@ -159,6 +167,7 @@ async fn main() {
         .route("/api/logs", get(api::logs::list_logs))
         .route("/api/logs/stats", get(api::logs::log_stats))
         .route("/api/wallet", get(api::logs::wallet_stats))
+        .route("/api/wallet/redeem", post(api::redemption::redeem_code))
         .route("/v1/chat/completions", post(api::proxy::chat::chat_completion))
         .route("/v1/messages", post(api::proxy::messages::messages))
         .route("/v1/responses", post(api::proxy::responses::responses))
@@ -175,6 +184,7 @@ async fn main() {
         .route("/api/admin/users/{id}", delete(api::admin::users::delete_user))
         .route("/api/admin/providers", get(api::admin::providers::list_providers))
         .route("/api/admin/providers", post(api::admin::providers::create_provider))
+        .route("/api/admin/providers/batch", post(api::admin::providers::create_providers_batch))
         .route("/api/admin/providers/fetch-models", post(api::admin::providers::fetch_upstream_models))
         .route("/api/admin/providers/{id}", get(api::admin::providers::get_provider))
         .route("/api/admin/providers/{id}", patch(api::admin::providers::update_provider))
@@ -189,6 +199,9 @@ async fn main() {
         .route("/api/admin/prices/{id}", delete(api::admin::billing::delete_price))
         .route("/api/admin/users/{id}/balance", post(api::admin::billing::adjust_balance))
         .route("/api/admin/billing/transactions", get(api::admin::billing::list_transactions))
+        .route("/api/admin/redemption-codes", get(api::redemption::list_redemption_codes))
+        .route("/api/admin/redemption-codes", post(api::redemption::create_redemption_codes))
+        .route("/api/admin/redemption-codes/{id}/disable", post(api::redemption::disable_redemption_code))
         .route("/api/admin/usage-stats", get(api::logs::usage_stats))
         .route("/api/admin/stats", get(api::logs::admin_stats))
         .layer(middleware::from_fn(require_admin))

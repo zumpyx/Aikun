@@ -208,7 +208,7 @@ pub fn row_to_provider(row: &rusqlite::Row) -> rusqlite::Result<Provider> {
     })
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct CreateProviderRequest {
     pub name: String,
     pub provider_type: Option<String>,

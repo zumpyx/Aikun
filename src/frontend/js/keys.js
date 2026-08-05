@@ -32,6 +32,7 @@ function showApiKeyModal(id) {
       <div class="form-group"><label>模型限制（逗号分隔，留空不限制）</label><input id="kf-models" value="${esc((key?.models || []).join(', '))}" placeholder="gpt-4, claude-*"></div>
       <div class="form-group"><label>每分钟请求上限</label><input id="kf-rpm" type="number" min="0" step="1" value="${key ? esc(String(key.rate_limit_rpm ?? 0)) : 0}" placeholder="0 不限制"></div>
       <div class="form-group"><label>每日 Token 额度</label><input id="kf-quota" type="number" min="0" step="1" value="${key ? esc(String(key.quota_daily_tokens ?? 0)) : 0}" placeholder="0 不限制"></div>
+      <div class="form-group"><label>并发请求上限</label><input id="kf-concurrent" type="number" min="0" step="1" value="${key ? esc(String(key.max_concurrent ?? 0)) : 0}" placeholder="0 不限制"></div>
       <div class="form-actions">
         <button class="btn-primary" id="kf-save">${key ? '保存' : '创建'}</button>
         <button class="btn-outline" id="kf-cancel">取消</button>
@@ -54,6 +55,7 @@ function showApiKeyModal(id) {
       models: document.getElementById('kf-models').value.split(',').map(s => s.trim()).filter(Boolean),
       rate_limit_rpm: Math.max(0, parseInt(document.getElementById('kf-rpm').value, 10) || 0),
       quota_daily_tokens: Math.max(0, parseInt(document.getElementById('kf-quota').value, 10) || 0),
+      max_concurrent: Math.max(0, parseInt(document.getElementById('kf-concurrent').value, 10) || 0),
     };
     if (key) {
       const r = await api('PATCH', `/api/api-keys/${key.id}`, body);
@@ -115,6 +117,7 @@ async function loadApiKeys() {
     const parts = [];
     if (k.rate_limit_rpm > 0) parts.push(`${fmtNum(k.rate_limit_rpm)}/分`);
     if (k.quota_daily_tokens > 0) parts.push(`${fmtNum(k.quota_daily_tokens)}/日`);
+    if (k.max_concurrent > 0) parts.push(`${fmtNum(k.max_concurrent)} 并发`);
     return parts.length ? esc(parts.join(' · ')) : '<span style="color:var(--faint)">不限</span>';
   };
 

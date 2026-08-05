@@ -96,19 +96,43 @@ pub async fn proxy_completion(
         }
     }
 
-    // API key 的每分钟限流与每日 token 额度(仅 /v1 的 key 调用;JWT 会话无此概念)。
+    // 余额预检:余额 <= 0 直接 402 拒绝。放在 key 限额检查之前:余额不足
+    // 应稳定返回 402,而不是先消耗 RPM 窗口与并发槽位、刷满限额后漂移成
+    // 429。只做入口预检、不做预留金——并发在途请求仍可能把单请求扣成
+    // 负数(用量先发生费用后结算),这是有意的取舍,扣费侧注释见
+    // insert_request_log。
+    if !has_positive_balance(&state, &claims.sub).await {
+        let msg = "Insufficient balance: please top up before making more requests".to_string();
+        spawn_request_log(
+            &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
+            model.clone(), client_protocol, 0, 0, 0, 0, 0, 402, false,
+            Some(msg.clone()),
+        );
+        return (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(protocol_error(client_protocol, "insufficient_quota", &msg)),
+        )
+            .into_response();
+    }
+
+    // API key 的每分钟限流、每日 token 额度与并发上限(仅 /v1 的 key 调用;
+    // JWT 会话无此概念)。并发槽位 guard 须随请求存活到响应完全结束。
+    let mut concurrency_guard = None;
     if let Some(key_id) = &auth_ctx.api_key_id {
-        if let Some(msg) = enforce_key_limits(&state, key_id).await {
-            spawn_request_log(
-                &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-                model.clone(), client_protocol, 0, 0, 0, 0, 0, 429, false,
-                Some(msg.clone()),
-            );
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(protocol_error(client_protocol, "rate_limit_error", &msg)),
-            )
-                .into_response();
+        match enforce_key_limits(&state, key_id).await {
+            Err(msg) => {
+                spawn_request_log(
+                    &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
+                    model.clone(), client_protocol, 0, 0, 0, 0, 0, 429, false,
+                    Some(msg.clone()),
+                );
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(protocol_error(client_protocol, "rate_limit_error", &msg)),
+                )
+                    .into_response();
+            }
+            Ok(guard) => concurrency_guard = guard,
         }
     }
 
@@ -165,6 +189,7 @@ pub async fn proxy_completion(
         attempt_loop(
             state.clone(), client_protocol, model.clone(), body, is_stream,
             claims.sub.clone(), auth_ctx.api_key_id.clone(), tried_order.clone(),
+            concurrency_guard,
         ),
     )
     .await
@@ -201,11 +226,33 @@ pub async fn proxy_completion(
     }
 }
 
-/// Per-API-key 限流/日额度检查。返回 Some(message) 表示应以 429 拒绝。
+/// API key 并发槽位:Drop 时归还在途计数。非流式请求在响应体读完、函数
+/// 返回时释放;流式请求被 move 进 stream 生成器,持有到流结束/客户端断连/
+/// 进程关停(生成器 Drop 全覆盖)。
+struct ConcurrencyGuard {
+    key_id: String,
+    inflight: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl Drop for ConcurrencyGuard {
+    fn drop(&mut self) {
+        let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&self.key_id) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.key_id);
+            }
+        }
+    }
+}
+
+/// Per-API-key 限流/日额度/并发检查。返回 Err(message) 表示应以 429 拒绝;
+/// Ok(guard) 携带并发槽位(未配置并发上限时为 None),调用方须把 guard
+/// 持有到请求完全结束。
 /// 限额配置与当日已用 token 在 blocking 线程一次取回;RPM 用内存滑动窗口
 /// (key 为 api_keys.id)。查询失败时放行——key 刚通过认证,行必然存在,
 /// 瞬时的锁/IO 失败不应打断流量。
-async fn enforce_key_limits(state: &AppState, key_id: &str) -> Option<String> {
+async fn enforce_key_limits(state: &AppState, key_id: &str) -> Result<Option<ConcurrencyGuard>, String> {
     let pool = state.pool.clone();
     let key = key_id.to_string();
     let limits = tokio::task::spawn_blocking(move || {
@@ -213,7 +260,7 @@ async fn enforce_key_limits(state: &AppState, key_id: &str) -> Option<String> {
         conn.query_row(
             // created_at 时间格式混存(RFC3339 带 T 与旧空格格式),
             // 按日期前缀比较才能同时命中两种格式的当天行。
-            "SELECT rate_limit_rpm, quota_daily_tokens,
+            "SELECT rate_limit_rpm, quota_daily_tokens, max_concurrent,
                     (SELECT COALESCE(SUM(total_tokens), 0) FROM request_logs
                      WHERE api_key_id = ?1
                        AND substr(created_at, 1, 10) = date('now'))
@@ -224,6 +271,7 @@ async fn enforce_key_limits(state: &AppState, key_id: &str) -> Option<String> {
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             },
         )
@@ -231,35 +279,92 @@ async fn enforce_key_limits(state: &AppState, key_id: &str) -> Option<String> {
     })
     .await
     .ok()
-    .flatten()?;
+    .flatten();
 
-    let (rpm, daily_quota, used_today) = limits;
+    let Some((rpm, daily_quota, max_concurrent, used_today)) = limits else {
+        // fail-open 必须留信号:DB 故障(锁竞争/IO)会持续走这个分支,
+        // 没有日志的话 RPM/日额度/并发三项限额静默失效而无人察觉。
+        warn!("API key limit query failed for key {}, allowing request without enforcement", key_id);
+        return Ok(None);
+    };
 
     if daily_quota > 0 && used_today >= daily_quota {
-        return Some(format!(
+        return Err(format!(
             "Daily token quota exceeded for this API key ({}/{} tokens used today)",
             used_today, daily_quota
         ));
     }
 
     if rpm > 0 {
-        let now = std::time::Instant::now();
-        let mut windows = state.api_key_rate.lock().ok()?;
-        let window = windows.entry(key_id.to_string()).or_default();
-        window.retain(|t| now.duration_since(*t).as_secs() < 60);
-        if window.len() >= rpm as usize {
-            // 空窗口的 key 顺手清掉,避免 map 随 key 数量无限增长(这里
-            // 窗口非空不处理,空窗口在下一次请求 retain 后同样被清)。
-            return Some(format!(
-                "Rate limit exceeded for this API key ({} requests/minute)",
-                rpm
-            ));
+        // 锁中毒时跳过 RPM 检查放行,与整体 fail-open 口径一致。
+        if let Ok(mut windows) = state.api_key_rate.lock() {
+            let now = std::time::Instant::now();
+            let window = windows.entry(key_id.to_string()).or_default();
+            window.retain(|t| now.duration_since(*t).as_secs() < 60);
+            if window.len() >= rpm as usize {
+                // 空窗口的 key 顺手清掉,避免 map 随 key 数量无限增长(这里
+                // 窗口非空不处理,空窗口在下一次请求 retain 后同样被清)。
+                return Err(format!(
+                    "Rate limit exceeded for this API key ({} requests/minute)",
+                    rpm
+                ));
+            }
+            window.push(now);
+            windows.retain(|_, w| !w.is_empty());
         }
-        window.push(now);
-        windows.retain(|_, w| !w.is_empty());
     }
 
-    None
+    // 并发槽位最后占用:RPM/额度拒绝时不消耗槽位;槽位超限时 RPM 窗口已
+    // 推入一格,与"被 429 的请求也计入限流"的既有口径一致。
+    if max_concurrent > 0 {
+        let mut map = state
+            .api_key_inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let n = map.entry(key_id.to_string()).or_insert(0);
+        if *n >= max_concurrent as usize {
+            return Err(format!(
+                "Concurrent request limit exceeded for this API key ({} in-flight)",
+                max_concurrent
+            ));
+        }
+        *n += 1;
+        return Ok(Some(ConcurrencyGuard {
+            key_id: key_id.to_string(),
+            inflight: state.api_key_inflight.clone(),
+        }));
+    }
+
+    Ok(None)
+}
+
+/// 余额预检:balance > 0 才放行。查询失败按放行处理(与 enforce_key_limits
+/// 同为 fail-open):瞬时的锁/IO 失败不应打断流量,余额口径以扣费落库为准。
+async fn has_positive_balance(state: &AppState, user_id: &str) -> bool {
+    let pool = state.pool.clone();
+    let uid = user_id.to_string();
+    let uid_log = uid.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        pool.read().lock().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT balance > 0 FROM users WHERE id = ?1",
+                rusqlite::params![uid],
+                |row| row.get::<_, bool>(0),
+            )
+            .ok()
+        })
+    })
+    .await
+    .ok()
+    .flatten();
+    match result {
+        Some(positive) => positive,
+        None => {
+            // fail-open 同样要留信号:DB 故障期间余额拦截形同虚设。
+            warn!("Balance precheck failed for user {}, allowing request (fail-open)", uid_log);
+            true
+        }
+    }
 }
 
 /// 渠道重试/故障转移循环：依次尝试可用渠道，全部失败时返回最后一次上游
@@ -274,9 +379,13 @@ async fn attempt_loop(
     user_id: String,
     api_key_id: Option<String>,
     tried_order: Arc<std::sync::Mutex<Vec<String>>>,
+    concurrency_guard: Option<ConcurrencyGuard>,
 ) -> Response {
     let max_attempts = state.config.max_retries.max(1);
     let threshold = state.config.auto_disable_threshold;
+    // 并发槽位在本函数作用域持有:失败/非流式成功路径随函数返回释放;
+    // 流式路径在移交 stream_response 时被 move 进流生成器。
+    let mut concurrency_guard = concurrency_guard;
 
     let mut tried: HashSet<String> = HashSet::new();
     // 每个渠道在本请求内的尝试次数:受渠道级 max_retries(重试次数,0 = 不重试)
@@ -459,7 +568,7 @@ async fn attempt_loop(
             return stream_response(
                 state, resp, client_protocol, provider_protocol,
                 provider.id.clone(), provider.timeout_secs, model, user_id,
-                api_key_id, client_wants_usage,
+                api_key_id, client_wants_usage, concurrency_guard.take(),
             );
         }
 
@@ -649,6 +758,7 @@ fn stream_response(
     user_id: String,
     api_key_id: Option<String>,
     client_wants_usage: bool,
+    concurrency_guard: Option<ConcurrencyGuard>,
 ) -> Response {
     let byte_stream = resp.bytes_stream();
     let pool = state.pool.clone();
@@ -673,6 +783,9 @@ fn stream_response(
     const MAX_SSE_BUF: usize = 1024 * 1024;
 
     let sse_stream = async_stream::stream! {
+        // 并发槽位随生成器存活:流正常结束、客户端断连、关停取消都会
+        // 触发生成器 Drop,槽位在那时才归还。
+        let _concurrency_guard = concurrency_guard;
         let usage_cell = Arc::new(Mutex::new((0, 0, 0, 0)));
         let mut guard = StreamAbortGuard {
             pool: pool.clone(),
@@ -863,8 +976,9 @@ fn protocol_error(client_protocol: &str, err_type: &str, message: &str) -> Value
             "error": {"type": anthropic_error_type(err_type), "message": message}
         })
     } else {
+        // OpenAI 形状带 code 字段(与 type 同值),部分 SDK 按 error.code 分支。
         json!({
-            "error": {"message": message, "type": err_type}
+            "error": {"message": message, "type": err_type, "param": null, "code": err_type}
         })
     }
 }
@@ -1060,7 +1174,7 @@ fn insert_request_log(
         }
     };
     {
-        // 计费:有用量即按价格表折算费用。上游 token 已真实消耗,
+        // 计费:有用量即按价格表折算费用(整数微元)。上游 token 已真实消耗,
         // 客户端中途断连(499)或流中途错误(502)时已捕获的 usage 照扣;
         // 429/400/上游错误路径 total_tokens 本就为 0,不受影响。
         // 价格查询、日志插入、余额扣减包在同一个显式事务里——任何一步
@@ -1075,11 +1189,11 @@ fn insert_request_log(
                             "No price configured for model '{}' — {} tokens billed at 0",
                             model, total_tokens
                         );
-                        0.0
+                        0
                     }
                 }
             } else {
-                0.0
+                0
             };
             let tx = conn.transaction()?;
             // 渠道/API key 可能在长请求(尤其流式)进行中被硬删除:dangling
@@ -1130,8 +1244,9 @@ fn insert_request_log(
                     chrono::Utc::now().to_rfc3339(),
                 ],
             )?;
-            // 余额不拦截语义:允许扣成负数,只记账。
-            if cost > 0.0 {
+            // 余额不足在请求入口已预检拦截(402);此处允许单请求扣成负数
+            // (用量先发生、费用后结算,不做预留金),整数微元扣减无浮点误差。
+            if cost > 0 {
                 tx.execute(
                     "UPDATE users SET balance = balance - ?1 WHERE id = ?2",
                     params![cost, user_id],

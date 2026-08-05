@@ -384,9 +384,10 @@ async fn successful_request_deducts_user_balance() {
     let app = TestApp::spawn().await;
     seed_api_key(&app.db());
     seed_openai_provider(&app, &mock, "p1");
-    // 余额 100 元;gpt-4 价格:输入 10 元/1M、输出 30 元/1M
+    // 余额 100 元(库内口径:整数微元,100 元 = 100_000_000);
+    // gpt-4 价格:输入 10 元/1M、输出 30 元/1M
     app.db()
-        .execute("UPDATE users SET balance = 100.0 WHERE id = 'u-e2e'", [])
+        .execute("UPDATE users SET balance = 100_000_000 WHERE id = 'u-e2e'", [])
         .unwrap();
     app.db()
         .execute(
@@ -400,9 +401,9 @@ async fn successful_request_deducts_user_balance() {
     assert_eq!(resp.status(), 200);
 
     // mock usage: 5 prompt(含 2 缓存)+ 3 completion;无 cached_price 时缓存
-    // 按输入价计 → cost = (3+2)×10/1M + 3×30/1M = 0.00014
+    // 按输入价计 → cost = (3+2)×10/1M + 3×30/1M = 0.00014 元 = 140 微元
     wait_until("cost recorded and balance deducted", WAIT, || {
-        let (cost, balance): (f64, f64) = app
+        let (cost, balance): (i64, i64) = app
             .db()
             .query_row(
                 "SELECT (SELECT COALESCE(SUM(cost), 0) FROM request_logs WHERE user_id = 'u-e2e'),
@@ -411,9 +412,33 @@ async fn successful_request_deducts_user_balance() {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        (cost - 0.00014).abs() < 1e-9 && (balance - (100.0 - 0.00014)).abs() < 1e-9
+        cost == 140 && balance == 100_000_000 - 140
     })
     .await;
+}
+
+#[tokio::test]
+async fn insufficient_balance_rejected_with_402() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+
+    // 余额 0(种子默认带 1 元,显式清零)→ 入口预检 402,协议形状错误 insufficient_quota
+    app.db()
+        .execute("UPDATE users SET balance = 0 WHERE id = 'u-e2e'", [])
+        .unwrap();
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 402);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "insufficient_quota");
+
+    // 充值(1 微元)后恢复 200
+    app.db()
+        .execute("UPDATE users SET balance = 1 WHERE id = 'u-e2e'", [])
+        .unwrap();
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 200);
 }
 
 #[tokio::test]
@@ -435,9 +460,9 @@ async fn cached_tokens_billed_at_cached_price() {
     assert_eq!(resp.status(), 200);
 
     // mock usage: 5 prompt 中 2 个命中缓存 → 未缓存 3、缓存 2、输出 3
-    // cost = 3×10/1M + 2×1/1M + 3×30/1M = 0.000122
+    // cost = 3×10/1M + 2×1/1M + 3×30/1M = 0.000122 元 = 122 微元
     wait_until("cached tokens billed at cached price", WAIT, || {
-        let (cost, cached): (f64, i64) = app
+        let (cost, cached): (i64, i64) = app
             .db()
             .query_row(
                 "SELECT COALESCE(SUM(cost), 0), COALESCE(SUM(cached_tokens), 0)
@@ -446,7 +471,7 @@ async fn cached_tokens_billed_at_cached_price() {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        cached == 2 && (cost - 0.000122).abs() < 1e-9
+        cached == 2 && cost == 122
     })
     .await;
 }
@@ -458,14 +483,14 @@ async fn no_price_match_leaves_balance_unchanged() {
     seed_api_key(&app.db());
     seed_openai_provider(&app, &mock, "p1");
     app.db()
-        .execute("UPDATE users SET balance = 100.0 WHERE id = 'u-e2e'", [])
+        .execute("UPDATE users SET balance = 100_000_000 WHERE id = 'u-e2e'", [])
         .unwrap();
 
     let resp = chat_completions(&app).await;
     assert_eq!(resp.status(), 200);
 
     wait_until("request logged with zero cost", WAIT, || {
-        let (n, cost, balance): (i64, f64, f64) = app
+        let (n, cost, balance): (i64, i64, i64) = app
             .db()
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM request_logs WHERE user_id = 'u-e2e' AND success = 1),
@@ -475,7 +500,7 @@ async fn no_price_match_leaves_balance_unchanged() {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        n >= 1 && cost == 0.0 && balance == 100.0
+        n >= 1 && cost == 0 && balance == 100_000_000
     })
     .await;
 }
@@ -514,12 +539,12 @@ async fn admin_prices_crud_and_wildcard_billing() {
         .unwrap();
     assert_eq!(resp.status(), 409);
 
-    // 请求命中通配价格:cost = (3+2)×1/1M + 3×2/1M = 0.000011
+    // 请求命中通配价格:cost = (3+2)×1/1M + 3×2/1M = 0.000011 元 = 11 微元
     // (mock 5 个输入含 2 缓存,无 cached_price 时缓存按输入价计)
     let resp = chat_completions(&app).await;
     assert_eq!(resp.status(), 200);
     wait_until("wildcard price applied", WAIT, || {
-        let cost: f64 = app
+        let cost: i64 = app
             .db()
             .query_row(
                 "SELECT COALESCE(SUM(cost), 0) FROM request_logs WHERE user_id = 'u-e2e'",
@@ -527,7 +552,7 @@ async fn admin_prices_crud_and_wildcard_billing() {
                 |r| r.get(0),
             )
             .unwrap();
-        (cost - 0.000011).abs() < 1e-9
+        cost == 11
     })
     .await;
 
@@ -660,7 +685,7 @@ async fn wallet_returns_own_balance_and_daily_costs() {
     seed_api_key(&app.db());
     seed_openai_provider(&app, &mock, "p1");
     app.db()
-        .execute("UPDATE users SET balance = 100.0 WHERE id = 'u-e2e'", [])
+        .execute("UPDATE users SET balance = 100_000_000 WHERE id = 'u-e2e'", [])
         .unwrap();
     app.db()
         .execute(
@@ -682,7 +707,7 @@ async fn wallet_returns_own_balance_and_daily_costs() {
     let resp = chat_completions(&app).await;
     assert_eq!(resp.status(), 200);
     wait_until("cost recorded", WAIT, || {
-        let cost: f64 = app
+        let cost: i64 = app
             .db()
             .query_row(
                 "SELECT COALESCE(SUM(cost), 0) FROM request_logs WHERE user_id = 'u-e2e'",
@@ -690,7 +715,7 @@ async fn wallet_returns_own_balance_and_daily_costs() {
                 |r| r.get(0),
             )
             .unwrap();
-        (cost - 0.00014).abs() < 1e-9
+        cost == 140
     })
     .await;
 
@@ -724,6 +749,10 @@ async fn admin_adjust_balance_records_transaction() {
     let app = TestApp::spawn().await;
     seed_api_key(&app.db());
     let jwt = common::admin_jwt();
+    // 从零余额起算(种子默认带 1 元)
+    app.db()
+        .execute("UPDATE users SET balance = 0 WHERE id = 'u-e2e'", [])
+        .unwrap();
 
     // 充值 100
     let resp = app
@@ -789,6 +818,305 @@ async fn admin_adjust_balance_records_transaction() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+/// 渠道批量添加:3 个 key 建 3 个渠道(自动编号 -01..-03),协议/加密落库;
+/// 全部非法时 400。
+#[tokio::test]
+async fn batch_create_providers() {
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    let jwt = common::admin_jwt();
+
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/providers/batch", app.base))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({
+            "name": "batch",
+            "openai_base_url": "http://127.0.0.1:1",
+            "models": ["gpt-4"],
+            "protocols": ["openai"],
+            "api_keys": ["k1", "k2", "k3"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["created"], 3);
+    assert_eq!(body["failed"].as_array().unwrap().len(), 0);
+    let providers = body["providers"].as_array().unwrap();
+    let names: Vec<&str> = providers.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["batch-01", "batch-02", "batch-03"]);
+
+    // 落库核对:协议字段与加密 key(enc:v1: 前缀,逐 key 密文不同)
+    let rows: Vec<(String, String, String)> = app
+        .db()
+        .prepare("SELECT name, api_key, default_protocol FROM providers WHERE name LIKE 'batch-%' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert_eq!(rows.len(), 3);
+    let ciphers: std::collections::HashSet<&str> = rows.iter().map(|(_, k, _)| k.as_str()).collect();
+    for (_, key, proto) in &rows {
+        assert_eq!(proto, "openai");
+        assert!(key.starts_with("enc:v1:"), "key must be encrypted at rest");
+    }
+    assert_eq!(ciphers.len(), 3, "每个 key 应独立加密");
+
+    // 空 keys / 超上限 / 缺地址 → 400
+    for body in [
+        serde_json::json!({"name": "x", "openai_base_url": "http://a", "models": [], "api_keys": []}),
+        serde_json::json!({"name": "x", "openai_base_url": "http://a", "models": [], "api_keys": vec!["k"; 101]}),
+        serde_json::json!({"name": "x", "models": [], "api_keys": ["k1"], "protocols": ["openai"]}),
+    ] {
+        let resp = app
+            .client()
+            .post(format!("{}/api/admin/providers/batch", app.base))
+            .bearer_auth(&jwt)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "body: {}", body);
+    }
+}
+
+/// Key 并发限制:max_concurrent=1 时,慢上游请求在途期间第二个请求 429;
+/// 在途请求结束后槽位归还,后续请求恢复 200。
+#[tokio::test]
+async fn api_key_concurrent_limit_enforced() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+    app.db()
+        .execute("UPDATE api_keys SET max_concurrent = 1 WHERE id = 'k-e2e'", [])
+        .unwrap();
+
+    // 慢上游(1.5s):第一个请求在途期间第二个并发请求 → 429 rate_limit_error
+    mock.push_delayed_json(std::time::Duration::from_millis(1500), 200, common::openai_completion("slow"));
+    // 注意:reqwest future 是惰性的,必须 spawn 才会真正发出第一个请求
+    let first = tokio::spawn({
+        let client = app.client();
+        let base = app.base.clone();
+        async move {
+            client
+                .post(format!("{}/v1/chat/completions", base))
+                .header("Authorization", format!("Bearer {}", common::TEST_KEY))
+                .json(&serde_json::json!({
+                    "model": "gpt-4",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let second = chat_completions(&app).await;
+    assert_eq!(second.status(), 429);
+    let body: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "rate_limit_error");
+    assert_eq!(first.await.unwrap().status(), 200);
+
+    // 槽位已归还:立即再发一个请求 → 200
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 200);
+}
+
+/// 兑换码全流程:生成 → 兑换(余额+流水) → 重复兑换 400 → 禁用后 400 → 过期 400。
+#[tokio::test]
+async fn redemption_code_full_flow() {
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    let jwt = common::admin_jwt();
+    app.db()
+        .execute("UPDATE users SET balance = 0 WHERE id = 'u-e2e'", [])
+        .unwrap();
+
+    // 批量生成 3 张 10 元码 + 1 张已过期码
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/redemption-codes", app.base))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"count": 3, "amount": 10.0, "batch": "b1", "note": "活动"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["amount"], 10.0);
+    let codes: Vec<String> = body["codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(codes.len(), 3);
+    assert!(codes[0].starts_with("AK-"));
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/redemption-codes", app.base))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"count": 1, "amount": 5.0, "batch": "b1", "expires_at": "2020-01-01"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let expired_code = resp.json::<serde_json::Value>().await.unwrap()["codes"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let user_jwt = common::sign_jwt("u-e2e", "e2e", "user");
+    let redeem = |code: &str| {
+        let app = &app;
+        let user_jwt = &user_jwt;
+        let code = code.to_string();
+        async move {
+            app.client()
+                .post(format!("{}/api/wallet/redeem", app.base))
+                .bearer_auth(user_jwt)
+                .json(&serde_json::json!({"code": code}))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    // 兑换第一张:余额 0 → 10,流水记"兑换码充值"
+    let resp = redeem(&codes[0]).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["amount"], 10.0);
+    assert_eq!(body["balance"], 10.0);
+
+    // 重复兑换同一张 → 400
+    let resp = redeem(&codes[0]).await;
+    assert_eq!(resp.status(), 400);
+    // 不存在的码 → 400;过期码 → 400(口径一致,不细分防枚举)
+    let resp = redeem("AK-AAAA-BBBB-CCCC").await;
+    assert_eq!(resp.status(), 400);
+    let resp = redeem(&expired_code).await;
+    assert_eq!(resp.status(), 400);
+
+    // 流水有一条 10 元充值
+    let resp = app
+        .client()
+        .get(format!("{}/api/admin/billing/transactions", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    let txs: serde_json::Value = resp.json().await.unwrap();
+    let arr = txs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["amount"], 10.0);
+    assert_eq!(arr[0]["kind"], "recharge");
+    assert_eq!(arr[0]["note"], "兑换码充值");
+
+    // 管理端列表:4 张码(3 正常 + 1 过期未用),第一张已使用;明文/哈希不出库
+    let resp = app
+        .client()
+        .get(format!("{}/api/admin/redemption-codes?batch=b1", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let list: serde_json::Value = resp.json().await.unwrap();
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 4);
+    assert!(arr.iter().all(|c| c["code_masked"].as_str().unwrap().starts_with("AK-****-****-")));
+    assert!(arr.iter().all(|c| c.get("code_hash").is_none() && c.get("code").is_none()));
+    let used = arr.iter().find(|c| c["status"] == "used").unwrap();
+    assert_eq!(used["used_by"], "e2e");
+
+    // 禁用一张未过期且未使用的 → 兑换 400;重复禁用 → 409
+    let unused_id = arr
+        .iter()
+        .find(|c| c["status"] == "unused" && c["expires_at"].is_null())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/redemption-codes/{}/disable", app.base, unused_id))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/redemption-codes/{}/disable", app.base, unused_id))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    // 被禁用的是 codes[1] 或 codes[2]:找出未用且未被禁用的另一张确认仍可用
+    let resp = redeem(&codes[1]).await;
+    let disabled_first = resp.status() == 400;
+    if !disabled_first {
+        assert_eq!(resp.status(), 200);
+        let resp = redeem(&codes[2]).await;
+        assert_eq!(resp.status(), 400);
+    } else {
+        let resp = redeem(&codes[2]).await;
+        assert_eq!(resp.status(), 200);
+    }
+
+    // 非法参数:count 超限 / 负面值 / 空批次 → 400
+    for body in [
+        serde_json::json!({"count": 501, "amount": 1.0, "batch": "x"}),
+        serde_json::json!({"count": 1, "amount": -1.0, "batch": "x"}),
+        serde_json::json!({"count": 1, "amount": 1.0, "batch": ""}),
+        serde_json::json!({"count": 1, "amount": 1.0, "batch": "x", "expires_at": "2026-01-01T00:00:00Z"}),
+    ] {
+        let resp = app
+            .client()
+            .post(format!("{}/api/admin/redemption-codes", app.base))
+            .bearer_auth(&jwt)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "body: {}", body);
+    }
+}
+
+/// 兑换防爆破:同一用户 10 分钟内失败 5 次 → 429。
+#[tokio::test]
+async fn redemption_bruteforce_rate_limited() {
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    let user_jwt = common::sign_jwt("u-e2e", "e2e", "user");
+    for i in 0..5 {
+        let resp = app
+            .client()
+            .post(format!("{}/api/wallet/redeem", app.base))
+            .bearer_auth(&user_jwt)
+            .json(&serde_json::json!({"code": format!("AK-XXXX-XXXX-{:04}", i)}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+    }
+    let resp = app
+        .client()
+        .post(format!("{}/api/wallet/redeem", app.base))
+        .bearer_auth(&user_jwt)
+        .json(&serde_json::json!({"code": "AK-XXXX-XXXX-9999"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
 }
 
 /// 3.4:admin 跨用户管理 API key(list ?user_id= / PATCH / DELETE),

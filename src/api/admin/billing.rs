@@ -321,8 +321,8 @@ pub struct AdjustBalanceRequest {
     pub note: Option<String>,
 }
 
-/// 管理员手工调账:amount 正=充值负=扣减。UPDATE 余额与 INSERT 流水
-/// 同在一把写锁内,不会只改一边。
+/// 管理员手工调账:amount 正=充值负=扣减(对外口径为元,入库转整数微元)。
+/// UPDATE 余额与 INSERT 流水同在一把写锁内,不会只改一边。
 pub async fn adjust_balance(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
@@ -334,6 +334,13 @@ pub async fn adjust_balance(
             "message": "amount 必须是非零有限数"
         })));
     }
+    let amount_micro = crate::billing::yuan_to_micro(req.amount);
+    if amount_micro == 0 {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "error": "invalid_amount",
+            "message": "amount 过小,低于最小记账单位(0.000001 元)"
+        })));
+    }
     let mut conn = match state.pool.conn.lock() {
         Ok(c) => c,
         Err(_) => {
@@ -342,28 +349,28 @@ pub async fn adjust_balance(
     };
     // UPDATE 余额与 INSERT 流水包在同一事务:失败整体回滚,
     // 不会留下"余额变了但没流水"的中间态。
-    let result = (|| -> Result<(f64, &'static str), rusqlite::Error> {
+    let result = (|| -> Result<(i64, &'static str), rusqlite::Error> {
         let tx = conn.transaction()?;
         let updated = tx.execute(
             "UPDATE users SET balance = balance + ?1, updated_at = datetime('now') WHERE id = ?2",
-            params![req.amount, user_id],
+            params![amount_micro, user_id],
         )?;
         if updated == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        let balance: f64 = tx.query_row(
+        let balance: i64 = tx.query_row(
             "SELECT balance FROM users WHERE id = ?1",
             params![user_id],
             |row| row.get(0),
         )?;
-        let kind = if req.amount > 0.0 { "recharge" } else { "adjust" };
+        let kind = if amount_micro > 0 { "recharge" } else { "adjust" };
         tx.execute(
             "INSERT INTO billing_transactions (id, user_id, amount, balance_after, kind, note)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 Uuid::new_v4().to_string(),
                 user_id,
-                req.amount,
+                amount_micro,
                 balance,
                 kind,
                 req.note.unwrap_or_default().trim().to_string()
@@ -374,7 +381,7 @@ pub async fn adjust_balance(
     })();
     match result {
         Ok((balance, kind)) => (StatusCode::OK, Json(json!({
-            "balance": balance,
+            "balance": crate::billing::micro_to_yuan(balance),
             "kind": kind
         }))),
         Err(rusqlite::Error::QueryReturnedNoRows) => {
@@ -430,8 +437,9 @@ pub async fn list_transactions(
                 "id": row.get::<_, String>(0)?,
                 "user_id": row.get::<_, String>(1)?,
                 "username": row.get::<_, Option<String>>(2)?,
-                "amount": row.get::<_, f64>(3)?,
-                "balance_after": row.get::<_, f64>(4)?,
+                // 库存整数微元,出参转元
+                "amount": crate::billing::micro_to_yuan(row.get::<_, i64>(3)?),
+                "balance_after": crate::billing::micro_to_yuan(row.get::<_, i64>(4)?),
                 "kind": row.get::<_, String>(5)?,
                 "note": row.get::<_, String>(6)?,
                 "created_at": row.get::<_, String>(7)?,

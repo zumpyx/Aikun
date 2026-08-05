@@ -125,6 +125,7 @@ pub struct ApiKey {
     pub models: String, // JSON array; empty = all models allowed
     pub rate_limit_rpm: i64,      // 0 = unlimited
     pub quota_daily_tokens: i64,  // 0 = unlimited
+    pub max_concurrent: i64,      // 并发在途请求上限,0 = unlimited
     pub created_at: String,
 }
 
@@ -142,6 +143,7 @@ impl std::fmt::Debug for ApiKey {
             .field("models", &self.models)
             .field("rate_limit_rpm", &self.rate_limit_rpm)
             .field("quota_daily_tokens", &self.quota_daily_tokens)
+            .field("max_concurrent", &self.max_concurrent)
             .field("created_at", &self.created_at)
             .finish()
     }
@@ -154,6 +156,7 @@ pub struct CreateApiKeyRequest {
     pub models: Option<Vec<String>>,
     pub rate_limit_rpm: Option<i64>,
     pub quota_daily_tokens: Option<i64>,
+    pub max_concurrent: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +167,7 @@ pub struct UpdateApiKeyRequest {
     pub models: Option<Vec<String>>,
     pub rate_limit_rpm: Option<i64>,
     pub quota_daily_tokens: Option<i64>,
+    pub max_concurrent: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,6 +182,7 @@ pub struct ApiKeyResponse {
     pub models: Vec<String>,
     pub rate_limit_rpm: i64,
     pub quota_daily_tokens: i64,
+    pub max_concurrent: i64,
     pub created_at: String,
 }
 
@@ -195,6 +200,7 @@ impl From<ApiKey> for ApiKeyResponse {
             models,
             rate_limit_rpm: k.rate_limit_rpm,
             quota_daily_tokens: k.quota_daily_tokens,
+            max_concurrent: k.max_concurrent,
             created_at: k.created_at,
         }
     }

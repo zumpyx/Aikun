@@ -104,14 +104,15 @@ pub async fn list_users(
     };
 
     let users: Vec<serde_json::Value> = match stmt.query_map([], |row| {
-        Ok((row_to_user(row)?, row.get::<_, f64>(8)?))
+        Ok((row_to_user(row)?, row.get::<_, i64>(8)?))
     }) {
             Ok(rows) => rows
                 .filter_map(|r| r.ok())
                 .map(|(u, balance)| {
                     let mut v = serde_json::to_value(UserResponse::from(u))
                         .unwrap_or_else(|_| json!({}));
-                        v["balance"] = json!(balance);
+                        // 库存整数微元,出参转元
+                        v["balance"] = json!(crate::billing::micro_to_yuan(balance));
                     v
                 })
                 .collect(),
@@ -364,14 +365,15 @@ pub async fn get_user(
         "SELECT id, username, password_hash, display_name, role, is_active, created_at, updated_at, balance
          FROM users WHERE id = ?1",
         params![user_id],
-        |row| Ok((row_to_user(row)?, row.get::<_, f64>(8)?)),
+        |row| Ok((row_to_user(row)?, row.get::<_, i64>(8)?)),
     );
 
     match user {
         Ok((u, balance)) => {
             let mut v = serde_json::to_value(UserResponse::from(u))
                 .unwrap_or_else(|_| json!({}));
-            v["balance"] = json!(balance);
+            // 库存整数微元,出参转元
+            v["balance"] = json!(crate::billing::micro_to_yuan(balance));
             (StatusCode::OK, Json(v))
         }
         Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),

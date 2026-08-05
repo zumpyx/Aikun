@@ -4,10 +4,22 @@
 //! 单独的 `*` 是兜底条目,匹配一切但优先级最低。
 //! 无匹配返回 None,调用方按 cost=0 处理(不动用户余额)。
 //!
-//! 金额用 REAL(浮点):每请求费用极小,累计误差只影响展示分位;
-//! 网关非银行系统,可接受此取舍。
+//! 金额口径:DB 一律存整数微元(1 元 = 1,000,000 微元,与前端 fmtCost
+//! 的 6 位小数精度一致),浮点只存在于价格费率(元/1M tokens)与对外 API
+//! (元)两侧边界。单请求费用常远小于 1 分,按分取整会让大量请求免费,
+//! 故取微元;整数累加/扣减无浮点误差。转换只走 yuan_to_micro/micro_to_yuan。
 
 use rusqlite::Connection;
+
+/// 元(f64)→ 微元(i64),四舍五入。仅用于 API/费率边界入库。
+pub fn yuan_to_micro(yuan: f64) -> i64 {
+    (yuan * 1_000_000.0).round() as i64
+}
+
+/// 微元(i64)→ 元(f64)。微元整除 1e6 在 f64 下精确,无需再修约。
+pub fn micro_to_yuan(micro: i64) -> f64 {
+    micro as f64 / 1_000_000.0
+}
 
 /// 查模型价格,返回 (prompt_price, completion_price, cached_price)(每 1M tokens)。
 /// cached_price 为 NULL 时缓存 token 按 prompt_price 计(见 compute_cost)。
@@ -75,17 +87,20 @@ pub fn find_price(conn: &Connection, model: &str) -> Option<(f64, f64, Option<f6
     best.map(|(_, p, c, k)| (p, c, k))
 }
 
-/// 由用量与价格折算费用(元)。prompt_tokens 为未命中缓存的输入 token,
-/// cached_tokens 按 cached_price 单独计价,cached_price 为 None 时按输入价计。
+/// 由用量与价格折算费用,返回整数微元(DB cost/balance 的存储口径)。
+/// prompt_tokens 为未命中缓存的输入 token,cached_tokens 按 cached_price
+/// 单独计价,cached_price 为 None 时按输入价计。浮点只用于中间折算,
+/// 结果一次性 round 到微元,长期累加无浮点漂移。
 pub fn compute_cost(
     prompt_tokens: i32,
     cached_tokens: i32,
     completion_tokens: i32,
     prices: (f64, f64, Option<f64>),
-) -> f64 {
-    prompt_tokens as f64 / 1_000_000.0 * prices.0
+) -> i64 {
+    let yuan = prompt_tokens as f64 / 1_000_000.0 * prices.0
         + cached_tokens as f64 / 1_000_000.0 * prices.2.unwrap_or(prices.0)
-        + completion_tokens as f64 / 1_000_000.0 * prices.1
+        + completion_tokens as f64 / 1_000_000.0 * prices.1;
+    yuan_to_micro(yuan)
 }
 
 /// 内置默认价格快照(src/default_prices.json):
@@ -210,13 +225,27 @@ mod tests {
     #[test]
     fn cost_calculation() {
         // 5 未缓存输入 + 2 缓存 + 3 输出 @ (10, 30, 缓存 5)/1M
-        // = (5×10 + 2×5 + 3×30)/1M = 0.00015 元
-        let cost = compute_cost(5, 2, 3, (10.0, 30.0, Some(5.0)));
-        assert!((cost - 0.00015).abs() < 1e-12);
+        // = (5×10 + 2×5 + 3×30)/1M = 0.00015 元 = 150 微元
+        assert_eq!(compute_cost(5, 2, 3, (10.0, 30.0, Some(5.0))), 150);
         // cached_price 为 NULL 时缓存 token 按输入价计:
-        // (5×10 + 2×10 + 3×30)/1M = 0.00016 元
-        let cost = compute_cost(5, 2, 3, (10.0, 30.0, None));
-        assert!((cost - 0.00016).abs() < 1e-12);
+        // (5×10 + 2×10 + 3×30)/1M = 0.00016 元 = 160 微元
+        assert_eq!(compute_cost(5, 2, 3, (10.0, 30.0, None)), 160);
+    }
+
+    #[test]
+    fn yuan_micro_conversion_roundtrip() {
+        assert_eq!(yuan_to_micro(0.00015), 150);
+        assert_eq!(yuan_to_micro(100.0), 100_000_000);
+        assert_eq!(yuan_to_micro(-0.5), -500_000);
+        // 亚微元零头四舍五入到微元
+        assert_eq!(yuan_to_micro(0.0000004), 0);
+        assert_eq!(yuan_to_micro(0.0000006), 1);
+        assert_eq!(micro_to_yuan(150), 0.00015);
+        assert_eq!(micro_to_yuan(-500_000), -0.5);
+        // 微元口径在 f64 下精确,往返无损
+        for m in [0, 1, 150, 999_999, 100_000_000, -123_456] {
+            assert_eq!(yuan_to_micro(micro_to_yuan(m)), m);
+        }
     }
 
     #[test]

@@ -35,6 +35,10 @@ pub enum Scripted {
     Json(u16, Value),
     /// body 原样返回,content-type: text/event-stream。
     Sse(String),
+    /// 延迟 delay 后按 Json 返回:模拟慢上游,用于并发/超时类断言。
+    DelayedJson(std::time::Duration, u16, Value),
+    /// 延迟 delay 后按 Sse 返回(流式慢上游)。
+    DelayedSse(std::time::Duration, String),
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +99,22 @@ impl MockUpstream {
             .push_back(Scripted::Sse(body.to_string()));
     }
 
+    pub fn push_delayed_json(&self, delay: std::time::Duration, status: u16, body: Value) {
+        self.state
+            .script
+            .lock()
+            .unwrap()
+            .push_back(Scripted::DelayedJson(delay, status, body));
+    }
+
+    pub fn push_delayed_sse(&self, delay: std::time::Duration, body: &str) {
+        self.state
+            .script
+            .lock()
+            .unwrap()
+            .push_back(Scripted::DelayedSse(delay, body.to_string()));
+    }
+
     pub fn requests(&self) -> Vec<Recorded> {
         self.state.requests.lock().unwrap().clone()
     }
@@ -140,6 +160,22 @@ async fn mock_handler(
             body,
         )
             .into_response(),
+        Some(Scripted::DelayedJson(delay, status, v)) => {
+            tokio::time::sleep(delay).await;
+            (
+                axum::http::StatusCode::from_u16(status).unwrap(),
+                axum::Json(v),
+            )
+                .into_response()
+        }
+        Some(Scripted::DelayedSse(delay, body)) => {
+            tokio::time::sleep(delay).await;
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                body,
+            )
+                .into_response()
+        }
         None => axum::Json(openai_completion("OK")).into_response(),
     }
 }
@@ -275,10 +311,12 @@ pub fn seed_api_key(db: &rusqlite::Connection) {
 }
 
 /// 同 seed_api_key,但设置 rate_limit_rpm / quota_daily_tokens(0 = 不限)。
+/// 用户默认带 1 元余额(1_000_000 微元):代理入口对 balance <= 0 一律
+/// 402,需要零余额场景的用例应显式 UPDATE 覆盖。
 pub fn seed_api_key_with_limits(db: &rusqlite::Connection, rpm: i64, daily_quota: i64) {
     db.execute(
-        "INSERT INTO users (id, username, password_hash, display_name, role)
-         VALUES ('u-e2e', 'e2e', 'unused', 'E2E', 'admin')",
+        "INSERT INTO users (id, username, password_hash, display_name, role, balance)
+         VALUES ('u-e2e', 'e2e', 'unused', 'E2E', 'admin', 1000000)",
         [],
     )
     .unwrap();

@@ -137,7 +137,8 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
                 CHECK(role IN ('admin', 'user')),
             is_active       INTEGER NOT NULL DEFAULT 1,
             token_version   INTEGER NOT NULL DEFAULT 0,
-            balance         REAL NOT NULL DEFAULT 0,
+            -- 余额:整数微元(1 元 = 1e6 微元),口径见 src/billing.rs 模块头。
+            balance         INTEGER NOT NULL DEFAULT 0,
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -154,6 +155,8 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             models          TEXT NOT NULL DEFAULT '',
             rate_limit_rpm  INTEGER NOT NULL DEFAULT 0,
             quota_daily_tokens INTEGER NOT NULL DEFAULT 0,
+            -- 并发在途请求上限,0 = 不限制(内存计数,见 AppState.api_key_inflight)
+            max_concurrent  INTEGER NOT NULL DEFAULT 0,
             created_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -203,7 +206,8 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             status_code     INTEGER NOT NULL DEFAULT 0,
             success         INTEGER NOT NULL DEFAULT 1,
             error_message   TEXT,
-            cost            REAL NOT NULL DEFAULT 0,
+            -- 单次请求费用:整数微元。
+            cost            INTEGER NOT NULL DEFAULT 0,
             created_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -236,8 +240,9 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE TABLE IF NOT EXISTS billing_transactions (
             id              TEXT PRIMARY KEY,
             user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            amount          REAL NOT NULL,
-            balance_after   REAL NOT NULL,
+            -- 金额与账后余额:整数微元。
+            amount          INTEGER NOT NULL,
+            balance_after   INTEGER NOT NULL,
             kind            TEXT NOT NULL
                 CHECK(kind IN ('recharge', 'adjust')),
             note            TEXT NOT NULL DEFAULT '',
@@ -246,13 +251,30 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
 
         -- 按 (用户, 日) 的消费汇总:purge 删除 request_logs 明细前先聚合到
         -- 这里,保留期过后余额对账(Σ充值 − Σ消费)仍有永久依据。
-        CREATE TABLE IF NOT EXISTS usage_daily (
-            user_id     TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS usage_daily (            user_id     TEXT NOT NULL,
             date        TEXT NOT NULL,
             requests    INTEGER NOT NULL DEFAULT 0,
             tokens      INTEGER NOT NULL DEFAULT 0,
-            cost        REAL NOT NULL DEFAULT 0,
+            -- 日消费合计:整数微元。
+            cost        INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, date)
+        );
+
+        -- 兑换码:库中只存 sha256(code) 与掩码后缀,明文仅生成时返回一次。
+        -- amount 为面值(整数微元);expires_at 为空 = 永不过期(UTC)。
+        CREATE TABLE IF NOT EXISTS redemption_codes (
+            id              TEXT PRIMARY KEY,
+            code_hash       TEXT NOT NULL UNIQUE,
+            code_suffix     TEXT NOT NULL DEFAULT '',
+            amount          INTEGER NOT NULL,
+            batch           TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'unused'
+                CHECK(status IN ('unused', 'used', 'disabled')),
+            used_by         TEXT REFERENCES users(id) ON DELETE SET NULL,
+            used_at         TEXT,
+            expires_at      TEXT,
+            note            TEXT NOT NULL DEFAULT '',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
         CREATE INDEX IF NOT EXISTS idx_request_logs_user_id ON request_logs(user_id);
@@ -261,6 +283,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         -- enforce_key_limits 的每请求日额度子查询按 (api_key_id, 当天) 过滤。
         CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_created ON request_logs(api_key_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_providers_health ON providers(health_status);
+        CREATE INDEX IF NOT EXISTS idx_redemption_codes_batch ON redemption_codes(batch);
         ",
     )?;
 
@@ -334,8 +357,11 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // API key 限流/额度:每分钟请求数与每日 token 额度,0 表示不限制。
     ensure_column(conn, "api_keys", "rate_limit_rpm", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "api_keys", "quota_daily_tokens", "INTEGER NOT NULL DEFAULT 0")?;
-    // 计费:用户余额(元,允许为负——不拦截语义)与每次请求的折算费用。
-    ensure_column(conn, "users", "balance", "REAL NOT NULL DEFAULT 0")?;
+    // API key 并发限制:同时在途请求数上限,0 表示不限制。
+    ensure_column(conn, "api_keys", "max_concurrent", "INTEGER NOT NULL DEFAULT 0")?;
+    // 计费:用户余额(整数微元,允许为负——扣费不拦截,拦截在请求入口预检)。
+    // 存量 REAL 库由 migrate_currency_micro 重建转换,此处只兜底"列缺失"。
+    ensure_column(conn, "users", "balance", "INTEGER NOT NULL DEFAULT 0")?;
     // Backfill protocol fields from the legacy provider_type, gated by
     // user_version so it runs exactly once instead of on every startup.
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -379,13 +405,18 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     migrate_api_key_hashes(conn)?;
     // The UNIQUE constraint on api_keys.key already covers this lookup index.
     conn.execute_batch("DROP INDEX IF EXISTS idx_api_keys_key")?;
+    // 货币整数化必须先于 request_logs 的 FK 重建:若 FK 重建先把 REAL 费用
+    // 值拷进 INTEGER 列,声明类型已变,货币迁移会漏转( REAL 值残留在
+    // INTEGER 列里,读取即类型错误)。货币迁移重建的 request_logs 自带
+    // ON DELETE SET NULL,随后 FK 检查自然通过、不再重复重建。
+    migrate_currency_micro(conn)?;
     migrate_request_logs_fk(conn)?;
-    // FK 重建会 DROP 旧表(索引随之丢失),重建后统一补建全部 request_logs
+    // 表重建会 DROP 旧表(索引随之丢失),重建后统一补建全部 request_logs
     // 索引;新库路径下 IF NOT EXISTS 为 no-op。
     ensure_request_logs_indexes(conn)?;
     // cost 已并入 CREATE TABLE 与重建 DDL;此调用兜底"重建早已完成、
     // cost 尚未加"的中间态旧库。
-    ensure_column(conn, "request_logs", "cost", "REAL NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "request_logs", "cost", "INTEGER NOT NULL DEFAULT 0")?;
     // 缓存 token 单独计价:request_logs 记缓存用量,model_prices 记缓存价
     // (可空,NULL 按输入价计)。
     ensure_column(conn, "request_logs", "cached_tokens", "INTEGER NOT NULL DEFAULT 0")?;
@@ -445,6 +476,166 @@ fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, rusqlite
     Ok(cols)
 }
 
+/// 货币整数化迁移:users.balance / request_logs.cost /
+/// billing_transactions.amount,balance_after / usage_daily.cost 从
+/// REAL(元)重建为 INTEGER(微元,×1e6)。按列的声明类型逐列判定
+/// (浮点类型才转换),幂等;全部转换在同一事务,失败整体回滚。
+/// SQLite 不能就地改列类型,只能重建表;DDL 与 initialize_schema 保持一致。
+fn migrate_currency_micro(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let declared_type = |table: &str, column: &str| -> Result<Option<String>, rusqlite::Error> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+        let ty = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })?
+            .filter_map(|r| r.ok())
+            .find(|(name, _)| name == column)
+            .map(|(_, ty)| ty);
+        Ok(ty)
+    };
+    // (表, 全部金额列):声明类型仍为浮点类型的列才需要转换
+    const MONEY_COLS: &[(&str, &[&str])] = &[
+        ("users", &["balance"]),
+        ("request_logs", &["cost"]),
+        ("billing_transactions", &["amount", "balance_after"]),
+        ("usage_daily", &["cost"]),
+    ];
+    // (表, 待转换金额列):逐列判定声明类型,任何一列仍是浮点类型
+    // (REAL/DOUBLE/FLOAT,大小写不敏感)就重建整表,且只转换这些列——
+    // 手工修库等造成的部分迁移不会被静默跳过,已转 INTEGER 的列也
+    // 不会二次 ×1e6。
+    let mut rebuild: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (table, cols) in MONEY_COLS {
+        let mut float_cols = Vec::new();
+        for col in *cols {
+            let is_float = declared_type(table, col)?
+                .map(|ty| {
+                    let ty = ty.to_ascii_uppercase();
+                    matches!(ty.as_str(), "REAL" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT")
+                })
+                .unwrap_or(false);
+            if is_float {
+                float_cols.push(*col);
+            }
+        }
+        if !float_cols.is_empty() {
+            rebuild.push((table, float_cols));
+        }
+    }
+    if rebuild.is_empty() {
+        return Ok(());
+    }
+    tracing::info!(
+        "Migrating currency columns to integer micro-yuan: {}",
+        rebuild.iter().map(|(t, _)| *t).collect::<Vec<_>>().join(", ")
+    );
+    conn.execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;")?;
+    let result = (|| -> Result<(), rusqlite::Error> {
+        for (table, money_cols) in &rebuild {
+            let mig = format!("{}_curmig", table);
+            let ddl = match *table {
+                "users" => format!(
+                    "CREATE TABLE {} (
+                        id              TEXT PRIMARY KEY,
+                        username        TEXT NOT NULL UNIQUE,
+                        password_hash   TEXT NOT NULL,
+                        display_name    TEXT NOT NULL DEFAULT '',
+                        role            TEXT NOT NULL DEFAULT 'user'
+                            CHECK(role IN ('admin', 'user')),
+                        is_active       INTEGER NOT NULL DEFAULT 1,
+                        token_version   INTEGER NOT NULL DEFAULT 0,
+                        balance         INTEGER NOT NULL DEFAULT 0,
+                        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+                    );", mig),
+                "request_logs" => format!(
+                    "CREATE TABLE {} (
+                        id              TEXT PRIMARY KEY,
+                        user_id         TEXT REFERENCES users(id) ON DELETE SET NULL,
+                        api_key_id      TEXT REFERENCES api_keys(id) ON DELETE SET NULL,
+                        provider_id     TEXT REFERENCES providers(id) ON DELETE SET NULL,
+                        model           TEXT NOT NULL,
+                        request_type    TEXT NOT NULL DEFAULT 'chat',
+                        prompt_tokens   INTEGER NOT NULL DEFAULT 0,
+                        completion_tokens INTEGER NOT NULL DEFAULT 0,
+                        total_tokens    INTEGER NOT NULL DEFAULT 0,
+                        cached_tokens   INTEGER NOT NULL DEFAULT 0,
+                        latency_ms      INTEGER NOT NULL DEFAULT 0,
+                        status_code     INTEGER NOT NULL DEFAULT 0,
+                        success         INTEGER NOT NULL DEFAULT 1,
+                        error_message   TEXT,
+                        cost            INTEGER NOT NULL DEFAULT 0,
+                        created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+                    );", mig),
+                "billing_transactions" => format!(
+                    "CREATE TABLE {} (
+                        id              TEXT PRIMARY KEY,
+                        user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        amount          INTEGER NOT NULL,
+                        balance_after   INTEGER NOT NULL,
+                        kind            TEXT NOT NULL
+                            CHECK(kind IN ('recharge', 'adjust')),
+                        note            TEXT NOT NULL DEFAULT '',
+                        created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+                    );", mig),
+                "usage_daily" => format!(
+                    "CREATE TABLE {} (
+                        user_id     TEXT NOT NULL,
+                        date        TEXT NOT NULL,
+                        requests    INTEGER NOT NULL DEFAULT 0,
+                        tokens      INTEGER NOT NULL DEFAULT 0,
+                        cost        INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (user_id, date)
+                    );", mig),
+                // 重建队列只来自 MONEY_COLS,出现其他表是编程错误;
+                // 绝不能静默套用错误的 DDL(交集复制会丢列)。
+                other => unreachable!("unexpected table in currency migration: {}", other),
+            };
+            conn.execute_batch(&ddl)?;
+            // 列清单动态枚举(同 migrate_request_logs_fk):新旧表共有的列
+            // 全部复制,金额列在 SELECT 侧 ×1e6 转整数微元。
+            let new_cols = table_columns(conn, &mig)?;
+            let old_cols = table_columns(conn, table)?;
+            let select: Vec<String> = new_cols
+                .iter()
+                .filter(|c| old_cols.contains(c))
+                .map(|c| {
+                    if money_cols.contains(&c.as_str()) {
+                        format!("CAST(ROUND({} * 1000000) AS INTEGER) AS {}", c, c)
+                    } else {
+                        c.clone()
+                    }
+                })
+                .collect();
+            let cols = new_cols
+                .iter()
+                .filter(|c| old_cols.contains(c))
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            conn.execute_batch(&format!(
+                "INSERT INTO {mig} ({cols}) SELECT {sel} FROM {table};
+                 DROP TABLE {table};
+                 ALTER TABLE {mig} RENAME TO {table};",
+                sel = select.join(", ")
+            ))?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT; PRAGMA foreign_keys=ON;")?,
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK; PRAGMA foreign_keys=ON;");
+            return Err(e);
+        }
+    }
+    // request_logs 重建带走其索引,由 run_migrations 后续的
+    // ensure_request_logs_indexes 统一补建。
+    tracing::info!("Currency migration complete");
+    Ok(())
+}
+
+
 /// Existing databases created before the FK fix have request_logs foreign keys
 /// without ON DELETE SET NULL, which makes deleting a provider/api_key/user
 /// that has any logs fail with a constraint error. SQLite cannot alter FK
@@ -493,7 +684,7 @@ fn migrate_request_logs_fk(conn: &Connection) -> Result<(), rusqlite::Error> {
                 status_code     INTEGER NOT NULL DEFAULT 0,
                 success         INTEGER NOT NULL DEFAULT 1,
                 error_message   TEXT,
-                cost            REAL NOT NULL DEFAULT 0,
+                cost            INTEGER NOT NULL DEFAULT 0,
                 created_at      TEXT NOT NULL DEFAULT (datetime('now'))
              );",
         )?;
@@ -606,6 +797,69 @@ mod tests {
             ..Default::default()
         };
         DbPool::new(&config).expect("in-memory db")
+    }
+
+    #[test]
+    fn currency_migration_converts_real_yuan_to_integer_micro() {
+        // 旧库形态:四张表金额列均为 REAL(元)
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE users (
+                id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL, balance REAL NOT NULL DEFAULT 0);
+             CREATE TABLE request_logs (
+                id TEXT PRIMARY KEY, user_id TEXT, model TEXT NOT NULL DEFAULT '',
+                cost REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')));
+             CREATE TABLE billing_transactions (
+                id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                amount REAL NOT NULL, balance_after REAL NOT NULL,
+                kind TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')));
+             CREATE TABLE usage_daily (
+                user_id TEXT NOT NULL, date TEXT NOT NULL,
+                requests INTEGER NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0,
+                cost REAL NOT NULL DEFAULT 0, PRIMARY KEY (user_id, date));
+             INSERT INTO users (id, username, password_hash, balance) VALUES
+                ('u1', 'a', 'h', 100.5), ('u2', 'b', 'h', -0.25);
+             INSERT INTO request_logs (id, user_id, cost) VALUES
+                ('l1', 'u1', 0.00014), ('l2', 'u1', 0.0);
+             INSERT INTO billing_transactions (id, user_id, amount, balance_after, kind)
+                VALUES ('t1', 'u1', 100.0, 100.5, 'recharge');
+             INSERT INTO usage_daily VALUES ('u1', '2024-01-01', 3, 300, 0.03);",
+        )
+        .unwrap();
+
+        migrate_currency_micro(&conn).unwrap();
+
+        let q = |sql: &str| -> i64 {
+            conn.query_row(sql, [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(q("SELECT balance FROM users WHERE id = 'u1'"), 100_500_000);
+        assert_eq!(q("SELECT balance FROM users WHERE id = 'u2'"), -250_000);
+        assert_eq!(q("SELECT cost FROM request_logs WHERE id = 'l1'"), 140);
+        assert_eq!(q("SELECT cost FROM request_logs WHERE id = 'l2'"), 0);
+        assert_eq!(q("SELECT amount FROM billing_transactions WHERE id = 't1'"), 100_000_000);
+        assert_eq!(q("SELECT balance_after FROM billing_transactions WHERE id = 't1'"), 100_500_000);
+        assert_eq!(q("SELECT cost FROM usage_daily WHERE user_id = 'u1'"), 30_000);
+
+        // 声明类型已变为 INTEGER(否则读 i64 会命中残留的 REAL 值)
+        let ty = |table: &str| -> String {
+            conn.query_row(
+                &format!("SELECT type FROM pragma_table_info('{}') WHERE name IN ('balance','cost','amount') LIMIT 1", table),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        for t in ["users", "request_logs", "billing_transactions", "usage_daily"] {
+            assert_eq!(ty(t), "INTEGER", "{} not rebuilt", t);
+        }
+
+        // 幂等:再跑一次值不变
+        migrate_currency_micro(&conn).unwrap();
+        assert_eq!(q("SELECT balance FROM users WHERE id = 'u1'"), 100_500_000);
+        assert_eq!(q("SELECT cost FROM request_logs WHERE id = 'l1'"), 140);
     }
 
     #[test]

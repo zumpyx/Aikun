@@ -30,6 +30,32 @@ async function renderWallet(container) {
       stat(icons.billing, '#f97316', 'rgba(249,115,22,.1)', `¥${fmtCost(w.week.cost)}`, `近 7 天消耗 (UTC) · ${fmtNum(w.week.requests)} 次`) +
       stat(icons.billing, '#14b8a6', 'rgba(20,184,166,.1)', `¥${fmtCost(w.month.cost)}`, `近 30 天消耗 (UTC) · ${fmtNum(w.month.requests)} 次 · ${fmtNum(w.month.tokens)} tokens`);
 
+    // 兑换码充值:成功/失败都 toast 提示,成功后整页刷新钱包数据
+    container.insertAdjacentHTML('beforeend', `
+      <div class="card" style="padding:14px 18px;margin-bottom:16px">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <input id="redeem-code-input" placeholder="兑换码(AK-XXXX-XXXX-XXXX)" style="flex:1;min-width:220px;font-family:monospace" autocomplete="off">
+          <button class="btn-primary" id="redeem-code-btn">兑换充值</button>
+        </div>
+      </div>`);
+    document.getElementById('redeem-code-btn').onclick = async () => {
+      const btn = document.getElementById('redeem-code-btn');
+      const code = document.getElementById('redeem-code-input').value.trim();
+      if (!code) { toast('请输入兑换码', 'error'); return; }
+      btn.disabled = true;
+      try {
+        const r = await api('POST', '/api/wallet/redeem', { code });
+        if (r.ok) {
+          toast(`充值成功 +¥${fmtCost(r.data.amount)},当前余额 ¥${fmtCost(r.data.balance)}`);
+          renderWallet(container);
+        } else {
+          toast(r.data.message || r.data.error || '兑换失败', 'error');
+        }
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
     container.insertAdjacentHTML('beforeend', `
       <div class="usage-grid">
         <div class="card" style="margin-bottom:0">

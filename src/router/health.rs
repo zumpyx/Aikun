@@ -290,7 +290,8 @@ mod tests {
                 [],
             )
             .unwrap();
-            let insert = |id: &str, date: &str, tokens: i64, cost: f64| {
+            // cost 为整数微元(1 元 = 1e6)
+            let insert = |id: &str, date: &str, tokens: i64, cost: i64| {
                 conn.execute(
                     "INSERT INTO request_logs (id, user_id, model, total_tokens, cost, created_at)
                      VALUES (?1, 'u1', 'm', ?2, ?3, ?4)",
@@ -298,11 +299,11 @@ mod tests {
                 )
                 .unwrap();
             };
-            insert("l1", "2020-01-15T10:00:00+00:00", 100, 0.01);
-            insert("l2", "2020-01-15T11:00:00+00:00", 200, 0.02);
-            insert("l3", "2020-01-16T10:00:00+00:00", 50, 0.005);
+            insert("l1", "2020-01-15T10:00:00+00:00", 100, 10_000);
+            insert("l2", "2020-01-15T11:00:00+00:00", 200, 20_000);
+            insert("l3", "2020-01-16T10:00:00+00:00", 50, 5_000);
             // 保留期内的一行不应被清理
-            insert("l4", &chrono::Utc::now().to_rfc3339(), 10, 0.001);
+            insert("l4", &chrono::Utc::now().to_rfc3339(), 10, 1_000);
         }
         pool
     }
@@ -317,7 +318,7 @@ mod tests {
                 .query_row("SELECT COUNT(*) FROM request_logs", [], |r| r.get(0))
                 .unwrap();
             assert_eq!(remaining, 1);
-            let (requests, tokens, cost): (i64, i64, f64) = conn
+            let (requests, tokens, cost): (i64, i64, i64) = conn
                 .query_row(
                     "SELECT requests, tokens, cost FROM usage_daily WHERE user_id = 'u1' AND date = '2020-01-15'",
                     [],
@@ -325,7 +326,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!((requests, tokens), (2, 300));
-            assert!((cost - 0.03).abs() < 1e-9);
+            assert_eq!(cost, 30_000);
             let day2: i64 = conn
                 .query_row(
                     "SELECT requests FROM usage_daily WHERE user_id = 'u1' AND date = '2020-01-16'",

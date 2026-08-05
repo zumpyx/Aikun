@@ -152,7 +152,8 @@ pub async fn list_logs(
                 status_code: row.get(11)?,
                 success: row.get(12)?,
                 error_message: row.get(13)?,
-                cost: row.get(14)?,
+                // DB 存整数微元,对外 API 口径为元(f64)
+                cost: crate::billing::micro_to_yuan(row.get::<_, i64>(14)?),
                 created_at: row.get(15)?,
             },
             row.get::<_, Option<String>>(16)?,
@@ -219,7 +220,7 @@ pub async fn log_stats(
             row.get::<_, i64>(1)?,
             row.get::<_, f64>(2)?,
             row.get::<_, f64>(3)?,
-            row.get::<_, f64>(4)?,
+            row.get::<_, i64>(4)?,
         ))
     });
 
@@ -230,7 +231,8 @@ pub async fn log_stats(
                 "total_tokens": total_tokens,
                 "avg_latency_ms": avg_latency.round() as i64,
                 "success_rate": (success_rate * 100.0).round() / 100.0,
-                "total_cost": (total_cost * 1_000_000.0).round() / 1_000_000.0
+                // 微元合计 → 元(微元口径在 f64 下精确)
+                "total_cost": crate::billing::micro_to_yuan(total_cost)
             }))).into_response()
         }
         Err(e) => {
@@ -431,10 +433,11 @@ pub async fn wallet_stats(
     let week_s = fmt(today - chrono::Duration::days(6));
     let month_s = fmt(today - chrono::Duration::days(29));
 
+    // 余额与费用在库中均为整数微元,出参统一 ÷1e6 转元(对外口径不变)
     let balance = conn.query_row(
         "SELECT balance FROM users WHERE id = ?1",
         params![uid],
-        |row| row.get::<_, f64>(0),
+        |row| row.get::<_, i64>(0),
     );
 
     // 近 30 天总额 + 今日/近 7 天拆出(与 usage_stats 同一段位手法)
@@ -449,9 +452,9 @@ pub async fn wallet_stats(
         params![today_s, week_s, uid, month_s],
         |row| {
             Ok((
-                row.get::<_, f64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?,
-                row.get::<_, f64>(3)?, row.get::<_, i64>(4)?,
-                row.get::<_, f64>(5)?, row.get::<_, i64>(6)?,
+                row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?, row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?, row.get::<_, i64>(6)?,
             ))
         },
     );
@@ -469,7 +472,7 @@ pub async fn wallet_stats(
             stmt.query_map(params![uid, month_s], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, f64>(1)?,
+                    row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
                 ))
@@ -489,7 +492,7 @@ pub async fn wallet_stats(
             stmt.query_map(params![uid, month_s], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, f64>(1)?,
+                    row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                 ))
             })
@@ -506,15 +509,15 @@ pub async fn wallet_stats(
     };
 
     // 补齐缺失日期为 0,保证图表是完整的 30 天序列
-    let daily_map: std::collections::HashMap<String, (f64, i64, i64)> =
+    let daily_map: std::collections::HashMap<String, (i64, i64, i64)> =
         daily_rows.into_iter().map(|(d, c, t, r)| (d, (c, t, r))).collect();
     let daily: Vec<serde_json::Value> = (0..30)
         .map(|i| {
             let d = fmt(today - chrono::Duration::days(29 - i));
-            let (c, t, r) = daily_map.get(&d).copied().unwrap_or((0.0, 0, 0));
+            let (c, t, r) = daily_map.get(&d).copied().unwrap_or((0, 0, 0));
             json!({
                 "date": d,
-                "cost": (c * 1_000_000.0).round() / 1_000_000.0,
+                "cost": crate::billing::micro_to_yuan(c),
                 "tokens": t,
                 "requests": r,
             })
@@ -525,17 +528,17 @@ pub async fn wallet_stats(
         .into_iter()
         .map(|(model, cost, requests)| json!({
             "model": model,
-            "cost": (cost * 1_000_000.0).round() / 1_000_000.0,
+            "cost": crate::billing::micro_to_yuan(cost),
             "requests": requests,
         }))
         .collect();
 
-    let r2 = |v: f64| (v * 1_000_000.0).round() / 1_000_000.0;
+    let yuan = crate::billing::micro_to_yuan;
     (StatusCode::OK, Json(json!({
-        "balance": r2(balance),
-        "today": {"cost": r2(today_cost), "requests": today_req},
-        "week": {"cost": r2(week_cost), "requests": week_req},
-        "month": {"cost": r2(month_cost), "requests": month_req, "tokens": month_tok},
+        "balance": yuan(balance),
+        "today": {"cost": yuan(today_cost), "requests": today_req},
+        "week": {"cost": yuan(week_cost), "requests": week_req},
+        "month": {"cost": yuan(month_cost), "requests": month_req, "tokens": month_tok},
         "daily": daily,
         "top_models": top_models,
     }))).into_response()

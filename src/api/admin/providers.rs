@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 use rusqlite::params;
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -87,31 +87,29 @@ pub fn valid_max_retries(r: i32) -> bool {
     (0..=10).contains(&r)
 }
 
-pub async fn create_provider(
-    State(state): State<AppState>,
-    Json(req): Json<CreateProviderRequest>,
-) -> impl IntoResponse {
-    let conn = match state.pool.conn.lock() {
-        Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
-    };
-
+/// create_provider 的校验 + 插入核心,供单个与批量创建复用。
+/// 成功返回完整的 ProviderResponse;失败返回 (状态码, 错误体)。
+fn insert_provider(
+    conn: &rusqlite::Connection,
+    cipher: &crate::crypto::KeyCipher,
+    req: CreateProviderRequest,
+) -> Result<ProviderResponse, (StatusCode, Json<Value>)> {
     let id = Uuid::new_v4().to_string();
     let models_json = serde_json::to_string(&req.models).unwrap_or_else(|_| "[]".to_string());
     // Protocols the channel can speak; default to openai-only when omitted.
     let protocols = match req.protocols {
         Some(list) => {
             if !valid_protocol_list(&list) {
-                return (StatusCode::BAD_REQUEST, Json(json!({
+                return Err((StatusCode::BAD_REQUEST, Json(json!({
                     "error": "invalid_protocols",
                     "message": "protocols 不能为空，且仅支持 openai / anthropic / responses"
-                })));
+                }))));
             }
             if !has_defaultable_protocol(&list) {
-                return (StatusCode::BAD_REQUEST, Json(json!({
+                return Err((StatusCode::BAD_REQUEST, Json(json!({
                     "error": "invalid_protocols",
                     "message": "responses 为附加协议，需同时勾选 openai 或 anthropic"
-                })));
+                }))));
             }
             list
         }
@@ -120,10 +118,10 @@ pub async fn create_provider(
     let default_protocol = match req.default_protocol {
         Some(d) if valid_default_protocol(&d, &protocols) => d,
         Some(_) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
+            return Err((StatusCode::BAD_REQUEST, Json(json!({
                 "error": "invalid_default_protocol",
                 "message": "default_protocol 必须是已勾选的 openai / anthropic 协议之一"
-            })));
+            }))));
         }
         None => first_defaultable_protocol(&protocols),
     };
@@ -139,10 +137,10 @@ pub async fn create_provider(
 
     let name = req.name.trim().to_string();
     if name.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({
+        return Err((StatusCode::BAD_REQUEST, Json(json!({
             "error": "invalid_name",
             "message": "name 不能为空"
-        })));
+        }))));
     }
     // 两种协议的上游地址独立配置;至少填一个,留空的一路回退到另一个。
     let openai_base_url = req
@@ -159,46 +157,46 @@ pub async fn create_provider(
         .to_string();
     // 勾选了哪个协议就必须填对应的上游地址;responses 复用 openai 地址。
     if protocols.iter().any(|p| p == "openai" || p == "responses") && openai_base_url.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({
+        return Err((StatusCode::BAD_REQUEST, Json(json!({
             "error": "invalid_base_url",
             "message": "勾选 openai / responses 协议时必须填写 openai_base_url"
-        })));
+        }))));
     }
     if protocols.iter().any(|p| p == "anthropic") && anthropic_base_url.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({
+        return Err((StatusCode::BAD_REQUEST, Json(json!({
             "error": "invalid_base_url",
             "message": "勾选 anthropic 协议时必须填写 anthropic_base_url"
-        })));
+        }))));
     }
     if !valid_provider_type(&provider_type) {
-        return (StatusCode::BAD_REQUEST, Json(json!({
+        return Err((StatusCode::BAD_REQUEST, Json(json!({
             "error": "invalid_provider_type",
             "message": "provider_type 仅支持 openai / anthropic / custom"
-        })));
+        }))));
     }
     if !valid_priority(priority) {
-        return (StatusCode::BAD_REQUEST, Json(json!({
+        return Err((StatusCode::BAD_REQUEST, Json(json!({
             "error": "invalid_priority",
             "message": "priority must be between 0 and 100"
-        })));
+        }))));
     }
     if !valid_weight(weight) {
-        return (StatusCode::BAD_REQUEST, Json(json!({
+        return Err((StatusCode::BAD_REQUEST, Json(json!({
             "error": "invalid_weight",
             "message": "weight must be finite and between 0.1 and 1000"
-        })));
+        }))));
     }
     if !valid_max_retries(max_retries) {
-        return (StatusCode::BAD_REQUEST, Json(json!({
+        return Err((StatusCode::BAD_REQUEST, Json(json!({
             "error": "invalid_max_retries",
             "message": "max_retries must be between 0 and 10"
-        })));
+        }))));
     }
     if !valid_timeout_secs(timeout_secs) {
-        return (StatusCode::BAD_REQUEST, Json(json!({
+        return Err((StatusCode::BAD_REQUEST, Json(json!({
             "error": "invalid_timeout",
             "message": "timeout_secs must be between 1 and 600"
-        })));
+        }))));
     }
     let proxy_url = req.proxy_url.unwrap_or_default();
     let model_mapping = serde_json::to_string(&req.model_mapping.unwrap_or_default())
@@ -206,7 +204,7 @@ pub async fn create_provider(
     let note = req.note.unwrap_or_default().trim().to_string();
     let website_url = req.website_url.unwrap_or_default().trim().to_string();
     // 静态加密落库(enc:v1: 前缀),明文只存在于本次请求内存中。
-    let encrypted_key = state.pool.cipher.encrypt(&req.api_key);
+    let encrypted_key = cipher.encrypt(&req.api_key);
 
     match conn.execute(
         "INSERT INTO providers (id, name, provider_type, openai_base_url, anthropic_base_url,
@@ -219,7 +217,7 @@ pub async fn create_provider(
                  priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
                  protocols_json, default_protocol, note, website_url],
     ) {
-        Ok(_) => (StatusCode::CREATED, Json(json!(ProviderResponse {
+        Ok(_) => Ok(ProviderResponse {
             id,
             name,
             provider_type,
@@ -244,15 +242,112 @@ pub async fn create_provider(
             website_url,
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
-        }))),
+        }),
         Err(e) => {
             tracing::error!("Failed to create provider: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
                 "error": "create_failed",
                 "message": "Internal server error"
-            })))
+            }))))
         }
     }
+}
+
+pub async fn create_provider(
+    State(state): State<AppState>,
+    Json(req): Json<CreateProviderRequest>,
+) -> impl IntoResponse {
+    let conn = match state.pool.conn.lock() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+    };
+    match insert_provider(&conn, &state.pool.cipher, req) {
+        Ok(resp) => (StatusCode::CREATED, Json(json!(resp))),
+        Err((code, body)) => (code, body),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CreateProvidersBatchRequest {
+    /// 各渠道共用字段(shared.api_key 被忽略,逐 key 覆盖;
+    /// shared.name 为基础名,渠道名自动编号 -01..-N)。
+    #[serde(flatten)]
+    pub shared: CreateProviderRequest,
+    pub api_keys: Vec<String>,
+}
+
+/// 批量创建渠道:同一供应商的多个账号 key 各建一个渠道(保留 key↔账号
+/// 的 1:1 对应,失效时知道找哪个账号重签)。逐 key 独立校验插入,
+/// 单项失败不影响其他项,结果按成功/失败分组返回。
+pub async fn create_providers_batch(
+    State(state): State<AppState>,
+    Json(req): Json<CreateProvidersBatchRequest>,
+) -> impl IntoResponse {
+    let keys: Vec<String> = req
+        .api_keys
+        .iter()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+    if keys.is_empty() || keys.len() > 100 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_api_keys", "message": "api_keys 须为 1..=100 个非空 key"})),
+        );
+    }
+    let base_name = req.shared.name.trim().to_string();
+    if base_name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_name", "message": "name 不能为空"})),
+        );
+    }
+    let conn = match state.pool.conn.lock() {
+        Ok(c) => c,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            )
+        }
+    };
+    let mut created = Vec::new();
+    let mut failed = Vec::new();
+    // 批内去重:同一 key 建出两个配置完全相同的渠道会破坏 key↔账号的
+    // 1:1 约定(同 key 双倍参与选路/计并发),重复的归入失败组。
+    let mut seen = std::collections::HashSet::new();
+    for (i, key) in keys.iter().enumerate() {
+        if !seen.insert(key) {
+            failed.push(json!({
+                "index": i,
+                "status": 400,
+                "error": "duplicate_key",
+                "message": "批次内重复的 key,已跳过",
+            }));
+            continue;
+        }
+        let mut shared = req.shared.clone();
+        shared.api_key = key.clone();
+        shared.name = format!("{}-{:02}", base_name, i + 1);
+        match insert_provider(&conn, &state.pool.cipher, shared) {
+            Ok(resp) => created.push(resp),
+            Err((code, body)) => failed.push(json!({
+                "index": i,
+                "status": code.as_u16(),
+                "error": body["error"].clone(),
+                "message": body["message"].clone(),
+            })),
+        }
+    }
+    (
+        // 全部失败时 400:不是"部分成功",属于请求整体不可用
+        if created.is_empty() { StatusCode::BAD_REQUEST } else { StatusCode::CREATED },
+        Json(json!({
+            "created": created.len(),
+            "failed": failed,
+            "providers": created,
+        })),
+    )
 }
 
 pub async fn get_provider(

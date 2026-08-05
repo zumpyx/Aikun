@@ -3,11 +3,15 @@ async function renderProviders(container) {
   container.innerHTML = `
     <div class="card-header">
       <div class="page-head" style="margin-bottom:0"><h2>渠道管理</h2><p>配置上游渠道、代理与路由策略</p></div>
-      <button class="btn-primary" id="add-provider-btn">+ 添加渠道</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn-outline" id="batch-provider-btn">批量添加</button>
+        <button class="btn-primary" id="add-provider-btn">+ 添加渠道</button>
+      </div>
     </div>
     <div id="providers-list"><div class="empty"><div class="spinner"></div><p>加载中...</p></div></div>`;
 
   document.getElementById('add-provider-btn').onclick = () => showProviderModal();
+  document.getElementById('batch-provider-btn').onclick = () => showBatchProviderModal();
 
   await loadProviders();
 }
@@ -260,6 +264,201 @@ async function showProviderModal(id) {
       btn.disabled = false;
     }
   };
+}
+
+// 批量添加:同一供应商多个账号的 key 各建一个渠道(保留 key↔账号 1:1
+// 对应,失效后知道找哪个账号重签)。共用字段与单建表单相同,name 为基础名,
+// 渠道名自动编号 -01..-N。创建成功后逐个做连通性测试并汇总展示。
+function showBatchProviderModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h2>批量添加渠道</h2>
+      <div class="form-row">
+        <div class="form-group"><label>基础名称(自动编号 -01..)</label><input id="bf-name" placeholder="例如: OpenAI"></div>
+        <div class="form-group"><label>备注</label><input id="bf-note"></div>
+      </div>
+      <div class="form-group"><label>官网地址</label><input id="bf-website" placeholder="https://..."></div>
+      <div class="form-group">
+        <div style="display:grid;grid-template-columns:auto auto 1fr;gap:10px 14px;align-items:center">
+          <span style="font-size:12.5px;font-weight:600;color:var(--text-2);text-align:center">默认</span>
+          <span style="font-size:12.5px;font-weight:600;color:var(--text-2)">API 协议</span>
+          <span style="font-size:12.5px;font-weight:600;color:var(--text-2)">Base URL</span>
+          <input type="radio" name="bf-default" id="bf-default-openai" value="openai" style="width:auto;margin:0;justify-self:center">
+          <label style="display:flex;gap:6px;align-items:center;font-weight:400;margin-bottom:0"><input type="checkbox" id="bf-proto-openai" value="openai" style="width:auto" checked> OpenAI</label>
+          <input id="bf-url-openai" placeholder="https://api.openai.com">
+          <input type="radio" name="bf-default" id="bf-default-anthropic" value="anthropic" style="width:auto;margin:0;justify-self:center">
+          <label style="display:flex;gap:6px;align-items:center;font-weight:400;margin-bottom:0"><input type="checkbox" id="bf-proto-anthropic" value="anthropic" style="width:auto"> Anthropic</label>
+          <input id="bf-url-anthropic" placeholder="https://api.anthropic.com" disabled>
+          <span></span>
+          <label style="display:flex;gap:6px;align-items:center;font-weight:400;margin-bottom:0"><input type="checkbox" id="bf-proto-responses" value="responses" style="width:auto"> Responses</label>
+          <span style="font-size:12px;color:var(--text-3);align-self:center">复用 OpenAI Base URL（/v1/responses 原生透传，不作默认协议）</span>
+        </div>
+      </div>
+      <div class="form-group"><label>API Keys(每行一个,每个 key 建一个渠道)</label><textarea id="bf-keys" style="min-height:96px;font-family:monospace" placeholder="sk-aaa&#10;sk-bbb&#10;sk-ccc"></textarea></div>
+      <div class="form-group"><label>模型（逗号分隔）</label>
+        <div style="display:flex;gap:8px">
+          <input id="bf-models" style="flex:1" placeholder="gpt-4, gpt-3.5-turbo">
+          <button class="btn-outline" id="bf-fetch-models" type="button" style="white-space:nowrap">获取模型列表</button>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>优先级</label><input id="bf-priority" type="number" value="0"></div>
+        <div class="form-group"><label>权重</label><input id="bf-weight" type="number" step="0.1" value="1.0"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>最大重试</label><input id="bf-retries" type="number" value="3"></div>
+        <div class="form-group"><label>超时(秒)</label><input id="bf-timeout" type="number" value="120"></div>
+      </div>
+      <div class="form-group"><label>代理（可选）</label><input id="bf-proxy" placeholder="socks5://127.0.0.1:1080 或 http://127.0.0.1:8080"></div>
+      <div class="form-group"><label>模型重定向（可选，JSON 对象）</label><textarea id="bf-mapping" style="min-height:56px" placeholder='{"gpt-4": "gpt-4-turbo"}'></textarea></div>
+      <div class="form-actions">
+        <button class="btn-primary" id="bf-save">批量创建</button>
+        <button class="btn-outline" id="bf-cancel">取消</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  // 协议勾选/默认协议联动:与单建表单同一规则(取消勾选当前默认时
+  // 默认落到仍勾选的协议;Responses 不能作默认、无独立 URL)。
+  const protoBoxes = ['openai', 'anthropic', 'responses'].map(t => document.getElementById('bf-proto-' + t));
+  const defaultRadios = ['openai', 'anthropic'].map(t => document.getElementById('bf-default-' + t));
+  const urlInputs = {
+    openai: document.getElementById('bf-url-openai'),
+    anthropic: document.getElementById('bf-url-anthropic'),
+  };
+  defaultRadios[0].checked = true;
+  function syncProtoRows() {
+    for (const b of protoBoxes) {
+      const url = urlInputs[b.value];
+      if (url) url.disabled = !b.checked;
+      const radio = defaultRadios.find(r => r.value === b.value);
+      if (radio) radio.disabled = !b.checked;
+    }
+    const enabled = defaultRadios.filter(r => !r.disabled);
+    if (!enabled.some(r => r.checked) && enabled.length > 0) enabled[0].checked = true;
+  }
+  protoBoxes.forEach(b => { b.onchange = syncProtoRows; });
+  syncProtoRows();
+
+  const urlFor = (proto) => {
+    const o = document.getElementById('bf-url-openai').value.trim();
+    const a = document.getElementById('bf-url-anthropic').value.trim();
+    return proto === 'anthropic' ? (a || o) : (o || a);
+  };
+  const firstKey = () => document.getElementById('bf-keys').value.split('\n').map(s => s.trim()).filter(Boolean)[0] || '';
+
+  document.getElementById('bf-cancel').onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  // 用第一个 key 拉上游模型列表,作为全部渠道的共用模型配置
+  document.getElementById('bf-fetch-models').onclick = async () => {
+    const btn = document.getElementById('bf-fetch-models');
+    btn.disabled = true; btn.textContent = '获取中…';
+    try {
+      const proto = (defaultRadios.find(r => r.checked && !r.disabled) || {}).value || 'openai';
+      const r = await api('POST', '/api/admin/providers/fetch-models', {
+        base_url: urlFor(proto),
+        api_key: firstKey(),
+        protocol: proto,
+        proxy_url: document.getElementById('bf-proxy').value.trim(),
+        provider_id: null,
+      });
+      if (r.ok && (r.data.models || []).length > 0) {
+        document.getElementById('bf-models').value = r.data.models.join(', ');
+        toast(`获取到 ${r.data.models.length} 个模型`);
+      } else {
+        toast(r.data.message || r.data.error || '未获取到模型列表', 'error');
+      }
+    } finally {
+      btn.disabled = false; btn.textContent = '获取模型列表';
+    }
+  };
+
+  document.getElementById('bf-save').onclick = async () => {
+    const btn = document.getElementById('bf-save');
+    btn.disabled = true;
+    try {
+    const toNum = (v, d) => { const n = parseFloat(v); return Number.isNaN(n) ? d : n; };
+    const toInt = (v, d) => { const n = parseInt(v); return Number.isNaN(n) ? d : n; };
+    const protocols = protoBoxes.filter(b => b.checked).map(b => b.value);
+    if (protocols.length === 0) return toast('请至少勾选一个支持协议', 'error');
+    if (protocols.includes('responses') && !protocols.includes('openai') && !protocols.includes('anthropic'))
+      return toast('Responses 为附加协议，需同时勾选 OpenAI 或 Anthropic', 'error');
+    const apiKeys = document.getElementById('bf-keys').value.split('\n').map(s => s.trim()).filter(Boolean);
+    const body = {
+      name: document.getElementById('bf-name').value.trim(),
+      note: document.getElementById('bf-note').value.trim(),
+      website_url: document.getElementById('bf-website').value.trim(),
+      protocols,
+      default_protocol: (defaultRadios.find(r => r.checked && !r.disabled) || {}).value
+        || ['openai', 'anthropic'].find(t => protocols.includes(t)) || protocols[0],
+      openai_base_url: document.getElementById('bf-url-openai').value.trim(),
+      anthropic_base_url: document.getElementById('bf-url-anthropic').value.trim(),
+      api_keys: apiKeys,
+      models: document.getElementById('bf-models').value.split(',').map(s => s.trim()).filter(Boolean),
+      priority: toInt(document.getElementById('bf-priority').value, 0),
+      weight: toNum(document.getElementById('bf-weight').value, 1.0),
+      max_retries: toInt(document.getElementById('bf-retries').value, 3),
+      timeout_secs: toInt(document.getElementById('bf-timeout').value, 120),
+      proxy_url: document.getElementById('bf-proxy').value.trim(),
+    };
+    const mappingText = document.getElementById('bf-mapping').value.trim();
+    if (mappingText) {
+      try { body.model_mapping = JSON.parse(mappingText); }
+      catch { return toast('模型重定向不是有效的 JSON', 'error'); }
+    } else {
+      body.model_mapping = {};
+    }
+    if (!body.name) return toast('请填写基础名称', 'error');
+    if (apiKeys.length === 0) return toast('请至少填写一个 API Key(每行一个)', 'error');
+    if ((protocols.includes('openai') || protocols.includes('responses')) && !body.openai_base_url) return toast('已勾选 OpenAI/Responses 协议，请填写 OPENAI_BASE_URL', 'error');
+    if (protocols.includes('anthropic') && !body.anthropic_base_url) return toast('已勾选 Anthropic 协议，请填写 ANTHROPIC_BASE_URL', 'error');
+
+    const r = await api('POST', '/api/admin/providers/batch', body);
+    if (!r.ok && !r.data.providers) return toast(r.data.message || r.data.error || '批量创建失败', 'error');
+    overlay.remove();
+    await loadProviders();
+    showBatchResultModal(r.data);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
+// 批量创建结果汇总:成功/失败明细 + 对成功渠道逐个连通性测试。
+function showBatchResultModal(data) {
+  const created = data.providers || [];
+  const failed = data.failed || [];
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:560px">
+      <h2>批量创建完成:成功 ${created.length} 个${failed.length ? `,失败 ${failed.length} 个` : ''}</h2>
+      ${failed.length ? `<div style="margin-bottom:10px">${failed.map(f =>
+        `<div style="font-size:12.5px;color:var(--danger,#f43f5e)">第 ${f.index + 1} 个 key:${esc(f.message || f.error || '创建失败')}</div>`).join('')}</div>` : ''}
+      <div id="batch-test-results" style="max-height:300px;overflow:auto;font-size:12.5px">
+        ${created.map(p => `<div id="btr-${esc(p.id)}" style="padding:4px 0">${esc(p.name)} <span style="color:var(--muted)">测试排队中…</span></div>`).join('')}
+      </div>
+      <div class="form-actions">
+        <button class="btn-primary" id="btr-close">关闭</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  document.getElementById('btr-close').onclick = () => { overlay.remove(); loadProviders(); };
+  // 逐个串行测试,避免瞬时打满上游;结果就地更新
+  (async () => {
+    for (const p of created) {
+      const row = document.getElementById('btr-' + p.id);
+      if (!row) return; // 弹窗已关闭
+      row.innerHTML = `${esc(p.name)} <span style="color:var(--muted)">测试中…</span>`;
+      const r = await api('POST', `/api/admin/providers/${p.id}/test`);
+      const ok = r.ok && r.data.status === 'healthy';
+      row.innerHTML = `${esc(p.name)} <span style="color:${ok ? '#14b8a6' : 'var(--danger,#f43f5e)'}">${ok ? '✓ ' : '✗ '}${esc(r.data.message || r.data.error || (r.ok ? r.data.status : '测试失败'))}</span>`;
+    }
+    loadProviders();
+  })();
 }
 
 async function toggleProvider(id, active) {

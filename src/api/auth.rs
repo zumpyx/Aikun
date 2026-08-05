@@ -208,15 +208,16 @@ pub async fn get_current_user(
         "SELECT id, username, password_hash, display_name, role, is_active, created_at, updated_at, balance
          FROM users WHERE id = ?1",
         params![claims.sub],
-        |row| Ok((row_to_user(row)?, row.get::<_, f64>(8)?)),
+        |row| Ok((row_to_user(row)?, row.get::<_, i64>(8)?)),
     );
 
     match user {
         // 余额对本人可见(只读):扣费是实时发生的,用户需要能自查。
+        // 库存整数微元,出参转元。
         Ok((u, balance)) => {
             let mut v = serde_json::to_value(UserResponse::from(u))
                 .unwrap_or_else(|_| json!({}));
-            v["balance"] = json!(balance);
+            v["balance"] = json!(crate::billing::micro_to_yuan(balance));
             (StatusCode::OK, Json(v))
         }
         Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "user_not_found"}))),
@@ -264,10 +265,11 @@ pub async fn create_api_key(
         .unwrap_or_else(|_| "[]".to_string());
     let rate_limit_rpm = req.rate_limit_rpm.unwrap_or(0).max(0);
     let quota_daily_tokens = req.quota_daily_tokens.unwrap_or(0).max(0);
+    let max_concurrent = req.max_concurrent.unwrap_or(0).max(0);
 
     match conn.execute(
-        "INSERT INTO api_keys (id, user_id, key, key_suffix, name, expires_at, models, rate_limit_rpm, quota_daily_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![id, claims.sub, key_hash, key_suffix, name, expires_at, models_json, rate_limit_rpm, quota_daily_tokens],
+        "INSERT INTO api_keys (id, user_id, key, key_suffix, name, expires_at, models, rate_limit_rpm, quota_daily_tokens, max_concurrent) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![id, claims.sub, key_hash, key_suffix, name, expires_at, models_json, rate_limit_rpm, quota_daily_tokens, max_concurrent],
     ) {
         Ok(_) => (StatusCode::CREATED, Json(json!(ApiKeyResponse {
             id,
@@ -280,6 +282,7 @@ pub async fn create_api_key(
             models: serde_json::from_str(&models_json).unwrap_or_default(),
             rate_limit_rpm,
             quota_daily_tokens,
+            max_concurrent,
             created_at: chrono::Utc::now().to_rfc3339(),
         }))),
         Err(e) => {
@@ -320,7 +323,7 @@ pub async fn list_api_keys(
 
     let mut stmt = match conn.prepare(
         "SELECT id, user_id, key_suffix, name, is_active, last_used_at, expires_at, models,
-                rate_limit_rpm, quota_daily_tokens, created_at
+                rate_limit_rpm, quota_daily_tokens, max_concurrent, created_at
          FROM api_keys WHERE user_id = ?1"
     ) {
         Ok(s) => s,
@@ -339,7 +342,8 @@ pub async fn list_api_keys(
                 models: row.get(7)?,
                 rate_limit_rpm: row.get(8)?,
                 quota_daily_tokens: row.get(9)?,
-                created_at: row.get(10)?,
+                max_concurrent: row.get(10)?,
+                created_at: row.get(11)?,
             })
         }) {
             Ok(rows) => rows
@@ -420,6 +424,10 @@ pub async fn update_api_key(
         updates.push("quota_daily_tokens = ?");
         params_vec.push(Box::new(quota.max(0)));
     }
+    if let Some(mc) = req.max_concurrent {
+        updates.push("max_concurrent = ?");
+        params_vec.push(Box::new(mc.max(0)));
+    }
 
     if updates.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "no_fields_to_update"})));
@@ -472,7 +480,14 @@ pub async fn delete_api_key(
             params![key_id, claims.sub],
         )
     } {
-        Ok(n) if n > 0 => (StatusCode::OK, Json(json!({"message": "deleted"}))),
+        Ok(n) if n > 0 => {
+            // 清掉内存中的 RPM 滑动窗口:窗口只在该 key 自己有请求时才被
+            // retain,被删 key 的非空窗口(全是过期时间戳)会成为死条目。
+            if let Ok(mut windows) = state.api_key_rate.lock() {
+                windows.remove(&key_id);
+            }
+            (StatusCode::OK, Json(json!({"message": "deleted"})))
+        }
         Ok(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
         Err(e) => {
             tracing::error!("Failed to delete API key: {}", e);

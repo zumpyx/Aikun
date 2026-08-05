@@ -112,6 +112,7 @@ const icons = {
   pulse: I('<path d="M2.5 12h4l2.5-6.5 4.5 13L16 12h5.5"/>'),
   billing: I('<circle cx="12" cy="12" r="9"/><path d="M12 7v10M15.5 9.5c-.7-1-2-1.5-3.5-1.5-1.9 0-3.5 1-3.5 2.5s1.3 2.2 3.5 2.5c2.2.3 3.5 1 3.5 2.5s-1.6 2.5-3.5 2.5c-1.5 0-2.8-.5-3.5-1.5"/>'),
   wallet: I('<rect x="2.5" y="6" width="19" height="13" rx="2.5"/><path d="M2.5 10h19M16.5 14.5h2.5"/>'),
+  gift: I('<rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13M5 12v9h14v-9M12 8c-4 0-5.5-1.5-5.5-3.5C6.5 2.5 8.5 2 9.7 3 11 4.2 12 8 12 8zm0 0c4 0 5.5-1.5 5.5-3.5C17.5 2.5 15.5 2 14.3 3 13 4.2 12 8 12 8z"/>'),
 };
 
 // ============ Router ============
@@ -184,6 +185,7 @@ function renderApp(container) {
     { id: 'providers', label: '渠道', icon: icons.providers, admin: true },
     { id: 'users', label: '用户', icon: icons.users, admin: true },
     { id: 'billing', label: '计费', icon: icons.billing, admin: true },
+    { id: 'redemption', label: '兑换码', icon: icons.gift, admin: true },
     { id: 'apikeys', label: '密钥', icon: icons.key, admin: false },
     { id: 'models', label: '模型', icon: icons.models, admin: false },
     { id: 'chat', label: '测试', icon: icons.chat, admin: false },
@@ -237,6 +239,7 @@ function renderView(container) {
   else if (view === 'providers') renderProviders(container);
   else if (view === 'users') renderUsers(container);
   else if (view === 'billing') renderBilling(container);
+  else if (view === 'redemption') renderRedemption(container);
   else if (view === 'apikeys') renderApiKeys(container);
   else if (view === 'models') renderModels(container);
   else if (view === 'chat') renderChat(container);
@@ -264,6 +267,7 @@ const listActions = {
   'delete-user-key':    (id, btn) => deleteUserKey(id, btn.dataset.user),
   'edit-price':         (id) => showPriceModal(id),
   'delete-price':       (id) => deletePrice(id),
+  'disable-code':       (id) => disableRedemptionCode(id),
   'edit-api-key':       (id) => showApiKeyModal(id),
   'toggle-api-key':     (id, btn) => toggleApiKey(id, btn.dataset.active === 'true'),
   'delete-api-key':     (id) => deleteApiKey(id),
