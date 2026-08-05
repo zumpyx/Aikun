@@ -885,6 +885,85 @@ async fn batch_create_providers() {
     }
 }
 
+/// 渠道 key 重复检测:库存已有同 key(哈希比对)→ 单建 409;批量中与库存
+/// 重复及批内重复的归入失败组,不影响其余 key 创建。
+#[tokio::test]
+async fn duplicate_provider_key_rejected() {
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    let jwt = common::admin_jwt();
+
+    let payload = serde_json::json!({
+        "name": "dup",
+        "openai_base_url": "http://127.0.0.1:1",
+        "models": ["gpt-4"],
+        "protocols": ["openai"],
+        "api_key": "same-key"
+    });
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/providers", app.base))
+        .bearer_auth(&jwt)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // 同 key 再建(不同名)→ 409 duplicate_key
+    let mut p2 = payload.clone();
+    p2["name"] = serde_json::json!("dup2");
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/providers", app.base))
+        .bearer_auth(&jwt)
+        .json(&p2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "duplicate_key");
+    assert!(body["message"].as_str().unwrap().contains("dup"));
+
+    // 批量:same-key 与库存重复、第二个 new-1 批内重复 → 失败组;new-1 创建成功
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/providers/batch", app.base))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({
+            "name": "dedup",
+            "openai_base_url": "http://127.0.0.1:1",
+            "models": ["gpt-4"],
+            "protocols": ["openai"],
+            "api_keys": ["same-key", "new-1", "new-1"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["created"], 1);
+    let failed = body["failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 2);
+    assert!(failed.iter().all(|f| f["error"] == "duplicate_key"));
+
+    // 编辑渠道换成已占用的 key → 409
+    let dup_id: String = app
+        .db()
+        .query_row("SELECT id FROM providers WHERE name = 'dup'", [], |r| r.get(0))
+        .unwrap();
+    let resp = app
+        .client()
+        .patch(format!("{}/api/admin/providers/{}", app.base, dup_id))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"api_key": "new-1"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+}
+
 /// Key 并发限制:max_concurrent=1 时,慢上游请求在途期间第二个请求 429;
 /// 在途请求结束后槽位归还,后续请求恢复 200。
 #[tokio::test]
@@ -1029,12 +1108,43 @@ async fn redemption_code_full_flow() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let list: serde_json::Value = resp.json().await.unwrap();
-    let arr = list.as_array().unwrap();
+    assert_eq!(list["total"], 4);
+    let arr = list["items"].as_array().unwrap();
     assert_eq!(arr.len(), 4);
     assert!(arr.iter().all(|c| c["code_masked"].as_str().unwrap().starts_with("AK-****-****-")));
     assert!(arr.iter().all(|c| c.get("code_hash").is_none() && c.get("code").is_none()));
     let used = arr.iter().find(|c| c["status"] == "used").unwrap();
     assert_eq!(used["used_by"], "e2e");
+    // 过期未用:status 仍为 unused,expired 计算字段为 true
+    let expired_unused = arr.iter().find(|c| c["status"] == "unused" && !c["expires_at"].is_null()).unwrap();
+    assert_eq!(expired_unused["expired"], true);
+    assert!(arr.iter().filter(|c| c["expired"] == true).count() == 1);
+
+    // expired 筛选:只返回过期未用的那 1 张
+    let resp = app
+        .client()
+        .get(format!("{}/api/admin/redemption-codes?batch=b1&status=expired", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let filtered: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(filtered["total"], 1);
+    assert_eq!(filtered["items"][0]["expired"], true);
+
+    // 分页:limit=2 应得两页
+    let resp = app
+        .client()
+        .get(format!("{}/api/admin/redemption-codes?batch=b1&limit=2&offset=2", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let page2: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(page2["total"], 4);
+    assert_eq!(page2["items"].as_array().unwrap().len(), 2);
 
     // 禁用一张未过期且未使用的 → 兑换 400;重复禁用 → 409
     let unused_id = arr

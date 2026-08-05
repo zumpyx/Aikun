@@ -2,6 +2,9 @@
 // 兑换码批量生成与管理。明文码只在生成响应中返回一次,库中只存哈希,
 // 列表展示掩码(AK-****-****-XXXX)。生成结果提供一键复制,关闭后无法找回。
 let redemptionCodes = [];
+// 列表分页状态:筛选变更时归零。
+let redemptionPage = 0;
+const REDEMPTION_PAGE_SIZE = 50;
 
 async function renderRedemption(container) {
   container.innerHTML = `
@@ -21,6 +24,7 @@ async function renderRedemption(container) {
             <option value="unused">未使用</option>
             <option value="used">已使用</option>
             <option value="disabled">已禁用</option>
+            <option value="expired">已过期</option>
           </select>
         </div>
         <button class="btn-outline" id="rc-filter-btn">筛选</button>
@@ -29,7 +33,7 @@ async function renderRedemption(container) {
     <div id="codes-list"><div class="empty"><div class="spinner"></div><p>加载中...</p></div></div>`;
 
   document.getElementById('new-codes-btn').onclick = () => showGenerateCodesModal();
-  document.getElementById('rc-filter-btn').onclick = () => loadRedemptionCodes();
+  document.getElementById('rc-filter-btn').onclick = () => { redemptionPage = 0; loadRedemptionCodes(); };
   await loadRedemptionCodes();
 }
 
@@ -39,32 +43,41 @@ async function loadRedemptionCodes() {
   const qs = new URLSearchParams();
   if (batch) qs.set('batch', batch);
   if (status) qs.set('status', status);
-  const r = await api('GET', '/api/admin/redemption-codes' + (qs.size ? `?${qs}` : ''));
+  qs.set('limit', REDEMPTION_PAGE_SIZE);
+  qs.set('offset', redemptionPage * REDEMPTION_PAGE_SIZE);
+  const r = await api('GET', `/api/admin/redemption-codes?${qs}`);
   const list = document.getElementById('codes-list');
   if (!list) return;
   if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
-  const data = r.data;
+  const data = r.data.items || [];
+  const total = r.data.total || 0;
   redemptionCodes = data;
-  if (data.length === 0) {
+  if (data.length === 0 && redemptionPage === 0) {
     list.innerHTML = '<div class="card"><div class="empty"><p>暂无兑换码,点击右上角批量生成</p></div></div>';
     return;
   }
+  const totalPages = Math.max(1, Math.ceil(total / REDEMPTION_PAGE_SIZE));
   const statusText = { unused: '<span style="color:#14b8a6">未使用</span>', used: '<span style="color:var(--muted)">已使用</span>', disabled: '<span style="color:var(--danger,#f43f5e)">已禁用</span>' };
+  // 过期未使用的码显示为「已过期」(status 仍为 unused)
+  const displayStatus = (c) => (c.status === 'unused' && c.expired)
+    ? '<span style="color:#f59e0b">已过期</span>'
+    : (statusText[c.status] || esc(c.status));
   list.innerHTML = `
     <div class="card">
       <div class="table-wrap">
         <table>
-          <thead><tr><th>兑换码</th><th>面值(元)</th><th>批次</th><th>状态</th><th>使用者</th><th>使用时间</th><th>过期时间 (UTC)</th><th>备注</th><th>操作</th></tr></thead>
+          <thead><tr><th>兑换码</th><th>面值(元)</th><th>批次</th><th>状态</th><th>使用者</th><th>创建时间</th><th>过期时间 (UTC)</th><th>使用时间</th><th>备注</th><th>操作</th></tr></thead>
           <tbody>
             ${data.map(c => `
               <tr>
                 <td><code>${esc(c.code_masked)}</code></td>
                 <td>${fmtCost(c.amount)}</td>
                 <td>${esc(c.batch)}</td>
-                <td>${statusText[c.status] || esc(c.status)}</td>
+                <td>${displayStatus(c)}</td>
                 <td>${c.used_by ? esc(c.used_by) : '<span style="color:var(--faint)">—</span>'}</td>
-                <td style="color:var(--muted);font-size:12.5px">${c.used_at ? esc(fmtTime(c.used_at)) : '—'}</td>
+                <td style="color:var(--muted);font-size:12.5px">${esc(fmtTime(c.created_at))}</td>
                 <td style="color:var(--muted);font-size:12.5px">${c.expires_at ? esc(fmtTime(c.expires_at)) : '永不'}</td>
+                <td style="color:var(--muted);font-size:12.5px">${c.used_at ? esc(fmtTime(c.used_at)) : '—'}</td>
                 <td style="color:var(--muted);font-size:12.5px">${esc(c.note || '')}</td>
                 <td>
                   ${c.status === 'unused' ? `<button class="btn-danger btn-sm" data-action="disable-code" data-id="${esc(c.id)}">禁用</button>` : ''}
@@ -74,7 +87,20 @@ async function loadRedemptionCodes() {
           </tbody>
         </table>
       </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+        <span style="color:var(--muted);font-size:13px">共 ${total} 条 · 第 ${redemptionPage + 1}/${totalPages} 页</span>
+        <div style="display:flex;gap:8px">
+          <button class="btn-outline btn-sm" id="rc-prev" ${redemptionPage === 0 ? 'disabled' : ''}>上一页</button>
+          <button class="btn-outline btn-sm" id="rc-next" ${redemptionPage + 1 >= totalPages ? 'disabled' : ''}>下一页</button>
+        </div>
+      </div>
     </div>`;
+  document.getElementById('rc-prev').onclick = () => {
+    if (redemptionPage > 0) { redemptionPage--; loadRedemptionCodes(); }
+  };
+  document.getElementById('rc-next').onclick = () => {
+    if (redemptionPage + 1 < totalPages) { redemptionPage++; loadRedemptionCodes(); }
+  };
 }
 
 function showGenerateCodesModal() {

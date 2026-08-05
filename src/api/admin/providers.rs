@@ -205,15 +205,37 @@ fn insert_provider(
     let website_url = req.website_url.unwrap_or_default().trim().to_string();
     // 静态加密落库(enc:v1: 前缀),明文只存在于本次请求内存中。
     let encrypted_key = cipher.encrypt(&req.api_key);
+    // key 的 sha256 用于重复检测:密文每次随机 nonce 无法比对,哈希可以。
+    // 空 key 不参与(空串哈希会让所有无 key 渠道互相误判重复)。
+    let key_hash = if req.api_key.is_empty() {
+        String::new()
+    } else {
+        crate::auth::hash_api_key(&req.api_key)
+    };
+    if !key_hash.is_empty() {
+        let dup: Option<String> = conn
+            .query_row(
+                "SELECT name FROM providers WHERE key_hash = ?1 LIMIT 1",
+                params![key_hash],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(dup_name) = dup {
+            return Err((StatusCode::CONFLICT, Json(json!({
+                "error": "duplicate_key",
+                "message": format!("该 key 已用于渠道「{}」;同一 key 建多个渠道会失去 key↔账号的对应关系", dup_name)
+            }))));
+        }
+    }
 
     match conn.execute(
         "INSERT INTO providers (id, name, provider_type, openai_base_url, anthropic_base_url,
-                                api_key, models, priority, weight,
+                                api_key, key_hash, models, priority, weight,
                                 max_retries, timeout_secs, proxy_url, model_mapping,
                                 protocols, default_protocol, note, website_url)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![id, name, provider_type, openai_base_url, anthropic_base_url,
-                 encrypted_key, models_json,
+                 encrypted_key, key_hash, models_json,
                  priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
                  protocols_json, default_protocol, note, website_url],
     ) {
@@ -435,9 +457,32 @@ pub async fn update_provider(
         params_vec.push(Box::new(website_url.trim().to_string()));
     }
     if let Some(key) = &req.api_key {
+        // 换 key 时同步刷新哈希并做重复检测(排除自身);空 key 哈希置空。
+        let key_hash = if key.is_empty() {
+            String::new()
+        } else {
+            crate::auth::hash_api_key(key)
+        };
+        if !key_hash.is_empty() {
+            let dup: Option<String> = conn
+                .query_row(
+                    "SELECT name FROM providers WHERE key_hash = ?1 AND id != ?2 LIMIT 1",
+                    params![key_hash, provider_id],
+                    |row| row.get(0),
+                )
+                .ok();
+            if let Some(dup_name) = dup {
+                return (StatusCode::CONFLICT, Json(json!({
+                    "error": "duplicate_key",
+                    "message": format!("该 key 已用于渠道「{}」", dup_name)
+                })));
+            }
+        }
         updates.push("api_key = ?");
         // 静态加密落库(enc:v1: 前缀)。
         params_vec.push(Box::new(state.pool.cipher.encrypt(key)));
+        updates.push("key_hash = ?");
+        params_vec.push(Box::new(key_hash));
     }
     if let Some(models) = &req.models {
         if let Ok(json_str) = serde_json::to_string(models) {
@@ -673,7 +718,7 @@ pub async fn duplicate_provider(
     };
 
     let source = conn.query_row(
-        "SELECT name, provider_type, openai_base_url, anthropic_base_url, api_key, models,
+        "SELECT name, provider_type, openai_base_url, anthropic_base_url, api_key, key_hash, models,
                 priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
                 protocols, default_protocol, note, website_url
          FROM providers WHERE id = ?1",
@@ -686,21 +731,22 @@ pub async fn duplicate_provider(
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, i32>(6)?,
-                row.get::<_, f64>(7)?,
-                row.get::<_, i32>(8)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i32>(7)?,
+                row.get::<_, f64>(8)?,
                 row.get::<_, i32>(9)?,
-                row.get::<_, String>(10)?,
+                row.get::<_, i32>(10)?,
                 row.get::<_, String>(11)?,
                 row.get::<_, String>(12)?,
                 row.get::<_, String>(13)?,
                 row.get::<_, String>(14)?,
                 row.get::<_, String>(15)?,
+                row.get::<_, String>(16)?,
             ))
         },
     );
 
-    let (name, provider_type, openai_base_url, anthropic_base_url, api_key, models,
+    let (name, provider_type, openai_base_url, anthropic_base_url, api_key, key_hash, models,
          priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
          protocols, default_protocol, note, website_url) = match source {
         Ok(s) => s,
@@ -712,12 +758,12 @@ pub async fn duplicate_provider(
 
     match conn.execute(
         "INSERT INTO providers (id, name, provider_type, openai_base_url, anthropic_base_url,
-                                api_key, models, priority, weight,
+                                api_key, key_hash, models, priority, weight,
                                 max_retries, timeout_secs, proxy_url, model_mapping,
                                 protocols, default_protocol, note, website_url)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![new_id, new_name, provider_type, openai_base_url, anthropic_base_url,
-                api_key, models, priority, weight, max_retries, timeout_secs,
+                api_key, key_hash, models, priority, weight, max_retries, timeout_secs,
                 proxy_url, model_mapping, protocols, default_protocol, note, website_url],
     ) {
         Ok(_) => {

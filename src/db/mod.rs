@@ -4,6 +4,13 @@ use std::sync::Mutex;
 use crate::config::AppConfig;
 use crate::crypto::KeyCipher;
 
+/// Schema 版本:每次不向后兼容的迁移 +1,迁移完成后写入 PRAGMA
+/// user_version;启动时库版本高于此值即拒绝(降级运行保护——例如金额列
+/// 已转整数微元后,旧二进制会把微元当元读,差 1e6 倍)。
+/// 注意:只防护"比本程序新"的库;v0.3.4 及更早的已发布二进制不做此检查,
+/// 降到那些版本无法被挡住,升级前备份仍是最后防线。
+const SCHEMA_VERSION: i64 = 1;
+
 pub fn create_connection(config: &AppConfig) -> Result<Connection, rusqlite::Error> {
     // Parse sqlite:// URL, stripping query parameters like ?mode=rwc.
     // A bare file path (no sqlite:// prefix) is accepted as-is.
@@ -14,6 +21,17 @@ pub fn create_connection(config: &AppConfig) -> Result<Connection, rusqlite::Err
     let db_path = without_scheme.split('?').next().unwrap_or("aikun.db");
     let db_path = if db_path.is_empty() { "aikun.db" } else { db_path };
     let conn = Connection::open(db_path)?;
+    // 版本闸门:库的 schema 版本比本程序新(降级运行)时拒绝启动。
+    let db_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if db_version > SCHEMA_VERSION {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISMATCH),
+            Some(format!(
+                "数据库 schema 版本 v{} 比本程序支持的 v{} 新,请升级 aikun(禁止降级运行)",
+                db_version, SCHEMA_VERSION
+            )),
+        ));
+    }
     // synchronous=NORMAL:WAL 模式下提交不强制 fsync,断电最多丢失最后一个检查点
     // 之后的若干事务(不会损坏库),换取写入吞吐一个数量级提升 —— 日志/指标类写入
     // 可接受该取舍;若每次提交都 fsync,单连接写入会被磁盘 fsync 锁死在百级 TPS。
@@ -62,6 +80,8 @@ impl DbPool {
         let cipher = KeyCipher::from_config(config);
         let conn = create_connection(config)?;
         migrate_encrypt_provider_keys(&conn, &cipher)?;
+        // 必须在加密迁移之后:回填要解密 enc:v1: 密文再算哈希。
+        migrate_provider_key_hashes(&conn, &cipher)?;
         // :memory: 数据库每个连接是独立的空库,只读连接没有意义——
         // 留空,read() 回退到写连接。
         let is_memory = config.database_url.contains(":memory:");
@@ -125,6 +145,34 @@ fn migrate_encrypt_provider_keys(
     Ok(())
 }
 
+/// 回填 providers.key_hash = sha256(明文 key):旧库该列为空串。密文先解密
+/// 再哈希;空 key 跳过(空串哈希会让所有无 key 渠道互相误判重复)。
+/// 幂等,每次启动运行(正常 0 行),必须在加密迁移之后调用。
+fn migrate_provider_key_hashes(
+    conn: &Connection,
+    cipher: &KeyCipher,
+) -> Result<(), rusqlite::Error> {
+    let rows: Vec<(String, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, api_key FROM providers WHERE key_hash = '' AND api_key != ''")?;
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect()
+    };
+    if rows.is_empty() {
+        return Ok(());
+    }
+    tracing::info!("Backfilling key_hash for {} providers", rows.len());
+    for (id, key) in rows {
+        let plain = crate::crypto::decrypt_or_plain(cipher, &key);
+        conn.execute(
+            "UPDATE providers SET key_hash = ?1 WHERE id = ?2",
+            params![crate::auth::hash_api_key(&plain), id],
+        )?;
+    }
+    Ok(())
+}
+
 fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "
@@ -168,6 +216,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             openai_base_url     TEXT NOT NULL,
             anthropic_base_url  TEXT NOT NULL DEFAULT '',
             api_key         TEXT NOT NULL,
+            key_hash        TEXT NOT NULL DEFAULT '',
             models          TEXT NOT NULL,
             priority        INTEGER NOT NULL DEFAULT 0,
             weight          REAL NOT NULL DEFAULT 1.0,
@@ -421,6 +470,11 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // (可空,NULL 按输入价计)。
     ensure_column(conn, "request_logs", "cached_tokens", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "model_prices", "cached_price", "REAL")?;
+    // 渠道 key 的 sha256,用于跨批次重复检测(密文随机 nonce 无法比对);
+    // 存量行的回填在 migrate_provider_key_hashes(需要 cipher,在 DbPool::new)。
+    ensure_column(conn, "providers", "key_hash", "TEXT NOT NULL DEFAULT ''")?;
+    // 记录 schema 版本(降级闸门;见 create_connection 的 SCHEMA_VERSION)。
+    conn.execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION))?;
     Ok(())
 }
 
@@ -797,6 +851,58 @@ mod tests {
             ..Default::default()
         };
         DbPool::new(&config).expect("in-memory db")
+    }
+
+    /// 版本闸门:初始化后 user_version 等于当前 schema 版本;来自更高版本
+    /// 的数据库(降级运行)应被拒绝打开。
+    #[test]
+    fn user_version_gate_rejects_newer_database() {
+        let dir = std::env::temp_dir().join(format!("aikun-vg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!("sqlite://{}", dir.join("test.db").display());
+        let config = AppConfig {
+            database_url: url,
+            ..Default::default()
+        };
+
+        let conn = create_connection(&config).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        // 模拟来自未来版本的库
+        conn.execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 1))
+            .unwrap();
+        drop(conn);
+
+        assert!(create_connection(&config).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// providers.key_hash 回填:明文/密文 key 都解密后写 sha256;幂等。
+    #[test]
+    fn provider_key_hash_backfill() {
+        let pool = memory_pool();
+        let conn = pool.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO providers (id, name, provider_type, openai_base_url, api_key, models)
+             VALUES ('p1', 't', 'openai', 'http://x', 'plain-key-1', '[]')",
+            [],
+        )
+        .unwrap();
+
+        migrate_provider_key_hashes(&conn, &pool.cipher).unwrap();
+        let hash: String = conn
+            .query_row("SELECT key_hash FROM providers WHERE id = 'p1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hash, crate::auth::hash_api_key("plain-key-1"));
+
+        // 幂等:再跑一次不报错、结果不变
+        migrate_provider_key_hashes(&conn, &pool.cipher).unwrap();
+        let hash2: String = conn
+            .query_row("SELECT key_hash FROM providers WHERE id = 'p1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hash, hash2);
     }
 
     #[test]

@@ -239,6 +239,7 @@ pub struct ListCodesQuery {
     pub batch: Option<String>,
     pub status: Option<String>,
     pub offset: Option<i64>,
+    pub limit: Option<i64>,
 }
 
 pub async fn list_redemption_codes(
@@ -246,14 +247,15 @@ pub async fn list_redemption_codes(
     Query(query): Query<ListCodesQuery>,
 ) -> impl IntoResponse {
     let status = query.status.as_deref().unwrap_or("").trim().to_string();
-    if !matches!(status.as_str(), "" | "unused" | "used" | "disabled") {
+    if !matches!(status.as_str(), "" | "unused" | "used" | "disabled" | "expired") {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid_status", "message": "status 只支持 unused/used/disabled"})),
+            Json(json!({"error": "invalid_status", "message": "status 只支持 unused/used/disabled/expired"})),
         );
     }
     let batch = query.batch.as_deref().unwrap_or("").trim().to_string();
     let offset = query.offset.unwrap_or(0).max(0);
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => {
@@ -263,34 +265,50 @@ pub async fn list_redemption_codes(
             )
         }
     };
-    // 永不出库明文/哈希:列表只给掩码后缀。
-    let result = conn
-        .prepare(
+    // expired 是显示态:库中 status 仍为 unused,按过期时间与当前时间判定。
+    // 下面的状态片段只做白名单内的固定字符串拼接,无注入面。
+    let status_sql = match status.as_str() {
+        "" => String::new(),
+        "expired" => " AND c.status = 'unused' AND c.expires_at IS NOT NULL AND c.expires_at <= datetime('now')".to_string(),
+        s => format!(" AND c.status = '{}'", s),
+    };
+    let where_sql = format!("(?1 = '' OR c.batch = ?1){}", status_sql);
+    // 永不出库明文/哈希:列表只给掩码后缀。expired 由库内时间计算,
+    // 供前端把"过期未使用"显示为已过期(status 本身保持 unused)。
+    let result = (|| -> Result<(i64, Vec<Value>), rusqlite::Error> {
+        let total: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM redemption_codes c WHERE {}", where_sql),
+            params![batch],
+            |row| row.get(0),
+        )?;
+        let mut stmt = conn.prepare(&format!(
             "SELECT c.id, c.code_suffix, c.amount, c.batch, c.status, u.username,
-                    c.used_at, c.expires_at, c.note, c.created_at
+                    c.used_at, c.expires_at, c.note, c.created_at,
+                    (c.expires_at IS NOT NULL AND c.expires_at <= datetime('now'))
              FROM redemption_codes c LEFT JOIN users u ON u.id = c.used_by
-             WHERE (?1 = '' OR c.batch = ?1) AND (?2 = '' OR c.status = ?2)
-             ORDER BY c.created_at DESC, c.rowid DESC LIMIT 200 OFFSET ?3",
-        )
-        .and_then(|mut stmt| {
-            let rows = stmt.query_map(params![batch, status, offset], |row| {
-                Ok(json!({
-                    "id": row.get::<_, String>(0)?,
-                    "code_masked": format!("AK-****-****-{}", row.get::<_, String>(1)?),
-                    "amount": crate::billing::micro_to_yuan(row.get::<_, i64>(2)?),
-                    "batch": row.get::<_, String>(3)?,
-                    "status": row.get::<_, String>(4)?,
-                    "used_by": row.get::<_, Option<String>>(5)?,
-                    "used_at": row.get::<_, Option<String>>(6)?,
-                    "expires_at": row.get::<_, Option<String>>(7)?,
-                    "note": row.get::<_, String>(8)?,
-                    "created_at": row.get::<_, String>(9)?,
-                }))
-            })?;
-            Ok(rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
-        });
+             WHERE {}
+             ORDER BY c.created_at DESC, c.rowid DESC LIMIT ?2 OFFSET ?3",
+            where_sql
+        ))?;
+        let rows = stmt.query_map(params![batch, limit, offset], |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "code_masked": format!("AK-****-****-{}", row.get::<_, String>(1)?),
+                "amount": crate::billing::micro_to_yuan(row.get::<_, i64>(2)?),
+                "batch": row.get::<_, String>(3)?,
+                "status": row.get::<_, String>(4)?,
+                "used_by": row.get::<_, Option<String>>(5)?,
+                "used_at": row.get::<_, Option<String>>(6)?,
+                "expires_at": row.get::<_, Option<String>>(7)?,
+                "note": row.get::<_, String>(8)?,
+                "created_at": row.get::<_, String>(9)?,
+                "expired": row.get::<_, bool>(10)?,
+            }))
+        })?;
+        Ok((total, rows.filter_map(|r| r.ok()).collect::<Vec<_>>()))
+    })();
     match result {
-        Ok(list) => (StatusCode::OK, Json(json!(list))),
+        Ok((total, items)) => (StatusCode::OK, Json(json!({"total": total, "items": items}))),
         Err(e) => {
             tracing::error!("Failed to list redemption codes: {}", e);
             (
