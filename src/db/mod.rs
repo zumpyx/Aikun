@@ -7,9 +7,12 @@ use crate::crypto::KeyCipher;
 /// Schema 版本:每次不向后兼容的迁移 +1,迁移完成后写入 PRAGMA
 /// user_version;启动时库版本高于此值即拒绝(降级运行保护——例如金额列
 /// 已转整数微元后,旧二进制会把微元当元读,差 1e6 倍)。
+/// 编号从 3 起:v0.1.0/v0.2.0 曾用 user_version 做一次性迁移标记
+/// (写到 1/2,后来弃用,值一直留在老库里),本闸门必须高于这些
+/// 历史遗留值,否则老库升级会被误判为"来自未来"而拒绝启动。
 /// 注意:只防护"比本程序新"的库;v0.3.4 及更早的已发布二进制不做此检查,
 /// 降到那些版本无法被挡住,升级前备份仍是最后防线。
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 3;
 
 pub fn create_connection(config: &AppConfig) -> Result<Connection, rusqlite::Error> {
     // Parse sqlite:// URL, stripping query parameters like ?mode=rwc.
@@ -870,6 +873,10 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
+        // 历史遗留标记(v0.1.0/v0.2.0 写过 1/2)不得触发闸门
+        conn.execute_batch("PRAGMA user_version = 2").unwrap();
+        drop(conn);
+        let conn = create_connection(&config).unwrap();
         // 模拟来自未来版本的库
         conn.execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 1))
             .unwrap();
