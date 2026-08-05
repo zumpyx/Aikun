@@ -14,7 +14,7 @@
 
 ## 特性
 
-- **多协议接入**:同时暴露 OpenAI(`/v1/chat/completions`)、OpenAI Responses(`/v1/responses`,可用于 codex)与 Anthropic(`/v1/messages`)兼容端点。请求在网关内部自动转换为渠道的原生协议,双向转换覆盖流式、工具调用与图片
+- **多协议接入**:同时暴露 OpenAI(`/v1/chat/completions`)、OpenAI Responses(`/v1/responses`,可用于 codex)与 Anthropic(`/v1/messages`)兼容端点。请求在网关内部自动转换为渠道的原生协议,双向转换覆盖流式、工具调用与图片;embeddings / moderations / images / rerank 端点按模型选路字节级透传(仅 openai 协议渠道,无协议转换)
 - **多渠道聚合**:同一模型可挂多个渠道,按延迟、优先级、权重、健康度加权选路;失败自动故障转移,连续失败或凭证失效(401/403)自动禁用渠道;支持按 API Key 批量添加(每行一个 key 各建一个渠道,保留 key↔账号 1:1 对应,重复 key 按哈希自动拒绝)
 - **渠道级代理**:每个渠道可单独配置 Socks5 / HTTP 代理,并可一键创建渠道副本,方便管理同渠道的多个账号
 - **计费与兑换码**:按模型价格表实时计费(整数微元记账,无浮点漂移);余额不足即 402 拒绝请求;管理员可批量生成兑换码,用户在钱包页自助充值

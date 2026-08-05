@@ -172,6 +172,9 @@ async fn main() {
         .route("/v1/messages", post(api::proxy::messages::messages))
         .route("/v1/responses", post(api::proxy::responses::responses))
         .route("/v1/models", get(api::proxy::chat::list_models))
+        // 其余 OpenAI 兼容端点的字节级透传(白名单见 passthrough.rs);
+        // 通配路由排在显式路由之后,chat/messages/responses/models 不受影响。
+        .route("/v1/{*path}", post(api::proxy::passthrough::passthrough))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     // --- Admin routes (auth + admin role required) ---

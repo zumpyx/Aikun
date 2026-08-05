@@ -58,6 +58,27 @@ Content-Type: application/json
     </div>
 
     <div class="card">
+      <div class="card-header"><h2>AI 代理 — 通用端点透传</h2></div>
+      <p style="font-size:14px;color:var(--muted);margin-bottom:12px">
+        chat 之外的 OpenAI 兼容端点按<b>字节级透传</b>:按 <code>model</code> 选路、应用渠道模型映射、
+        替换为渠道凭证原样转发，响应原样回传——<b>不做协议转换</b>,因此只会路由到勾选 openai 协议的渠道。
+        响应里有 usage 的（embeddings）按价格表计费；没有的（images/moderations）按 0 元记账，日志照常落库。
+      </p>
+      <p style="font-size:14px;color:var(--muted);margin-bottom:8px">支持以下路径（其余一律 404;files/batches/audio 等无 model 或 multipart 端点不透传）:</p>
+      <div class="code-block">POST ${baseUrl}/v1/embeddings
+POST ${baseUrl}/v1/moderations
+POST ${baseUrl}/v1/images/generations
+POST ${baseUrl}/v1/rerank
+Authorization: Bearer sk-...
+Content-Type: application/json
+
+{
+  "model": "text-embedding-3-small",
+  "input": "Hello"
+}</div>
+    </div>
+
+    <div class="card">
       <div class="card-header"><h2>AI 代理 — Anthropic 兼容接口</h2></div>
       <p style="font-size:14px;color:var(--muted);margin-bottom:12px">与 Anthropic Messages API 格式兼容，可用 Anthropic SDK 调用（也接受 <code>x-api-key</code> 头代替 Bearer）。无论上游渠道是 OpenAI 还是 Anthropic 协议，网关都会自动双向转换（含流式、工具调用、图片）。</p>
 

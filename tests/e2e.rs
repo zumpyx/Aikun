@@ -1841,3 +1841,171 @@ async fn admin_provider_responses_protocol_validation() {
     let v: serde_json::Value = r.json().await.unwrap();
     assert_eq!(v["error"], "invalid_base_url");
 }
+
+/// 通用端点透传:embeddings 字节级转发——模型映射生效、凭证改写、
+/// usage 计费、request_type 落库;非白名单路径 404。
+#[tokio::test]
+async fn passthrough_embeddings_end_to_end() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    common::seed_provider(
+        &app.db(),
+        &common::ProviderSeed {
+            id: "p-emb",
+            name: "emb",
+            protocol: "openai",
+            base_url: &mock.base,
+            models: "[\"emb-test-001\"]",
+            priority: 0,
+            weight: 1.0,
+            health_status: "healthy",
+            error_rate: 0.0,
+        },
+    );
+    app.db()
+        .execute(
+            "UPDATE providers SET model_mapping = '{\"emb-test-001\":\"upstream-emb-001\"}' WHERE id = 'p-emb'",
+            [],
+        )
+        .unwrap();
+    // 输入 10 元/1M(spawn 已清空默认价格表,此为唯一价格行)
+    app.db()
+        .execute(
+            "INSERT INTO model_prices (id, model, prompt_price, completion_price) VALUES ('mp-emb', 'emb-test-001', 10.0, 0.0)",
+            [],
+        )
+        .unwrap();
+
+    let emb_resp = serde_json::json!({
+        "object": "list",
+        "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+        "model": "upstream-emb-001",
+        "usage": {"prompt_tokens": 1000, "total_tokens": 1000}
+    });
+    mock.push_json(200, emb_resp.clone());
+
+    let resp = app
+        .auth(app.client().post(format!("{}/v1/embeddings", app.base)))
+        .json(&serde_json::json!({"model": "emb-test-001", "input": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    // 响应体原样回传
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body, emb_resp);
+
+    // 转发核对:路径、凭证改写、模型映射已应用、其余字段原样
+    let reqs = mock.requests();
+    let fwd = reqs.iter().find(|r| r.path.ends_with("/embeddings")).unwrap();
+    assert_eq!(fwd.authorization.as_deref(), Some("Bearer upstream-key"));
+    let fwd_body: serde_json::Value = serde_json::from_str(&fwd.body).unwrap();
+    assert_eq!(fwd_body["model"], "upstream-emb-001");
+    assert_eq!(fwd_body["input"], "hi");
+
+    // 计费:1000 输入 token @10 元/1M = 0.01 元 = 10000 微元
+    let (req_type, cost): (String, i64) = app
+        .db()
+        .query_row(
+            "SELECT request_type, cost FROM request_logs WHERE model = 'emb-test-001'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(req_type, "embeddings");
+    assert_eq!(cost, 10_000);
+    let balance: i64 = app
+        .db()
+        .query_row("SELECT balance FROM users WHERE id = 'u-e2e'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(balance, 1_000_000 - 10_000);
+
+    // 非白名单路径 → 404(不转发、不消耗脚本)
+    let resp = app
+        .auth(app.client().post(format!("{}/v1/files", app.base)))
+        .json(&serde_json::json!({"purpose": "fine-tune"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    assert!(mock.requests().iter().all(|r| !r.path.ends_with("/files")));
+}
+
+/// 透传故障转移:第一个渠道 500 后换第二个渠道成功;上游 401 对
+/// 客户端掩码为 502(不泄露渠道凭证失败)。
+#[tokio::test]
+async fn passthrough_failover_and_credential_masking() {
+    let mock1 = MockUpstream::start().await;
+    let mock2 = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    // p1 高优先级高权重:首轮加权选路必然先选它(同既有 failover 用例口径)
+    common::seed_provider(
+        &app.db(),
+        &common::ProviderSeed {
+            id: "p1",
+            name: "emb-a",
+            protocol: "openai",
+            base_url: &mock1.base,
+            models: "[\"emb-test-001\"]",
+            priority: 100,
+            weight: 1000.0,
+            health_status: "healthy",
+            error_rate: 0.0,
+        },
+    );
+    // p2 error_rate=1.0 ⇒ 评分 0,只在 p1 被排除后才被选中
+    common::seed_provider(
+        &app.db(),
+        &common::ProviderSeed {
+            id: "p2",
+            name: "emb-b",
+            protocol: "openai",
+            base_url: &mock2.base,
+            models: "[\"emb-test-001\"]",
+            priority: 10,
+            weight: 10.0,
+            health_status: "unknown",
+            error_rate: 1.0,
+        },
+    );
+    let emb_resp = serde_json::json!({
+        "object": "list",
+        "data": [{"object": "embedding", "index": 0, "embedding": [0.5]}],
+        "model": "emb-test-001",
+        "usage": {"prompt_tokens": 10, "total_tokens": 10}
+    });
+    mock1.push_json(500, serde_json::json!({"error": {"message": "boom"}}));
+    mock2.push_json(200, emb_resp.clone());
+
+    let resp = app
+        .auth(app.client().post(format!("{}/v1/embeddings", app.base)))
+        .json(&serde_json::json!({"model": "emb-test-001", "input": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body, emb_resp);
+    // 两个渠道各被打一次(500 后故障转移)
+    assert_eq!(mock1.requests().iter().filter(|r| r.path.ends_with("/embeddings")).count(), 1);
+    assert_eq!(mock2.requests().iter().filter(|r| r.path.ends_with("/embeddings")).count(), 1);
+
+    // 全部渠道 401 → 客户端收 502 upstream_error(渠道凭证失败不外泄)。
+    // 循环内候选耗尽会重选同一渠道,多推几个 401 防脚本耗尽回默认 200。
+    for _ in 0..4 {
+        mock1.push_json(401, serde_json::json!({"error": {"message": "invalid key sk-secret"}}));
+        mock2.push_json(401, serde_json::json!({"error": {"message": "invalid key sk-secret"}}));
+    }
+    let resp = app
+        .auth(app.client().post(format!("{}/v1/embeddings", app.base)))
+        .json(&serde_json::json!({"model": "emb-test-001", "input": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 502);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "upstream_error");
+    assert!(!body["error"]["message"].as_str().unwrap().contains("sk-secret"));
+}

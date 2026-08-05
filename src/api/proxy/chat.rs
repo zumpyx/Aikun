@@ -229,7 +229,7 @@ pub async fn proxy_completion(
 /// API key 并发槽位:Drop 时归还在途计数。非流式请求在响应体读完、函数
 /// 返回时释放;流式请求被 move 进 stream 生成器,持有到流结束/客户端断连/
 /// 进程关停(生成器 Drop 全覆盖)。
-struct ConcurrencyGuard {
+pub(crate) struct ConcurrencyGuard {
     key_id: String,
     inflight: Arc<Mutex<HashMap<String, usize>>>,
 }
@@ -252,7 +252,7 @@ impl Drop for ConcurrencyGuard {
 /// 限额配置与当日已用 token 在 blocking 线程一次取回;RPM 用内存滑动窗口
 /// (key 为 api_keys.id)。查询失败时放行——key 刚通过认证,行必然存在,
 /// 瞬时的锁/IO 失败不应打断流量。
-async fn enforce_key_limits(state: &AppState, key_id: &str) -> Result<Option<ConcurrencyGuard>, String> {
+pub(crate) async fn enforce_key_limits(state: &AppState, key_id: &str) -> Result<Option<ConcurrencyGuard>, String> {
     let pool = state.pool.clone();
     let key = key_id.to_string();
     let limits = tokio::task::spawn_blocking(move || {
@@ -340,7 +340,7 @@ async fn enforce_key_limits(state: &AppState, key_id: &str) -> Result<Option<Con
 
 /// 余额预检:balance > 0 才放行。查询失败按放行处理(与 enforce_key_limits
 /// 同为 fail-open):瞬时的锁/IO 失败不应打断流量,余额口径以扣费落库为准。
-async fn has_positive_balance(state: &AppState, user_id: &str) -> bool {
+pub(crate) async fn has_positive_balance(state: &AppState, user_id: &str) -> bool {
     let pool = state.pool.clone();
     let uid = user_id.to_string();
     let uid_log = uid.clone();
@@ -658,7 +658,7 @@ async fn attempt_loop(
 }
 
 /// Rewrite the upstream body's model field using the channel's model mapping.
-fn apply_model_mapping(provider: &Provider, upstream_body: &mut Value) {
+pub(crate) fn apply_model_mapping(provider: &Provider, upstream_body: &mut Value) {
     if provider.model_mapping.is_empty() {
         return;
     }
@@ -969,7 +969,7 @@ fn anthropic_error_type(err_type: &str) -> &'static str {
 }
 
 /// Build an error body in the client-facing protocol shape.
-fn protocol_error(client_protocol: &str, err_type: &str, message: &str) -> Value {
+pub(crate) fn protocol_error(client_protocol: &str, err_type: &str, message: &str) -> Value {
     if client_protocol == crate::proxy::convert::PROTOCOL_ANTHROPIC {
         json!({
             "type": "error",
@@ -1009,7 +1009,7 @@ const MAX_RESP_BODY: usize = 8 * 1024 * 1024;
 
 /// 读取上游响应 body 并解析为 JSON；读取失败、超过上限或解析失败都返回
 /// Err，由调用方按失败路径处理。
-async fn read_json_limited(resp: reqwest::Response) -> Result<Value, String> {
+pub(crate) async fn read_json_limited(resp: reqwest::Response) -> Result<Value, String> {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     while let Some(chunk) = stream.next().await {
@@ -1086,7 +1086,7 @@ fn stream_terminal_event(client_protocol: &str) -> SseOut {
 /// 断连(StreamAbortGuard)等无法 await 的场景;成功计费路径必须改用
 /// request_log_sync 等待落库,进程退出时 fire-and-forget 会丢账。
 #[allow(clippy::too_many_arguments)]
-fn spawn_request_log(
+pub(crate) fn spawn_request_log(
     pool: &Arc<DbPool>,
     user_id: String,
     api_key_id: Option<String>,
@@ -1116,7 +1116,7 @@ fn spawn_request_log(
 /// 计费级同步版本:调用方 await,函数返回时日志与扣费已落库。
 /// 用于非流式成功路径——响应返回给用户前费用必须已记账。
 #[allow(clippy::too_many_arguments)]
-async fn request_log_sync(
+pub(crate) async fn request_log_sync(
     pool: &Arc<DbPool>,
     user_id: String,
     api_key_id: Option<String>,
