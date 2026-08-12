@@ -130,14 +130,14 @@ Content-Type: application/json
     <div class="card">
       <div class="card-header"><h2>钱包 — 兑换码充值</h2></div>
       <p style="font-size:14px;color:var(--muted);margin-bottom:12px">
-        兑换码由管理员在「兑换码」页批量生成。同一用户 10 分钟内连续兑换失败 5 次将被限流(429);
+        兑换码由管理员在「计费」页批量生成。同一用户 10 分钟内连续兑换失败 5 次将被限流(429);
         无效、已使用、已过期的码统一返回 <code>invalid_code</code>(400),不区分原因。
       </p>
       <div class="code-block">POST ${baseUrl}/api/wallet/redeem
 Authorization: Bearer <管理端登录令牌>(/api/* 仅接受登录会话,API Key 不适用)
 Content-Type: application/json
 
-{"code": "AK-XXXX-XXXX-XXXX"}
+{"code": "AK-XXXX-XXXX-XXXX-XXXX"}
 
 → 200
 {"amount": 10.0, "balance": 25.5}</div>

@@ -1036,7 +1036,9 @@ async fn redemption_code_full_flow() {
         .map(|c| c.as_str().unwrap().to_string())
         .collect();
     assert_eq!(codes.len(), 3);
-    assert!(codes[0].starts_with("AK-"));
+    assert!(codes.iter().all(|c| {
+        c.len() == 22 && c.starts_with("AK-") && c.matches('-').count() == 4
+    }));
     let resp = app
         .client()
         .post(format!("{}/api/admin/redemption-codes", app.base))
@@ -1078,7 +1080,7 @@ async fn redemption_code_full_flow() {
     let resp = redeem(&codes[0]).await;
     assert_eq!(resp.status(), 400);
     // 不存在的码 → 400;过期码 → 400(口径一致,不细分防枚举)
-    let resp = redeem("AK-AAAA-BBBB-CCCC").await;
+    let resp = redeem("AK-AAAA-BBBB-CCCC-DDDD").await;
     assert_eq!(resp.status(), 400);
     let resp = redeem(&expired_code).await;
     assert_eq!(resp.status(), 400);
@@ -1111,7 +1113,10 @@ async fn redemption_code_full_flow() {
     assert_eq!(list["total"], 4);
     let arr = list["items"].as_array().unwrap();
     assert_eq!(arr.len(), 4);
-    assert!(arr.iter().all(|c| c["code_masked"].as_str().unwrap().starts_with("AK-****-****-")));
+    assert!(arr.iter().all(|c| {
+        let masked = c["code_masked"].as_str().unwrap();
+        masked.len() == 22 && masked.starts_with("AK-****-****-****-")
+    }));
     assert!(arr.iter().all(|c| c.get("code_hash").is_none() && c.get("code").is_none()));
     let used = arr.iter().find(|c| c["status"] == "used").unwrap();
     assert_eq!(used["used_by"], "e2e");
@@ -1212,7 +1217,7 @@ async fn redemption_bruteforce_rate_limited() {
             .client()
             .post(format!("{}/api/wallet/redeem", app.base))
             .bearer_auth(&user_jwt)
-            .json(&serde_json::json!({"code": format!("AK-XXXX-XXXX-{:04}", i)}))
+            .json(&serde_json::json!({"code": format!("AK-XXXX-XXXX-XXXX-{:04}", i)}))
             .send()
             .await
             .unwrap();
@@ -1222,7 +1227,7 @@ async fn redemption_bruteforce_rate_limited() {
         .client()
         .post(format!("{}/api/wallet/redeem", app.base))
         .bearer_auth(&user_jwt)
-        .json(&serde_json::json!({"code": "AK-XXXX-XXXX-9999"}))
+        .json(&serde_json::json!({"code": "AK-XXXX-XXXX-XXXX-9999"}))
         .send()
         .await
         .unwrap();

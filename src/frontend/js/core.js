@@ -185,7 +185,6 @@ function renderApp(container) {
     { id: 'providers', label: '渠道', icon: icons.providers, admin: true },
     { id: 'users', label: '用户', icon: icons.users, admin: true },
     { id: 'billing', label: '计费', icon: icons.billing, admin: true },
-    { id: 'redemption', label: '兑换码', icon: icons.gift, admin: true },
     { id: 'apikeys', label: '密钥', icon: icons.key, admin: false },
     { id: 'models', label: '模型', icon: icons.models, admin: false },
     { id: 'chat', label: '测试', icon: icons.chat, admin: false },
@@ -239,7 +238,6 @@ function renderView(container) {
   else if (view === 'providers') renderProviders(container);
   else if (view === 'users') renderUsers(container);
   else if (view === 'billing') renderBilling(container);
-  else if (view === 'redemption') renderRedemption(container);
   else if (view === 'apikeys') renderApiKeys(container);
   else if (view === 'models') renderModels(container);
   else if (view === 'chat') renderChat(container);

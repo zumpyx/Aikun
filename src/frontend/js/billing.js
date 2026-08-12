@@ -15,6 +15,7 @@ async function renderBilling(container) {
       </div>
     </div>
     <div id="prices-list"><div class="empty"><div class="spinner"></div><p>加载中...</p></div></div>
+    <div id="redemption-section" style="margin-top:24px"></div>
     <div class="page-head" style="margin-top:24px"><h2>调账记录</h2></div>
     <div class="card" style="padding:14px 18px">
       <div class="form-group" style="margin-bottom:0;max-width:220px">
@@ -41,7 +42,11 @@ async function renderBilling(container) {
     });
   } else fillTxUserFilter();
 
-  await Promise.all([loadPrices(), loadTransactions()]);
+  await Promise.all([
+    loadPrices(),
+    renderRedemption(document.getElementById('redemption-section')),
+    loadTransactions(),
+  ]);
 }
 
 function fillTxUserFilter() {

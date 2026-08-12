@@ -137,6 +137,30 @@ code { font-family: 'SFMono-Regular', 'JetBrains Mono', Consolas, monospace; }
 .usage-grid { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; margin-bottom: 18px; }
 @media (max-width: 1100px) { .usage-grid { grid-template-columns: 1fr; } }
 
+/* Wallet */
+.redeem-card { display: flex; align-items: center; gap: 14px; padding: 16px 18px; margin-bottom: 16px; }
+.redeem-icon {
+  width: 40px; height: 40px; border-radius: 12px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(99,102,241,.1); color: var(--primary);
+}
+.redeem-copy { flex: 1; min-width: 180px; }
+.redeem-copy h3 { font-size: 14.5px; font-weight: 700; }
+.redeem-copy p { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.redeem-actions { display: flex; align-items: center; gap: 10px; flex: 1.25; min-width: 320px; }
+.redeem-actions input {
+  flex: 1; min-width: 0; padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: 10px;
+  background: #fbfbfc; color: var(--text); font-family: 'SFMono-Regular', Consolas, monospace; font-size: 13px; letter-spacing: .4px;
+  transition: border-color .15s, box-shadow .15s, background .15s;
+}
+.redeem-actions input:hover { border-color: #c8cdd8; }
+.redeem-actions input:focus { outline: none; border-color: var(--primary); background: #fff; box-shadow: 0 0 0 3.5px rgba(99,102,241,.14); }
+.redeem-actions .btn-primary { white-space: nowrap; }
+@media (max-width: 860px) {
+  .redeem-card { flex-wrap: wrap; }
+  .redeem-actions { flex-basis: 100%; min-width: 0; }
+}
+
 /* ============ Forms ============ */
 .form-group { margin-bottom: 14px; }
 .form-group label { display: block; font-size: 12.5px; font-weight: 600; margin-bottom: 5px; color: var(--text-2); }
@@ -164,6 +188,15 @@ tbody tr { transition: background .12s; }
 tbody tr:hover { background: #f8f9fc; }
 tbody tr:last-child td { border-bottom: none; }
 td strong { font-weight: 600; }
+
+/* 渠道表:操作列固定容纳 5 个按钮,宽度不足时表格横向滚动而不是换行 */
+.providers-table { min-width: 1180px; }
+.providers-table th, .providers-table td { padding-left: 10px; padding-right: 10px; }
+.providers-table th:last-child, .providers-table td:last-child {
+  width: 274px; min-width: 274px; white-space: nowrap;
+}
+.providers-table td:last-child { text-align: right; }
+.providers-table td:last-child .btn-sm { margin: 1px 0 1px 6px; white-space: nowrap; }
 
 /* Badges */
 .badge {

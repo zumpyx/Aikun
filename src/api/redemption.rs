@@ -17,21 +17,27 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::auth::Claims;
 
-/// 码字符集:去除易混淆的 0/O/1/I,32 字符 × 12 位 ≈ 2^60 组合。
+/// 码字符集:去除易混淆的 0/O/1/I,32 字符 × 16 位 = 2^80 组合。
 const CODE_CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /// 兑换失败限流:同一用户 10 分钟内失败 5 次即拒绝(防爆破)。
 const REDEEM_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
 const REDEEM_MAX_FAILS: usize = 5;
 
-/// 生成 AK-XXXX-XXXX-XXXX 形式的兑换码(明文,仅生成响应可见)。
+/// 生成 AK-XXXX-XXXX-XXXX-XXXX 形式的兑换码(明文,仅生成响应可见)。
 fn generate_code() -> String {
     let mut rng = rand::rng();
     let pick = |rng: &mut rand::rngs::ThreadRng| {
         CODE_CHARSET[rng.random_range(0..CODE_CHARSET.len())] as char
     };
     let seg = |rng: &mut rand::rngs::ThreadRng| (0..4).map(|_| pick(rng)).collect::<String>();
-    format!("AK-{}-{}-{}", seg(&mut rng), seg(&mut rng), seg(&mut rng))
+    format!(
+        "AK-{}-{}-{}-{}",
+        seg(&mut rng),
+        seg(&mut rng),
+        seg(&mut rng),
+        seg(&mut rng)
+    )
 }
 
 fn hash_code(code: &str) -> String {
@@ -216,7 +222,7 @@ pub async fn create_redemption_codes(
         Err(rusqlite::Error::SqliteFailure(err, _))
             if err.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
-            // 2^60 空间下碰撞几乎不可能,真撞上重试一次生成即可,直接报错
+            // 2^80 空间下碰撞几乎不可能,真撞上重试一次生成即可,直接报错
             // 让管理员重新提交,不做静默丢弃。
             tracing::error!("Redemption code collision on insert (retry the request)");
             (
@@ -293,7 +299,7 @@ pub async fn list_redemption_codes(
         let rows = stmt.query_map(params![batch, limit, offset], |row| {
             Ok(json!({
                 "id": row.get::<_, String>(0)?,
-                "code_masked": format!("AK-****-****-{}", row.get::<_, String>(1)?),
+                "code_masked": format!("AK-****-****-****-{}", row.get::<_, String>(1)?),
                 "amount": crate::billing::micro_to_yuan(row.get::<_, i64>(2)?),
                 "batch": row.get::<_, String>(3)?,
                 "status": row.get::<_, String>(4)?,

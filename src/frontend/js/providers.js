@@ -31,7 +31,7 @@ async function loadProviders() {
   list.innerHTML = `
     <div class="card">
       <div class="table-wrap">
-        <table>
+        <table class="providers-table">
           <thead><tr><th>名称</th><th>协议</th><th>地址</th><th>模型</th><th>状态</th><th>延迟</th><th>优先级</th><th>权重</th><th>操作</th></tr></thead>
           <tbody>
             ${data.map(p => `
