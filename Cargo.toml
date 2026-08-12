@@ -1,6 +1,6 @@
 [package]
 name = "aikun"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "A lightweight AI gateway with multi-provider aggregation, failover, and routing optimization"
 
