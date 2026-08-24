@@ -23,9 +23,9 @@ use crate::db::DbPool;
 use crate::models::Provider;
 use crate::proxy::client::{extract_model, send_request};
 use crate::proxy::convert::{
-    convert_request, convert_response, extract_usage_any, parse_sse_events,
-    parse_sse_remaining, valid_response_shape, StreamConverter, SseOut, PROTOCOL_OPENAI,
-    PROTOCOL_RESPONSES,
+    anthropic_error_type, convert_request, convert_response, extract_usage_any,
+    parse_sse_events, parse_sse_remaining, valid_response_shape, StreamConverter, SseOut,
+    PROTOCOL_OPENAI, PROTOCOL_RESPONSES,
 };
 use crate::router::selector::{
     list_available_models_async, select_provider_async, spawn_record_failure, spawn_record_result,
@@ -802,6 +802,9 @@ fn stream_response(
         // Set when the upstream stream becomes unusable mid-flight (stall,
         // transport error, or unbounded buffer); recorded as a failure below.
         let mut stream_error: Option<String> = None;
+        // 上游在 200 的 SSE 流内发错误帧(各协议形状):converter 已转成
+        // 协议错误事件发给客户端,收尾时按失败记账而不是成功。
+        let mut error_frame = false;
         let mut events: u32 = 0;
         let mut upstream = std::pin::pin!(byte_stream);
         loop {
@@ -835,6 +838,13 @@ fn stream_response(
                     for ev in parse_sse_events(&mut buf) {
                         events += 1;
                         for out in converter.push(&ev) {
+                            // 转换型 converter 的错误事件带 event: error;
+                            // 直通路径原样转发,OpenAI 形状错误帧以 {"error": 开头。
+                            if out.event.as_deref() == Some("error")
+                                || out.data.starts_with("{\"error\":")
+                            {
+                                error_frame = true;
+                            }
                             yield Ok::<Event, Infallible>(to_axum_event(out));
                         }
                     }
@@ -898,6 +908,11 @@ fn stream_response(
         if let Some(ev) = parse_sse_remaining(&mut buf) {
             events += 1;
             for out in converter.push(&ev) {
+                if out.event.as_deref() == Some("error")
+                    || out.data.starts_with("{\"error\":")
+                {
+                    error_frame = true;
+                }
                 yield Ok(to_axum_event(out));
             }
         }
@@ -926,8 +941,22 @@ fn stream_response(
 
         // Stream finished — record metrics and request log.
         let latency = start.elapsed().as_millis() as f64;
-        spawn_record_result(pool.clone(), provider_id.clone(), latency, true);
         let (p, c, t, k) = converter.usage();
+        if error_frame {
+            // 上游流内错误帧:HTTP 虽 200,语义上是失败。按失败记账(已捕获
+            // 的 usage 照扣,与流中途错误同口径),不让刷错误帧的渠道显得健康。
+            spawn_record_failure(pool.clone(), provider_id.clone(), latency, 0, threshold, true);
+            request_log_sync(
+                &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
+                model_log.clone(), &client_protocol,
+                p, c, t, k, latency as i32, 502, false,
+                Some("upstream sent an in-stream error frame".to_string()),
+            )
+            .await;
+            guard.finish();
+            return;
+        }
+        spawn_record_result(pool.clone(), provider_id.clone(), latency, true);
         // 计费级:与非流式一致,流结束时同步等待日志与扣费落库,
         // fire-and-forget 在进程退出时会丢账。
         request_log_sync(
@@ -951,20 +980,6 @@ fn to_axum_event(out: SseOut) -> Event {
     match out.event {
         Some(name) => ev.event(name),
         None => ev,
-    }
-}
-
-/// Map an OpenAI-style error type to the closest Anthropic-style one, so the
-/// Anthropic error shape still carries the original error category.
-fn anthropic_error_type(err_type: &str) -> &'static str {
-    match err_type {
-        "invalid_request_error" => "invalid_request_error",
-        "authentication_error" => "authentication_error",
-        "permission_error" | "model_not_allowed" => "permission_error",
-        "not_found_error" => "not_found_error",
-        "rate_limit_error" => "rate_limit_error",
-        "overloaded_error" => "overloaded_error",
-        _ => "api_error",
     }
 }
 

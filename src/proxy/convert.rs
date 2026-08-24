@@ -664,6 +664,30 @@ fn openai_finish_to_anthropic(finish: &str) -> &'static str {
     }
 }
 
+/// OpenAI finish_reason → Responses incomplete_details.reason;
+/// None 表示正常完成(completed)。
+fn openai_finish_to_incomplete_reason(finish: &str) -> Option<&'static str> {
+    match finish {
+        "length" => Some("max_output_tokens"),
+        "content_filter" => Some("content_filter"),
+        _ => None,
+    }
+}
+
+/// 上游错误类型 → Anthropic 标准错误类型;白名单外的类型统一映射为
+/// api_error,避免把 OpenAI 的 server_error 等非标准类型透传给客户端。
+pub(crate) fn anthropic_error_type(err_type: &str) -> &'static str {
+    match err_type {
+        "invalid_request_error" => "invalid_request_error",
+        "authentication_error" => "authentication_error",
+        "permission_error" | "model_not_allowed" => "permission_error",
+        "not_found_error" => "not_found_error",
+        "rate_limit_error" => "rate_limit_error",
+        "overloaded_error" => "overloaded_error",
+        _ => "api_error",
+    }
+}
+
 /// Check that a 200 response body actually matches the expected protocol
 /// shape. Some upstreams return HTTP 200 with an error-shaped or otherwise
 /// foreign body; treating those as success would fabricate empty completions.
@@ -705,7 +729,15 @@ fn anthropic_resp_to_openai(resp: &Value, model: &str) -> Value {
     }
 
     let finish = anthropic_stop_to_openai(resp["stop_reason"].as_str().unwrap_or("end_turn"));
-    let prompt = resp["usage"]["input_tokens"].as_i64().unwrap_or(0);
+    // Anthropic 的 input_tokens 不含缓存;转成 OpenAI 口径时 prompt_tokens
+    // 要含 cache_read/cache_creation(total 同步),cache_read 同时写入
+    // prompt_tokens_details.cached_tokens 供下游拆分缓存计费。
+    let input = resp["usage"]["input_tokens"].as_i64().unwrap_or(0);
+    let cache_read = resp["usage"]["cache_read_input_tokens"].as_i64().unwrap_or(0);
+    let cache_creation = resp["usage"]["cache_creation_input_tokens"]
+        .as_i64()
+        .unwrap_or(0);
+    let prompt = input + cache_read + cache_creation;
     let completion = resp["usage"]["output_tokens"].as_i64().unwrap_or(0);
 
     let mut message = Map::new();
@@ -728,6 +760,7 @@ fn anthropic_resp_to_openai(resp: &Value, model: &str) -> Value {
         }],
         "usage": {
             "prompt_tokens": prompt,
+            "prompt_tokens_details": {"cached_tokens": cache_read},
             "completion_tokens": completion,
             "total_tokens": prompt + completion,
         }
@@ -816,6 +849,14 @@ fn openai_resp_to_responses(resp: &Value) -> Value {
         }
     }
 
+    // 截断/审核命中的响应不能标 completed,否则客户端当成完整结果使用。
+    let finish = resp["choices"][0]["finish_reason"].as_str().unwrap_or("stop");
+    let incomplete = openai_finish_to_incomplete_reason(finish);
+    let (status, incomplete_details) = match incomplete {
+        Some(reason) => ("incomplete", json!({"reason": reason})),
+        None => ("completed", Value::Null),
+    };
+
     let u = &resp["usage"];
     let prompt = u["prompt_tokens"].as_i64().unwrap_or(0);
     let cached = u["prompt_tokens_details"]["cached_tokens"].as_i64().unwrap_or(0);
@@ -827,7 +868,8 @@ fn openai_resp_to_responses(resp: &Value) -> Value {
         "object": "response",
         "created_at": resp["created"].as_i64()
             .unwrap_or_else(|| chrono::Utc::now().timestamp()),
-        "status": "completed",
+        "status": status,
+        "incomplete_details": incomplete_details,
         "model": resp["model"],
         "output": output,
         "usage": {
@@ -840,6 +882,12 @@ fn openai_resp_to_responses(resp: &Value) -> Value {
     })
 }
 
+/// 上游 token 计数不可信:负数按 0,超出 i32 范围的值做饱和转换,
+/// 替代裸 `as i32`(后者会回绕成负数,污染计费与统计)。
+fn clamp_token_count(v: Option<i64>) -> i32 {
+    v.unwrap_or(0).clamp(0, i32::MAX as i64) as i32
+}
+
 /// Extract (prompt_uncached, completion, total, cached) token usage from a
 /// response in either protocol (OpenAI `prompt_tokens`/`completion_tokens` or
 /// Anthropic `input_tokens`/`output_tokens`)。
@@ -849,7 +897,7 @@ fn openai_resp_to_responses(resp: &Value) -> Value {
 /// cache_creation_input_tokens(写缓存)按输入价并入未缓存输入(近似)。
 /// 上游数值不可信:负数按 0 处理,超出 i32 范围的值做饱和转换,避免污染计费与统计。
 pub fn extract_usage_any(resp: &Value) -> (i32, i32, i32, i32) {
-    let clamp = |v: Option<i64>| v.unwrap_or(0).clamp(0, i32::MAX as i64) as i32;
+    let clamp = clamp_token_count;
     let u = &resp["usage"];
     let completion = clamp(
         u["completion_tokens"]
@@ -866,10 +914,14 @@ pub fn extract_usage_any(resp: &Value) -> (i32, i32, i32, i32) {
             .map(|t| clamp(Some(t)))
             .unwrap_or(prompt.saturating_add(completion));
         (prompt_uncached, completion, total, cached)
-    } else if !u["input_tokens_details"].is_null() || !u["total_tokens"].is_null() {
+    } else if !u["input_tokens"].is_null()
+        && (!u["input_tokens_details"].is_null() || !u["total_tokens"].is_null())
+    {
         // Responses API:input_tokens 同样含缓存,按 input_tokens_details
         // .cached_tokens 拆出。特征判定先于 Anthropic 分支:Anthropic 的
         // usage 没有 total_tokens/input_tokens_details,不会误入此分支。
+        // input_tokens 必须存在:非标 OpenAI 缺 prompt_tokens 但带
+        // total_tokens 时,不能凭 total 误入此分支把输入读成 0。
         let prompt = clamp(u["input_tokens"].as_i64());
         let cached = clamp(u["input_tokens_details"]["cached_tokens"].as_i64());
         let prompt_uncached = (prompt - cached).max(0);
@@ -1105,9 +1157,11 @@ impl StreamConverter {
                             let mu = &data["message"]["usage"];
                             // input_tokens 不含缓存;cache_creation(写缓存)按输入价
                             // 并入未缓存输入,cache_read 记入缓存维度单独计价。
-                            usage.0 = (mu["input_tokens"].as_i64().unwrap_or(0) as i32)
-                                .saturating_add(mu["cache_creation_input_tokens"].as_i64().unwrap_or(0) as i32);
-                            usage.3 = mu["cache_read_input_tokens"].as_i64().unwrap_or(0) as i32;
+                            usage.0 = clamp_token_count(mu["input_tokens"].as_i64())
+                                .saturating_add(clamp_token_count(
+                                    mu["cache_creation_input_tokens"].as_i64(),
+                                ));
+                            usage.3 = clamp_token_count(mu["cache_read_input_tokens"].as_i64());
                             // message_start 携带上游真实模型名,同样回写为
                             // 客户端请求的模型名。
                             if data["message"].is_object() {
@@ -1117,20 +1171,20 @@ impl StreamConverter {
                         }
                         Some("message_delta") => {
                             let du = &data["usage"];
-                            usage.1 = du["output_tokens"].as_i64().unwrap_or(0) as i32;
+                            usage.1 = clamp_token_count(du["output_tokens"].as_i64());
                             // 部分上游在 message_delta 里才补缓存字段,出现时同步更新
                             // (实践中只在 message_start 上报;两处重复上报会高估,
                             // 与 cache_creation 的近似口径一致,可接受)。
-                            if let Some(v) = du["cache_read_input_tokens"].as_i64() {
-                                usage.3 = v as i32;
+                            if du["cache_read_input_tokens"].as_i64().is_some() {
+                                usage.3 = clamp_token_count(du["cache_read_input_tokens"].as_i64());
                             }
                             if let Some(v) = du["cache_creation_input_tokens"].as_i64() {
-                                usage.0 = usage.0.saturating_add(v as i32);
+                                usage.0 = usage.0.saturating_add(clamp_token_count(Some(v)));
                             }
                         }
                         _ => {}
                     }
-                    usage.2 = usage.0 + usage.1 + usage.3;
+                    usage.2 = usage.0.saturating_add(usage.1).saturating_add(usage.3);
                 }
                 vec![SseOut {
                     event: ev.event.clone(),
@@ -1242,6 +1296,10 @@ impl OaStreamState {
     }
 
     fn push(&mut self, ev: &SseEvent) -> Vec<SseOut> {
+        // 错误帧之后不再产出任何事件(避免"错误后又成功完成")
+        if self.finished {
+            return vec![];
+        }
         if ev.data.trim() == "[DONE]" {
             return self.finalize();
         }
@@ -1249,6 +1307,23 @@ impl OaStreamState {
             Ok(v) => v,
             Err(_) => return vec![],
         };
+
+        // 部分中转上游在 SSE 流内返回错误帧(HTTP 200 + {"error": ...}):
+        // 不能先 message_start 再正常收尾,直接转发 Anthropic error 事件并终止。
+        if chunk["error"].is_object() {
+            self.finished = true;
+            let err = &chunk["error"];
+            return vec![SseOut::json(
+                "error",
+                json!({
+                    "type": "error",
+                    "error": {
+                        "type": anthropic_error_type(err["type"].as_str().unwrap_or("api_error")),
+                        "message": err["message"].as_str().unwrap_or("upstream error"),
+                    }
+                }),
+            )];
+        }
 
         let mut out = Vec::new();
 
@@ -1433,6 +1508,7 @@ pub struct AnStreamState {
     block_to_tc: HashMap<usize, usize>,
     next_tc: usize,
     usage: (i32, i32, i32, i32),
+    finished: bool,
 }
 
 impl AnStreamState {
@@ -1444,6 +1520,7 @@ impl AnStreamState {
             block_to_tc: HashMap::new(),
             next_tc: 0,
             usage: (0, 0, 0, 0),
+            finished: false,
         }
     }
 
@@ -1462,6 +1539,10 @@ impl AnStreamState {
     }
 
     fn push(&mut self, ev: &SseEvent) -> Vec<SseOut> {
+        // 错误事件之后不再产出任何 chunk
+        if self.finished {
+            return vec![];
+        }
         let data: Value = match serde_json::from_str(&ev.data) {
             Ok(v) => v,
             Err(_) => return vec![],
@@ -1473,6 +1554,21 @@ impl AnStreamState {
             .unwrap_or_default();
 
         match event_type.as_str() {
+            // Anthropic 流内错误事件转成 OpenAI 形状的 error data;
+            // Anthropic→Responses 组合链里再由 OarStreamState 转成 error 事件。
+            "error" => {
+                self.finished = true;
+                let err = &data["error"];
+                vec![SseOut::data_only(
+                    json!({
+                        "error": {
+                            "message": err["message"].as_str().unwrap_or("upstream error"),
+                            "type": err["type"].as_str().unwrap_or("api_error"),
+                        }
+                    })
+                    .to_string(),
+                )]
+            }
             "message_start" => {
                 let msg = &data["message"];
                 if let Some(id) = msg["id"].as_str() {
@@ -1483,10 +1579,10 @@ impl AnStreamState {
                 // 缓存拆分口径同 PassAnthropic:cache_creation 并入未缓存输入,
                 // cache_read 记入缓存维度。
                 let mu = &msg["usage"];
-                self.usage.0 = (mu["input_tokens"].as_i64().unwrap_or(0) as i32)
-                    .saturating_add(mu["cache_creation_input_tokens"].as_i64().unwrap_or(0) as i32);
-                self.usage.3 = mu["cache_read_input_tokens"].as_i64().unwrap_or(0) as i32;
-                self.usage.2 = self.usage.0 + self.usage.1 + self.usage.3;
+                self.usage.0 = clamp_token_count(mu["input_tokens"].as_i64())
+                    .saturating_add(clamp_token_count(mu["cache_creation_input_tokens"].as_i64()));
+                self.usage.3 = clamp_token_count(mu["cache_read_input_tokens"].as_i64());
+                self.usage.2 = self.usage.0.saturating_add(self.usage.1).saturating_add(self.usage.3);
                 vec![self.chunk(json!({"role": "assistant", "content": ""}), None, None)]
             }
             "content_block_start" => {
@@ -1547,23 +1643,26 @@ impl AnStreamState {
             }
             "message_delta" => {
                 let du = &data["usage"];
-                if let Some(out_tokens) = du["output_tokens"].as_i64() {
-                    self.usage.1 = out_tokens as i32;
+                if du["output_tokens"].as_i64().is_some() {
+                    self.usage.1 = clamp_token_count(du["output_tokens"].as_i64());
                 }
                 // 缓存字段若在 message_delta 才上报,同步更新(口径同 PassAnthropic)
-                if let Some(v) = du["cache_read_input_tokens"].as_i64() {
-                    self.usage.3 = v as i32;
+                if du["cache_read_input_tokens"].as_i64().is_some() {
+                    self.usage.3 = clamp_token_count(du["cache_read_input_tokens"].as_i64());
                 }
                 if let Some(v) = du["cache_creation_input_tokens"].as_i64() {
-                    self.usage.0 = self.usage.0.saturating_add(v as i32);
+                    self.usage.0 = self.usage.0.saturating_add(clamp_token_count(Some(v)));
                 }
-                self.usage.2 = self.usage.0 + self.usage.1 + self.usage.3;
+                self.usage.2 = self.usage.0.saturating_add(self.usage.1).saturating_add(self.usage.3);
                 let mut out = Vec::new();
                 if let Some(stop) = data["delta"]["stop_reason"].as_str() {
                     let finish = anthropic_stop_to_openai(stop);
-                    // 客户端可见的 prompt_tokens 维持 OpenAI 口径(含缓存部分)
+                    // 客户端可见的 prompt_tokens 维持 OpenAI 口径(含缓存部分);
+                    // cached_tokens 一并带出,Anthropic→Responses 组合链的
+                    // OarStreamState 靠它把缓存从输入里拆出单独计价。
                     let usage = json!({
-                        "prompt_tokens": self.usage.0 + self.usage.3,
+                        "prompt_tokens": self.usage.0.saturating_add(self.usage.3),
+                        "prompt_tokens_details": {"cached_tokens": self.usage.3},
                         "completion_tokens": self.usage.1,
                         "total_tokens": self.usage.2,
                     });
@@ -1605,6 +1704,8 @@ pub struct OarStreamState {
     tool_items: HashMap<u64, OarToolItem>,
     next_output_index: usize,
     usage: (i32, i32, i32, i32),
+    /// 最终非空 finish_reason:finalize 据此判断 completed 还是 incomplete。
+    finish_reason: Option<String>,
 }
 
 impl OarStreamState {
@@ -1621,6 +1722,7 @@ impl OarStreamState {
             tool_items: HashMap::new(),
             next_output_index: 0,
             usage: (0, 0, 0, 0),
+            finish_reason: None,
         }
     }
 
@@ -1629,7 +1731,7 @@ impl OarStreamState {
     /// OpenAI 口径互逆。
     fn responses_usage(&self) -> Value {
         json!({
-            "input_tokens": self.usage.0 + self.usage.3,
+            "input_tokens": self.usage.0.saturating_add(self.usage.3),
             "input_tokens_details": {"cached_tokens": self.usage.3},
             "output_tokens": self.usage.1,
             "output_tokens_details": {"reasoning_tokens": 0},
@@ -1638,6 +1740,10 @@ impl OarStreamState {
     }
 
     fn push(&mut self, ev: &SseEvent) -> Vec<SseOut> {
+        // 错误帧之后不再产出任何事件(避免"错误后又成功完成")
+        if self.finished {
+            return vec![];
+        }
         if ev.data.trim() == "[DONE]" {
             return self.finalize();
         }
@@ -1645,6 +1751,25 @@ impl OarStreamState {
             Ok(v) => v,
             Err(_) => return vec![],
         };
+
+        // 流内错误帧(形状见 OaStreamState):Responses 的 error 事件本身是
+        // 终止帧,不先发 response.created/in_progress,也不再 response.completed。
+        if chunk["error"].is_object() {
+            self.finished = true;
+            let err = &chunk["error"];
+            let code = err["code"]
+                .as_str()
+                .or_else(|| err["type"].as_str())
+                .unwrap_or("upstream_error");
+            return vec![SseOut::json(
+                "error",
+                json!({
+                    "type": "error",
+                    "code": code,
+                    "message": err["message"].as_str().unwrap_or("upstream error"),
+                }),
+            )];
+        }
 
         let mut out = Vec::new();
         if !self.started {
@@ -1676,6 +1801,10 @@ impl OarStreamState {
         if let Some(choices) = chunk["choices"].as_array() {
             for choice in choices {
                 let delta = &choice["delta"];
+
+                if let Some(finish) = choice["finish_reason"].as_str().filter(|f| !f.is_empty()) {
+                    self.finish_reason = Some(finish.to_string());
+                }
 
                 if let Some(text) = delta["content"].as_str().filter(|t| !t.is_empty()) {
                     self.ensure_text_item(&mut out);
@@ -1888,15 +2017,26 @@ impl OarStreamState {
             ));
         }
 
+        // 截断/审核命中(length/content_filter)的响应发 response.incomplete,
+        // 不能标 completed,否则客户端把截断结果当成完整结果。
+        let incomplete = self
+            .finish_reason
+            .as_deref()
+            .and_then(openai_finish_to_incomplete_reason);
+        let (done_event, status, incomplete_details) = match incomplete {
+            Some(reason) => ("response.incomplete", "incomplete", json!({"reason": reason})),
+            None => ("response.completed", "completed", Value::Null),
+        };
         out.push(SseOut::json(
-            "response.completed",
+            done_event,
             json!({
-                "type": "response.completed",
+                "type": done_event,
                 "response": {
                     "id": self.resp_id,
                     "object": "response",
                     "created_at": self.created,
-                    "status": "completed",
+                    "status": status,
+                    "incomplete_details": incomplete_details,
                     "model": self.model,
                     "output": self.completed_output(),
                     "usage": self.responses_usage(),
@@ -2461,7 +2601,15 @@ mod tests {
         let outs = c.push(&sse_typed("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}"#));
         let chunk: Value = serde_json::from_str(&outs[0].data).unwrap();
         assert_eq!(chunk["choices"][0]["finish_reason"], "stop");
-        assert_eq!(chunk["usage"], json!({"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}));
+        assert_eq!(
+            chunk["usage"],
+            json!({
+                "prompt_tokens": 9,
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "completion_tokens": 3,
+                "total_tokens": 12,
+            })
+        );
         assert_eq!(c.usage(), (9, 3, 12, 0));
 
         let outs = c.finish();
@@ -2782,5 +2930,204 @@ mod tests {
         let types = out_types(&outs);
         assert!(types.contains(&"response.completed".to_string()));
         assert_eq!(c.usage(), (9, 3, 12, 0));
+    }
+
+    // ---- 流内错误帧 ----
+
+    #[test]
+    fn stream_openai_error_chunk_to_anthropic_error_event() {
+        // 中转上游 HTTP 200 + SSE 流内错误帧:不得先 message_start 再正常收尾
+        let mut c = StreamConverter::new("anthropic", "openai", "m");
+        let outs = c.push(&sse(r#"{"error":{"message":"boom","type":"server_error"}}"#));
+        assert_eq!(out_types(&outs), vec!["error"]);
+        assert_eq!(outs[0].event.as_deref(), Some("error"));
+        let v: Value = serde_json::from_str(&outs[0].data).unwrap();
+        assert_eq!(v["type"], "error");
+        // OpenAI 的 server_error 不是 Anthropic 标准错误类型,映射为 api_error
+        assert_eq!(v["error"]["type"], "api_error");
+        assert_eq!(v["error"]["message"], "boom");
+
+        // 后续正常帧被忽略;[DONE]/finish 不再产出 message_stop
+        assert!(c.push(&sse(r#"{"choices":[{"delta":{"content":"x"}}]}"#)).is_empty());
+        assert!(c.push(&sse("[DONE]")).is_empty());
+        assert!(c.finish().is_empty());
+    }
+
+    #[test]
+    fn anthropic_error_type_whitelist() {
+        // 标准类型透传,非标准类型(如 OpenAI 的 server_error)映射为 api_error
+        assert_eq!(anthropic_error_type("rate_limit_error"), "rate_limit_error");
+        assert_eq!(anthropic_error_type("overloaded_error"), "overloaded_error");
+        assert_eq!(anthropic_error_type("server_error"), "api_error");
+        assert_eq!(anthropic_error_type("insufficient_quota"), "api_error");
+    }
+
+    #[test]
+    fn stream_openai_error_chunk_mid_stream_to_anthropic() {
+        // 流中途出错:已 message_start,错误事件后不再 message_delta/message_stop
+        let mut c = StreamConverter::new("anthropic", "openai", "m");
+        let outs = c.push(&sse(r#"{"id":"c1","choices":[{"delta":{"content":"Hel"}}]}"#));
+        assert!(out_types(&outs).contains(&"message_start".to_string()));
+        let outs = c.push(&sse(r#"{"error":{"message":"mid boom","type":"server_error"}}"#));
+        assert_eq!(out_types(&outs), vec!["error"]);
+        assert!(c.push(&sse("[DONE]")).is_empty());
+    }
+
+    #[test]
+    fn stream_openai_error_chunk_to_responses_error_event() {
+        let mut c = StreamConverter::new("responses", "openai", "m");
+        let outs = c.push(&sse(r#"{"error":{"message":"boom","type":"server_error"}}"#));
+        // 无 response.created/in_progress
+        assert_eq!(out_types(&outs), vec!["error"]);
+        let v: Value = serde_json::from_str(&outs[0].data).unwrap();
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["code"], "server_error");
+        assert_eq!(v["message"], "boom");
+
+        // 无 response.completed
+        assert!(c.push(&sse("[DONE]")).is_empty());
+        assert!(c.finish().is_empty());
+    }
+
+    #[test]
+    fn stream_anthropic_error_event_to_openai_and_responses() {
+        // Anthropic type:"error" 事件 → OpenAI 形状 error data
+        let mut c = StreamConverter::new("openai", "anthropic", "m");
+        let outs = c.push(&sse_typed(
+            "error",
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        ));
+        assert_eq!(outs.len(), 1);
+        let v: Value = serde_json::from_str(&outs[0].data).unwrap();
+        assert_eq!(v["error"]["type"], "overloaded_error");
+        assert_eq!(v["error"]["message"], "Overloaded");
+        // 后续正常帧被忽略
+        assert!(c
+            .push(&sse_typed("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}"#))
+            .is_empty());
+
+        // 组合链:Anthropic error → Responses error 事件
+        let mut c = StreamConverter::new("responses", "anthropic", "m");
+        let outs = c.push(&sse_typed(
+            "error",
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        ));
+        assert_eq!(out_types(&outs), vec!["error"]);
+        let v: Value = serde_json::from_str(&outs[0].data).unwrap();
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["code"], "overloaded_error");
+        assert_eq!(v["message"], "Overloaded");
+        assert!(c.finish().is_empty());
+    }
+
+    // ---- 缓存计费与截断状态 ----
+
+    #[test]
+    fn stream_anthropic_to_responses_carries_cached_tokens() {
+        // Anthropic 流式带 cache_read:经 chat chunk 的 prompt_tokens_details
+        // 传给 OarStreamState,response.completed 里 cached_tokens 正确拆分。
+        let mut c = StreamConverter::new("responses", "anthropic", "m");
+        c.push(&sse_typed(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":9,"cache_creation_input_tokens":2,"cache_read_input_tokens":5}}}"#,
+        ));
+        c.push(&sse_typed("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#));
+        c.push(&sse_typed("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}"#));
+
+        // usage:(未缓存输入 9+2=11, 输出 3, 总 19, 缓存 5)
+        assert_eq!(c.usage(), (11, 3, 19, 5));
+
+        let outs = c.finish();
+        let completed: Value = serde_json::from_str(&outs.last().unwrap().data).unwrap();
+        assert_eq!(completed["type"], "response.completed");
+        let usage = &completed["response"]["usage"];
+        // 客户端可见 input_tokens 含缓存;cached_tokens 单独标出
+        assert_eq!(usage["input_tokens"], 16);
+        assert_eq!(usage["input_tokens_details"]["cached_tokens"], 5);
+        assert_eq!(usage["output_tokens"], 3);
+        assert_eq!(usage["total_tokens"], 19);
+    }
+
+    #[test]
+    fn response_anthropic_to_openai_maps_cache_tokens() {
+        // 非流式:cache_read → prompt_tokens_details.cached_tokens,
+        // prompt_tokens/total 含 cache_read/cache_creation(OpenAI 口径)
+        let resp = json!({
+            "id": "msg_1",
+            "model": "claude-4",
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 9,
+                "output_tokens": 3,
+                "cache_creation_input_tokens": 2,
+                "cache_read_input_tokens": 5,
+            }
+        });
+        let out = convert_response(&resp, "anthropic", "openai", "claude-4");
+        assert_eq!(out["usage"]["prompt_tokens"], 16);
+        assert_eq!(out["usage"]["prompt_tokens_details"]["cached_tokens"], 5);
+        assert_eq!(out["usage"]["total_tokens"], 19);
+        // 组合到 responses 后缓存拆分仍然正确
+        let out = convert_response(&resp, "anthropic", "responses", "claude-4");
+        assert_eq!(out["usage"]["input_tokens"], 16);
+        assert_eq!(out["usage"]["input_tokens_details"]["cached_tokens"], 5);
+    }
+
+    #[test]
+    fn response_openai_to_responses_incomplete_on_length() {
+        let resp = json!({
+            "id": "chatcmpl-1",
+            "model": "gpt-5",
+            "created": 1_700_000_000,
+            "choices": [{"message": {"role": "assistant", "content": "partial"}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}
+        });
+        let out = convert_response(&resp, "openai", "responses", "gpt-5");
+        assert_eq!(out["status"], "incomplete");
+        assert_eq!(out["incomplete_details"]["reason"], "max_output_tokens");
+
+        // content_filter 同理;正常 stop 仍是 completed 且 incomplete_details 为 null
+        let mut resp_cf = resp.clone();
+        resp_cf["choices"][0]["finish_reason"] = json!("content_filter");
+        let out = convert_response(&resp_cf, "openai", "responses", "gpt-5");
+        assert_eq!(out["status"], "incomplete");
+        assert_eq!(out["incomplete_details"]["reason"], "content_filter");
+
+        let mut resp_ok = resp.clone();
+        resp_ok["choices"][0]["finish_reason"] = json!("stop");
+        let out = convert_response(&resp_ok, "openai", "responses", "gpt-5");
+        assert_eq!(out["status"], "completed");
+        assert!(out["incomplete_details"].is_null());
+    }
+
+    #[test]
+    fn stream_openai_to_responses_incomplete_on_length() {
+        let mut c = StreamConverter::new("responses", "openai", "m");
+        c.push(&sse(r#"{"choices":[{"delta":{"content":"partial"}}]}"#));
+        c.push(&sse(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#));
+        let outs = c.push(&sse("[DONE]"));
+        let last: Value = serde_json::from_str(&outs.last().unwrap().data).unwrap();
+        assert_eq!(last["type"], "response.incomplete");
+        assert_eq!(outs.last().unwrap().event.as_deref(), Some("response.incomplete"));
+        assert_eq!(last["response"]["status"], "incomplete");
+        assert_eq!(
+            last["response"]["incomplete_details"]["reason"],
+            "max_output_tokens"
+        );
+    }
+
+    #[test]
+    fn usage_extraction_nonstandard_openai_not_misread_as_responses() {
+        // 非标 OpenAI:缺 prompt_tokens/input_tokens 但带 total_tokens,
+        // 不得误入 Responses 分支把输入读成 0 并照单全收 total;
+        // 按 Anthropic 分支兜底(输入未知按 0,total 由分项推导)。
+        let weird = json!({"usage": {"completion_tokens": 5, "total_tokens": 15}});
+        assert_eq!(extract_usage_any(&weird), (0, 5, 5, 0));
+        let only_total = json!({"usage": {"total_tokens": 10}});
+        assert_eq!(extract_usage_any(&only_total), (0, 0, 0, 0));
+        // 带 input_tokens 的 Responses 形状不受影响
+        let responses = json!({"usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}});
+        assert_eq!(extract_usage_any(&responses), (7, 3, 10, 0));
     }
 }
