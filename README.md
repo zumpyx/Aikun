@@ -7,7 +7,7 @@
 [![Build](https://img.shields.io/github/actions/workflow/status/Zumpyx/aikun/release.yml)](https://github.com/Zumpyx/aikun/actions/workflows/release.yml)
 
 ```
-客户端(OpenAI / Anthropic SDK)──▶ Aikun ──加权选路 / 故障转移──▶ 渠道 A(OpenAI 协议)
+客户端(OpenAI / Anthropic SDK)──▶ Aikun ──固定渠道 / 失败再切换──▶ 渠道 A(OpenAI 协议)
                                       │                       ──▶ 渠道 B(Anthropic 协议)
                                       └── 协议自动双向转换 ──────▶ 渠道 C(Socks5 代理)
 ```
@@ -15,13 +15,33 @@
 ## 特性
 
 - **多协议接入**:同时暴露 OpenAI(`/v1/chat/completions`)、OpenAI Responses(`/v1/responses`,可用于 codex)与 Anthropic(`/v1/messages`)兼容端点。请求在网关内部自动转换为渠道的原生协议,双向转换覆盖流式、工具调用与图片;embeddings / moderations / images / rerank 端点按模型选路字节级透传(仅 openai 协议渠道,无协议转换)
-- **多渠道聚合**:同一模型可挂多个渠道,按延迟、优先级、权重、健康度加权选路;失败自动故障转移,连续失败或凭证失效(401/403)自动禁用渠道;支持按 API Key 批量添加(每行一个 key 各建一个渠道,保留 key↔账号 1:1 对应,重复 key 按哈希自动拒绝)
+- **多渠道聚合**:同一模型可挂多个渠道。第一次按延迟、优先级、权重、健康度加权选路,之后同一把 API Key 请求同一个模型会固定走这个渠道(上游提示缓存按渠道分开,中途换渠道等于缓存作废);这个渠道失败、不健康或解不开密钥时才切换,切换成功后改钉到新渠道。连续失败或凭证失效(401/403)自动禁用渠道;支持按 API Key 批量添加(每行一个 key 各建一个渠道,保留 key↔账号 1:1 对应,重复 key 按哈希自动拒绝)
 - **渠道级代理**:每个渠道可单独配置 Socks5 / HTTP 代理,并可一键创建渠道副本,方便管理同渠道的多个账号
-- **计费与兑换码**:按模型价格表实时计费(整数微元记账,无浮点漂移);余额不足即 402 拒绝请求;管理员可批量生成兑换码,用户在钱包页自助充值
+- **计费与兑换码**:按模型价格表实时计费(整数微元记账,无浮点漂移);余额不足即 402 拒绝请求;管理员可批量生成兑换码,用户在钱包页自助充值,并查看当前在售模型的只读价格
 - **Key 限额**:每把 API Key 可独立配置每分钟请求数、每日 Token 额度与并发请求上限
 - **健康观测**:渠道健康检查(默认每 30 秒 ping 一次)+ 模型级测试矩阵(每 30 分钟自动探测,绿/红/灰小方格一目了然),也可手动单点测试或一键全测
 - **轻量稳定**:Rust 编写,单二进制内嵌管理前端与 SQLite,无外部服务依赖;musl 静态编译,解压即跑
 - **安全默认**:API Key 哈希存储(明文仅在创建时展示一次)、JWT 改密即失效、登录限流、CSP / CORS 白名单、渠道凭证脱敏回显
+
+## 预设渠道
+
+添加渠道时点一下名称即可，不用填地址，贴上 API Key 就行。模型列表会用这把 Key 向该平台实时拉取。
+
+<table>
+  <tr>
+    <td width="360" align="center" valign="top">
+      <a href="https://www.orcarouter.ai"><b>OrcaRouter</b></a>
+      <br />
+      <sub>OpenAI 兼容聚合网关，按上游标价接入多家模型。</sub>
+      <br /><br />
+      <code>https://api.orcarouter.ai</code>
+      <br />
+      <a href="https://docs.orcarouter.ai">文档</a> · <a href="https://www.orcarouter.ai/zh-CN/built-with">案例</a>
+    </td>
+  </tr>
+</table>
+
+选「自定义」时仍可手填任意 Base URL。
 
 ## 快速开始
 
@@ -151,11 +171,11 @@ curl http://localhost:3000/v1/responses \
 
 渠道勾选 `Responses` 支持协议时按原生透传(复用该渠道的 OpenAI Base URL,保留 reasoning 等 responses 专有特性);未勾选时自动降级为协议转换——openai 渠道转成 `/chat/completions`,anthropic 渠道经组合转换承接。
 
-**协议转换边界**:跨协议转换时部分对方协议特有的字段会被静默丢弃——OpenAI→Anthropic 丢 `response_format`/`logit_bias`/`n`/`seed`/两个 penalty,`max_tokens` 缺省 4096(长输出需显式设置);Anthropic→OpenAI 丢 `thinking`/`cache_control`/`top_k`/`metadata`;`reasoning_content`(推理流)双向均不转发;Responses→chat/completions 丢 `store`/`include`/`reasoning`/`previous_response_id` 与 `web_search` 等内置工具。客户端与渠道同协议时不存在此问题。
+**协议转换边界**:跨协议转换时部分对方协议特有的字段会被静默丢弃——OpenAI→Anthropic 丢 `response_format`/`logit_bias`/`n`/`seed`/两个 penalty,`max_tokens` 缺省 4096(长输出需显式设置);Anthropic→OpenAI 丢 `top_k`/`metadata`。`reasoning_content` 与 Anthropic 的 `thinking` 块会互相转发(可选的 `reasoning_signature` 一并带上),内容块上的 `cache_control` 会保留;请求体里已经有的 `thinking` 对象原样带到对端,不会根据 `reasoning_effort` 生成 `budget_tokens`。这些是中转站和部分官方兼容接口使用的扩展,官方 `api.openai.com` 遇到不认识的字段可能返回 400。Responses→chat/completions 仍丢 `store`/`include`/`reasoning`/`previous_response_id` 与 `web_search` 等内置工具。客户端与渠道同协议时不转换。
 
 API Key 的 `expires_at` 建议传带时区的 RFC3339;无时区的输入(如 `2026-08-01 12:00`)按 **UTC** 解释。
 
-管理端功能:渠道管理(一键获取模型列表、创建副本、按 key 批量添加)、模型健康矩阵、请求测试(流式/非流式)、API Key 管理(每分钟限流 / 每日额度 / 并发上限)、日志统计、用户管理(仅管理员创建,支持批量)、计费(价格表、余额调账)、兑换码批量生成。
+管理端功能:渠道管理(预设渠道点选名称、只填 Key，模型列表向官方实时拉取；也可自定义 Base URL；一键获取模型列表、创建副本、按 key 批量添加)、模型健康矩阵、请求测试(流式/非流式)、API Key 管理(每分钟限流 / 每日额度 / 并发上限)、日志统计、用户管理(仅管理员创建,支持批量)、计费(价格表、余额调账)、兑换码批量生成。
 
 ## 计费
 
@@ -163,7 +183,7 @@ API Key 的 `expires_at` 建议传带时区的 RFC3339;无时区的输入(如 `2
 - 价格表为空时(全新部署)启动会自动导入一份内置默认价格:源自 [LiteLLM 价格表](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) 的 210 个主流 chat 模型官方刊例价(快照见 `src/default_prices.json`),按汇率 7.2 折算为元;另含一条 `*` 兜底条目(输入 3 / 输出 7 元),快照未收录的模型按此计费。它们是售价基准而非渠道成本价,导入后可在「计费」页修改;只要表中已有任意条目就不会再导入
 - 成功的请求按用量折算费用记入 `request_logs.cost`,并从用户余额中同步扣除(日志与扣费同一事务);无任何价格匹配(兜底条目也被删除)的模型按 0 元记账。金额在库中一律为**整数微元**(1 元 = 1,000,000 微元,单请求费用常小于 1 分,按分取整会让大量请求免费),累加/扣减无浮点漂移;对外 API 与前端展示仍为元
 - 缓存 token 单独计价:每条价格可设可空的缓存价(`cached_price`,元/1M tokens),留空时缓存 token 按输入价计。OpenAI 的 `prompt_tokens` 含命中缓存部分,会按 `prompt_tokens_details.cached_tokens` 拆出;Anthropic 的 `cache_read_input_tokens` 按缓存价、`cache_creation_input_tokens`(写缓存)按输入价计。缓存用量记入 `request_logs.cached_tokens`
-- 余额为用户级。**余额 ≤ 0 时请求在入口被拒绝**(HTTP 402,`insufficient_quota`),充值后自动恢复;在途请求不预留余额,单个请求可能扣成负数(用量先发生、费用后结算,属有意取舍)。充值/扣减由管理员在「用户」页手工调账,流水在「计费」页可查;用户本人在「钱包」页查看余额与近 30 天消费分析(趋势图、模型消费分布)
+- 余额为用户级。**余额 ≤ 0 时请求在入口被拒绝**(HTTP 402,`insufficient_quota`),充值后自动恢复;在途请求不预留余额,单个请求可能扣成负数(用量先发生、费用后结算,属有意取舍)。充值/扣减由管理员在「用户」页手工调账,流水在「计费」页可查;用户本人在「钱包」页查看余额、近 30 天消费分析(趋势图、模型消费分布),以及当前在售模型的只读价格(通配价按具体模型展开;密钥的模型白名单不在这张表里过滤)
 - **兑换码**:管理员在「计费」页批量生成(面值、批次、可选过期时间,库中只存哈希、明文仅生成时可见一次,可禁用未使用码);用户在「钱包」页输入兑换码充值,核销与加余额同一事务,同一用户连续兑换失败 5 次限流 10 分钟
 - 请求明细按 `AIKUN_LOG_RETENTION_DAYS`(默认 30 天)保留;**清理前会按 (用户, 日) 聚合进 `usage_daily` 永久保留**,保留期过后余额仍可对账(Σ充值 − Σ消费)
 

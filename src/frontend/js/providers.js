@@ -1,8 +1,172 @@
 // ============ Providers ============
+
+// 点选即用的渠道。地址写死在这里，用户只填 Key；模型不写死，
+// 用这把 Key 打对方的 /models。顺序即界面顺序，不改变路由优先级。
+const PROVIDER_PRESETS = [
+  {
+    id: 'orcarouter',
+    name: 'OrcaRouter',
+    website_url: 'https://www.orcarouter.ai',
+    docs_url: 'https://docs.orcarouter.ai',
+    protocols: ['openai', 'anthropic', 'responses'],
+    default_protocol: 'openai',
+    openai_base_url: 'https://api.orcarouter.ai',
+    anthropic_base_url: 'https://api.orcarouter.ai',
+    key_placeholder: 'sk-orca-...',
+  },
+  {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    website_url: 'https://platform.deepseek.com',
+    docs_url: 'https://api-docs.deepseek.com/zh-cn/',
+    protocols: ['openai', 'anthropic', 'responses'],
+    default_protocol: 'openai',
+    openai_base_url: 'https://api.deepseek.com',
+    anthropic_base_url: 'https://api.deepseek.com/anthropic',
+    key_placeholder: 'DeepSeek API Key',
+  },
+  {
+    id: 'glm',
+    name: '智谱 GLM',
+    website_url: 'https://bigmodel.cn',
+    docs_url: 'https://docs.bigmodel.cn/cn/api/introduction',
+    protocols: ['openai'],
+    default_protocol: 'openai',
+    openai_base_url: 'https://open.bigmodel.cn/api/paas/v4',
+    anthropic_base_url: '',
+    key_placeholder: '智谱 API Key',
+  },
+  {
+    id: 'minimax',
+    name: 'MiniMax',
+    website_url: 'https://platform.minimaxi.com',
+    docs_url: 'https://platform.minimaxi.com/docs/api-reference/text-chat-openai',
+    protocols: ['openai', 'anthropic', 'responses'],
+    default_protocol: 'openai',
+    openai_base_url: 'https://api.minimaxi.com/v1',
+    anthropic_base_url: 'https://api.minimaxi.com/anthropic',
+    key_placeholder: 'MiniMax API Key',
+  },
+];
+
+function presetByUrls(openaiUrl, anthropicUrl) {
+  const norm = (u) => (u || '').trim().replace(/\/+$/, '').toLowerCase();
+  return PROVIDER_PRESETS.find(p =>
+    norm(p.openai_base_url) === norm(openaiUrl) &&
+    norm(p.anthropic_base_url) === norm(anthropicUrl)
+  ) || null;
+}
+
+// 预设芯片：选中后藏起 Base URL，填入 Key 后自动拉取官方模型列表。
+// 模型框被人手改过之后不再覆盖，避免把挑剩的列表冲掉。
+function installChannelPresets({ prefix, provider, protoBoxes, defaultRadios, syncProtoRows, pullModels }) {
+  const row = document.getElementById(prefix + '-preset-row');
+  const hint = document.getElementById(prefix + '-preset-hint');
+  const urlBlock = document.getElementById(prefix + '-url-block');
+  const nameEl = document.getElementById(prefix + '-name');
+  const webEl = document.getElementById(prefix + '-website');
+  const keyEl = document.getElementById(prefix + '-key') || document.getElementById(prefix + '-keys');
+  const modelsEl = document.getElementById(prefix + '-models');
+  const statusEl = document.getElementById(prefix + '-models-status');
+  const defaultKeyPlaceholder = keyEl ? keyEl.placeholder : '';
+  let selected = provider ? presetByUrls(provider.openai_base_url, provider.anthropic_base_url) : null;
+  let lastAuto = '';
+  let timer = null;
+  let fetchGen = 0;
+
+  const keyValue = () => {
+    if (!keyEl) return '';
+    if (prefix === 'bf') return keyEl.value.split('\n').map(s => s.trim()).filter(Boolean)[0] || '';
+    return keyEl.value.trim();
+  };
+
+  function paint() {
+    const items = PROVIDER_PRESETS.map(p => ({ id: p.id, label: p.name }))
+      .concat([{ id: 'custom', label: '自定义' }]);
+    const activeId = selected ? selected.id : 'custom';
+    row.innerHTML = items.map(it =>
+      `<button type="button" class="preset-chip${it.id === activeId ? ' active' : ''}" data-preset="${esc(it.id)}">${esc(it.label)}</button>`
+    ).join('');
+    row.querySelectorAll('.preset-chip').forEach(btn => {
+      btn.onclick = () => select(btn.dataset.preset, true);
+    });
+  }
+
+  async function runFetch() {
+    if (!modelsEl) return;
+    const cur = modelsEl.value.trim();
+    if (cur && cur !== lastAuto) return;
+    const key = keyValue();
+    if (key.length < 8 && !provider?.id) {
+      if (statusEl && selected) statusEl.textContent = '填入 API Key 后会自动向官方拉取最新模型';
+      return;
+    }
+    if (!key && !provider?.id) return;
+    const gen = ++fetchGen;
+    if (statusEl) statusEl.textContent = '正在从官方获取最新模型…';
+    const r = await pullModels();
+    if (gen !== fetchGen || !modelsEl.isConnected) return;
+    if (modelsEl.value.trim() && modelsEl.value.trim() !== lastAuto) return;
+    if (r.ok && (r.data.models || []).length > 0) {
+      modelsEl.value = r.data.models.join(', ');
+      lastAuto = modelsEl.value.trim();
+      if (statusEl) statusEl.textContent = `已获取 ${r.data.models.length} 个模型（官方当前列表）`;
+    } else if (statusEl) {
+      statusEl.textContent = r.data?.message || r.data?.error || '未能获取模型列表，可点「获取模型列表」重试';
+    }
+  }
+
+  function select(id, fromClick) {
+    selected = id === 'custom' ? null : (PROVIDER_PRESETS.find(p => p.id === id) || null);
+    paint();
+    if (urlBlock) urlBlock.hidden = !!selected;
+    if (!selected) {
+      hint.textContent = '自定义渠道需要填写 Base URL。模型仍可点「获取模型列表」从该地址拉取。';
+      if (keyEl) keyEl.placeholder = defaultKeyPlaceholder;
+      syncProtoRows();
+      return;
+    }
+    hint.innerHTML = `只需填写 API Key，不用写 URL。模型在填入 Key 后自动向官方拉取。 <a href="${esc(selected.docs_url)}" target="_blank" rel="noopener">文档</a>`;
+    if (keyEl) {
+      keyEl.placeholder = prefix === 'bf'
+        ? `${selected.key_placeholder}，每行一个`
+        : selected.key_placeholder;
+    }
+    if (!fromClick) {
+      syncProtoRows();
+      return;
+    }
+    if (nameEl && (!nameEl.value.trim() || PROVIDER_PRESETS.some(p => p.name === nameEl.value.trim()))) {
+      nameEl.value = selected.name;
+    }
+    if (webEl && (!webEl.value.trim() || PROVIDER_PRESETS.some(p => p.website_url === webEl.value.trim()))) {
+      webEl.value = selected.website_url;
+    }
+    document.getElementById(prefix + '-url-openai').value = selected.openai_base_url;
+    document.getElementById(prefix + '-url-anthropic').value = selected.anthropic_base_url;
+    protoBoxes.forEach(b => { b.checked = selected.protocols.includes(b.value); });
+    defaultRadios.forEach(r => { r.checked = r.value === selected.default_protocol; });
+    if (modelsEl) { modelsEl.value = ''; lastAuto = ''; }
+    syncProtoRows();
+    clearTimeout(timer);
+    timer = setTimeout(runFetch, 0);
+  }
+
+  if (keyEl) {
+    keyEl.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(runFetch, 600);
+    });
+  }
+
+  paint();
+  select(selected ? selected.id : 'custom', false);
+}
+
 async function renderProviders(container) {
   container.innerHTML = `
     <div class="card-header">
-      <div class="page-head" style="margin-bottom:0"><h2>渠道管理</h2><p>配置上游渠道、代理与路由策略</p></div>
+      <div class="page-head" style="margin-bottom:0"><h2>渠道管理</h2><p>点选预设渠道后只填 API Key，模型列表向官方实时拉取</p></div>
       <div style="display:flex;gap:8px">
         <button class="btn-outline" id="batch-provider-btn">批量添加</button>
         <button class="btn-primary" id="add-provider-btn">+ 添加渠道</button>
@@ -86,12 +250,17 @@ async function showProviderModal(id) {
   overlay.innerHTML = `
     <div class="modal">
       <h2>${provider ? '编辑渠道' : '添加渠道'}</h2>
+      <div class="form-group">
+        <label>渠道</label>
+        <div class="preset-row" id="pf-preset-row"></div>
+        <p class="preset-hint" id="pf-preset-hint"></p>
+      </div>
       <div class="form-row">
         <div class="form-group"><label>名称</label><input id="pf-name" value="${esc(provider?.name || '')}" placeholder="例如: OpenAI"></div>
         <div class="form-group"><label>备注</label><input id="pf-note" value="${esc(provider?.note || '')}"></div>
       </div>
       <div class="form-group"><label>官网地址</label><input id="pf-website" value="${esc(provider?.website_url || '')}" placeholder="https://..."></div>
-      <div class="form-group">
+      <div class="form-group" id="pf-url-block">
         <div style="display:grid;grid-template-columns:auto auto 1fr;gap:10px 14px;align-items:center">
           <span style="font-size:12.5px;font-weight:600;color:var(--text-2);text-align:center">默认</span>
           <span style="font-size:12.5px;font-weight:600;color:var(--text-2)">API 协议</span>
@@ -110,9 +279,10 @@ async function showProviderModal(id) {
       <div class="form-group"><label>API Key${provider ? '（留空不修改）' : ''}</label><input id="pf-key" value="${esc(provider?.api_key || '')}" placeholder="sk-..." type="password" ${provider ? '' : 'required'}></div>
       <div class="form-group"><label>模型（逗号分隔）</label>
         <div style="display:flex;gap:8px">
-          <input id="pf-models" style="flex:1" value="${esc((provider?.models || []).join(', '))}" placeholder="gpt-4, gpt-3.5-turbo">
+          <input id="pf-models" style="flex:1" value="${esc((provider?.models || []).join(', '))}" placeholder="留空则在填写 Key 后自动获取">
           <button class="btn-outline" id="pf-fetch-models" type="button" style="white-space:nowrap">获取模型列表</button>
         </div>
+        <p class="preset-hint" id="pf-models-status"></p>
       </div>
       <div class="form-row">
         <div class="form-group"><label>优先级</label><input id="pf-priority" type="number" value="${provider?.priority ?? 0}"></div>
@@ -165,6 +335,24 @@ async function showProviderModal(id) {
     const a = document.getElementById('pf-url-anthropic').value.trim();
     return proto === 'anthropic' ? (a || o) : (o || a);
   };
+
+  installChannelPresets({
+    prefix: 'pf',
+    provider,
+    protoBoxes,
+    defaultRadios,
+    syncProtoRows,
+    pullModels: () => {
+      const proto = (defaultRadios.find(r => r.checked && !r.disabled) || {}).value || 'openai';
+      return api('POST', '/api/admin/providers/fetch-models', {
+        base_url: urlFor(proto),
+        api_key: document.getElementById('pf-key').value,
+        protocol: proto,
+        proxy_url: document.getElementById('pf-proxy').value.trim(),
+        provider_id: provider?.id || null,
+      });
+    },
+  });
 
   document.getElementById('pf-cancel').onclick = () => overlay.remove();
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
@@ -275,12 +463,17 @@ function showBatchProviderModal() {
   overlay.innerHTML = `
     <div class="modal">
       <h2>批量添加渠道</h2>
+      <div class="form-group">
+        <label>渠道</label>
+        <div class="preset-row" id="bf-preset-row"></div>
+        <p class="preset-hint" id="bf-preset-hint"></p>
+      </div>
       <div class="form-row">
         <div class="form-group"><label>基础名称(自动编号 -01..)</label><input id="bf-name" placeholder="例如: OpenAI"></div>
         <div class="form-group"><label>备注</label><input id="bf-note"></div>
       </div>
       <div class="form-group"><label>官网地址</label><input id="bf-website" placeholder="https://..."></div>
-      <div class="form-group">
+      <div class="form-group" id="bf-url-block">
         <div style="display:grid;grid-template-columns:auto auto 1fr;gap:10px 14px;align-items:center">
           <span style="font-size:12.5px;font-weight:600;color:var(--text-2);text-align:center">默认</span>
           <span style="font-size:12.5px;font-weight:600;color:var(--text-2)">API 协议</span>
@@ -299,9 +492,10 @@ function showBatchProviderModal() {
       <div class="form-group"><label>API Keys(每行一个,每个 key 建一个渠道)</label><textarea id="bf-keys" style="min-height:96px;font-family:monospace" placeholder="sk-aaa&#10;sk-bbb&#10;sk-ccc"></textarea></div>
       <div class="form-group"><label>模型（逗号分隔）</label>
         <div style="display:flex;gap:8px">
-          <input id="bf-models" style="flex:1" placeholder="gpt-4, gpt-3.5-turbo">
+          <input id="bf-models" style="flex:1" placeholder="留空则在填写 Key 后自动获取">
           <button class="btn-outline" id="bf-fetch-models" type="button" style="white-space:nowrap">获取模型列表</button>
         </div>
+        <p class="preset-hint" id="bf-models-status"></p>
       </div>
       <div class="form-row">
         <div class="form-group"><label>优先级</label><input id="bf-priority" type="number" value="0"></div>
@@ -348,6 +542,24 @@ function showBatchProviderModal() {
     return proto === 'anthropic' ? (a || o) : (o || a);
   };
   const firstKey = () => document.getElementById('bf-keys').value.split('\n').map(s => s.trim()).filter(Boolean)[0] || '';
+
+  installChannelPresets({
+    prefix: 'bf',
+    provider: null,
+    protoBoxes,
+    defaultRadios,
+    syncProtoRows,
+    pullModels: () => {
+      const proto = (defaultRadios.find(r => r.checked && !r.disabled) || {}).value || 'openai';
+      return api('POST', '/api/admin/providers/fetch-models', {
+        base_url: urlFor(proto),
+        api_key: firstKey(),
+        protocol: proto,
+        proxy_url: document.getElementById('bf-proxy').value.trim(),
+        provider_id: null,
+      });
+    },
+  });
 
   document.getElementById('bf-cancel').onclick = () => overlay.remove();
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };

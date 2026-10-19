@@ -287,6 +287,17 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
+        -- 渠道亲和:同一把 API Key 请求同一个模型时固定走上次成功的渠道,
+        -- 让上游提示缓存不必因为换渠道而失效。渠道失败后由选路改钉。
+        -- 不设外键:渠道删除后残留行在选路时对不上候选,自然失效。
+        CREATE TABLE IF NOT EXISTS channel_affinity (
+            api_key_id  TEXT NOT NULL,
+            model       TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (api_key_id, model)
+        );
+
         -- 管理员手工调账流水(充值/扣减);请求扣费不逐条写这里,
         -- 计费明细以 request_logs.cost 为准。
         CREATE TABLE IF NOT EXISTS billing_transactions (
@@ -476,6 +487,17 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // 渠道 key 的 sha256,用于跨批次重复检测(密文随机 nonce 无法比对);
     // 存量行的回填在 migrate_provider_key_hashes(需要 cipher,在 DbPool::new)。
     ensure_column(conn, "providers", "key_hash", "TEXT NOT NULL DEFAULT ''")?;
+    // 渠道亲和表:旧库没有这张表。只加表、不升 SCHEMA_VERSION——旧二进制
+    // 会忽略未知表,新二进制在这里补齐。
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS channel_affinity (
+            api_key_id  TEXT NOT NULL,
+            model       TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (api_key_id, model)
+        );",
+    )?;
     // 记录 schema 版本(降级闸门;见 create_connection 的 SCHEMA_VERSION)。
     conn.execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION))?;
     Ok(())

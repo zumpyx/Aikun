@@ -168,6 +168,7 @@ async fn main() {
         .route("/api/logs/stats", get(api::logs::log_stats))
         .route("/api/wallet", get(api::logs::wallet_stats))
         .route("/api/wallet/redeem", post(api::redemption::redeem_code))
+        .route("/api/prices", get(api::admin::billing::list_public_prices))
         .route("/v1/chat/completions", post(api::proxy::chat::chat_completion))
         .route("/v1/messages", post(api::proxy::messages::messages))
         .route("/v1/responses", post(api::proxy::responses::responses))

@@ -224,6 +224,20 @@ fn responses_content_to_openai_parts(content: &Value) -> Vec<Value> {
     }
 }
 
+/// Anthropic / 中转站用的 cache_control 是对象。其它形状不转发。
+fn cache_control_of(v: &Value) -> Option<&Value> {
+    v.get("cache_control").filter(|c| c.is_object())
+}
+
+fn with_cache_control(mut block: Value, src: &Value) -> Value {
+    if let Some(cc) = cache_control_of(src) {
+        if let Some(obj) = block.as_object_mut() {
+            obj.insert("cache_control".into(), cc.clone());
+        }
+    }
+    block
+}
+
 fn openai_content_to_anthropic_blocks(content: &Value) -> Vec<Value> {
     match content {
         Value::String(s) => {
@@ -236,13 +250,16 @@ fn openai_content_to_anthropic_blocks(content: &Value) -> Vec<Value> {
         Value::Array(parts) => parts
             .iter()
             .filter_map(|p| match p["type"].as_str() {
-                Some("text") => Some(json!({"type": "text", "text": p["text"].as_str().unwrap_or("")})),
+                Some("text") => Some(with_cache_control(
+                    json!({"type": "text", "text": p["text"].as_str().unwrap_or("")}),
+                    p,
+                )),
                 Some("image_url") => {
                     let url = p["image_url"]["url"]
                         .as_str()
                         .or_else(|| p["image_url"].as_str())
                         .unwrap_or("");
-                    Some(openai_image_to_anthropic(url))
+                    Some(with_cache_control(openai_image_to_anthropic(url), p))
                 }
                 _ => None,
             })
@@ -296,6 +313,12 @@ fn openai_req_to_anthropic(body: &Value) -> Value {
             out.insert(key.into(), body[key].clone());
         }
     }
+    // 请求体里已经带了 thinking 对象就原样转发。不从 reasoning_effort
+    // 去编 budget_tokens:两边的思考预算不是同一个字段。
+    if body["thinking"].is_object() {
+        out.insert("thinking".into(), body["thinking"].clone());
+    }
+
     // stop → stop_sequences
     match &body["stop"] {
         Value::String(s) => {
@@ -353,7 +376,15 @@ fn openai_req_to_anthropic(body: &Value) -> Value {
     }
 
     // messages
-    let mut system_texts: Vec<String> = Vec::new();
+    // 没有 cache_control 时 system 仍拼成一个字符串(与旧行为一致)。
+    // 任一块带了 cache_control 才改成 Anthropic 的 text block 数组,否则
+    // 标记会在拼接时丢掉。
+    enum SystemPiece {
+        Text(String),
+        Blocks(Vec<Value>),
+    }
+    let mut system_pieces: Vec<SystemPiece> = Vec::new();
+    let mut system_has_cache = false;
     let mut messages: Vec<Value> = Vec::new();
 
     let mut push_blocks = |role: &str, blocks: Vec<Value>| {
@@ -377,9 +408,37 @@ fn openai_req_to_anthropic(body: &Value) -> Value {
         for msg in msgs {
             match msg["role"].as_str().unwrap_or("") {
                 "system" | "developer" => {
-                    let text = openai_content_text(&msg["content"]);
-                    if !text.is_empty() {
-                        system_texts.push(text);
+                    if let Some(parts) = msg["content"].as_array() {
+                        if parts.iter().any(|p| cache_control_of(p).is_some()) {
+                            system_has_cache = true;
+                            let blocks: Vec<Value> = parts
+                                .iter()
+                                .filter(|p| p["type"].as_str() == Some("text"))
+                                .filter_map(|p| {
+                                    let text = p["text"].as_str().unwrap_or("");
+                                    if text.is_empty() && cache_control_of(p).is_none() {
+                                        return None;
+                                    }
+                                    Some(with_cache_control(
+                                        json!({"type": "text", "text": text}),
+                                        p,
+                                    ))
+                                })
+                                .collect();
+                            if !blocks.is_empty() {
+                                system_pieces.push(SystemPiece::Blocks(blocks));
+                            }
+                        } else {
+                            let text = openai_content_text(&msg["content"]);
+                            if !text.is_empty() {
+                                system_pieces.push(SystemPiece::Text(text));
+                            }
+                        }
+                    } else {
+                        let text = openai_content_text(&msg["content"]);
+                        if !text.is_empty() {
+                            system_pieces.push(SystemPiece::Text(text));
+                        }
                     }
                 }
                 "user" => {
@@ -387,7 +446,20 @@ fn openai_req_to_anthropic(body: &Value) -> Value {
                     push_blocks("user", blocks);
                 }
                 "assistant" => {
-                    let mut blocks = openai_content_to_anthropic_blocks(&msg["content"]);
+                    let mut blocks = Vec::new();
+                    if let Some(reasoning) = msg["reasoning_content"].as_str() {
+                        if !reasoning.is_empty() {
+                            let mut thinking = json!({"type": "thinking", "thinking": reasoning});
+                            if let Some(sig) = msg["reasoning_signature"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                            {
+                                thinking["signature"] = json!(sig);
+                            }
+                            blocks.push(thinking);
+                        }
+                    }
+                    blocks.extend(openai_content_to_anthropic_blocks(&msg["content"]));
                     if let Some(tcs) = msg["tool_calls"].as_array() {
                         for tc in tcs {
                             let input = tc["function"]["arguments"]
@@ -420,8 +492,30 @@ fn openai_req_to_anthropic(body: &Value) -> Value {
         }
     }
 
-    if !system_texts.is_empty() {
-        out.insert("system".into(), json!(system_texts.join("\n")));
+    if system_has_cache {
+        let mut blocks = Vec::new();
+        for piece in system_pieces {
+            match piece {
+                SystemPiece::Text(text) => {
+                    blocks.push(json!({"type": "text", "text": text}));
+                }
+                SystemPiece::Blocks(more) => blocks.extend(more),
+            }
+        }
+        if !blocks.is_empty() {
+            out.insert("system".into(), json!(blocks));
+        }
+    } else {
+        let texts: Vec<String> = system_pieces
+            .into_iter()
+            .filter_map(|piece| match piece {
+                SystemPiece::Text(text) => Some(text),
+                SystemPiece::Blocks(_) => None,
+            })
+            .collect();
+        if !texts.is_empty() {
+            out.insert("system".into(), json!(texts.join("\n")));
+        }
     }
     out.insert("messages".into(), json!(messages));
 
@@ -432,7 +526,10 @@ fn anthropic_content_to_openai_parts(blocks: &[Value]) -> Vec<Value> {
     blocks
         .iter()
         .filter_map(|b| match b["type"].as_str() {
-            Some("text") => Some(json!({"type": "text", "text": b["text"].as_str().unwrap_or("")})),
+            Some("text") => Some(with_cache_control(
+                json!({"type": "text", "text": b["text"].as_str().unwrap_or("")}),
+                b,
+            )),
             Some("image") => {
                 let src = &b["source"];
                 let url = match src["type"].as_str() {
@@ -443,11 +540,26 @@ fn anthropic_content_to_openai_parts(blocks: &[Value]) -> Vec<Value> {
                     ),
                     _ => src["url"].as_str().unwrap_or("").to_string(),
                 };
-                Some(json!({"type": "image_url", "image_url": {"url": url}}))
+                Some(with_cache_control(
+                    json!({"type": "image_url", "image_url": {"url": url}}),
+                    b,
+                ))
             }
             _ => None,
         })
         .collect()
+}
+
+/// 单个纯文本、且没有 cache_control 时折成字符串;有标记就必须留在 part 上。
+fn collapse_openai_content(parts: Vec<Value>) -> Value {
+    if parts.len() == 1
+        && parts[0]["type"].as_str() == Some("text")
+        && cache_control_of(&parts[0]).is_none()
+    {
+        parts[0]["text"].clone()
+    } else {
+        json!(parts)
+    }
 }
 
 fn anthropic_req_to_openai(body: &Value) -> Value {
@@ -473,6 +585,11 @@ fn anthropic_req_to_openai(body: &Value) -> Value {
     }
     if let Some(stop) = body["stop_sequences"].as_array() {
         out.insert("stop".into(), json!(stop));
+    }
+    // 已有的 thinking 对象原样带上(DeepSeek 等接受 {"type":"enabled"})。
+    // 不把 budget_tokens 翻译成 reasoning_effort。
+    if body["thinking"].is_object() {
+        out.insert("thinking".into(), body["thinking"].clone());
     }
 
     // tools
@@ -521,14 +638,21 @@ fn anthropic_req_to_openai(body: &Value) -> Value {
             messages.push(json!({"role": "system", "content": s}));
         }
         Value::Array(blocks) => {
-            let text: String = blocks
-                .iter()
-                .filter(|b| b["type"].as_str() == Some("text"))
-                .filter_map(|b| b["text"].as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !text.is_empty() {
-                messages.push(json!({"role": "system", "content": text}));
+            if blocks.iter().any(|b| cache_control_of(b).is_some()) {
+                let parts = anthropic_content_to_openai_parts(blocks);
+                if !parts.is_empty() {
+                    messages.push(json!({"role": "system", "content": parts}));
+                }
+            } else {
+                let text: String = blocks
+                    .iter()
+                    .filter(|b| b["type"].as_str() == Some("text"))
+                    .filter_map(|b| b["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    messages.push(json!({"role": "system", "content": text}));
+                }
             }
         }
         _ => {}
@@ -572,14 +696,10 @@ fn anthropic_req_to_openai(body: &Value) -> Value {
                         &regular.into_iter().cloned().collect::<Vec<_>>(),
                     );
                     if !parts.is_empty() {
-                        // Single text part collapses to a plain string.
-                        if parts.len() == 1 && parts[0]["type"].as_str() == Some("text") {
-                            messages.push(
-                                json!({"role": "user", "content": parts[0]["text"].clone()}),
-                            );
-                        } else {
-                            messages.push(json!({"role": "user", "content": parts}));
-                        }
+                        messages.push(json!({
+                            "role": "user",
+                            "content": collapse_openai_content(parts),
+                        }));
                     }
                 }
                 "assistant" => {
@@ -589,6 +709,18 @@ fn anthropic_req_to_openai(body: &Value) -> Value {
                         .filter_map(|b| b["text"].as_str())
                         .collect::<Vec<_>>()
                         .join("");
+                    let reasoning_parts: Vec<&str> = blocks
+                        .iter()
+                        .filter(|b| b["type"].as_str() == Some("thinking"))
+                        .filter_map(|b| b["thinking"].as_str())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    let signatures: Vec<&str> = blocks
+                        .iter()
+                        .filter(|b| b["type"].as_str() == Some("thinking"))
+                        .filter_map(|b| b["signature"].as_str())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                     let tool_calls: Vec<Value> = blocks
                         .iter()
                         .filter(|b| b["type"].as_str() == Some("tool_use"))
@@ -606,6 +738,16 @@ fn anthropic_req_to_openai(body: &Value) -> Value {
                     let mut m = Map::new();
                     m.insert("role".into(), json!("assistant"));
                     m.insert("content".into(), json!(text));
+                    if !reasoning_parts.is_empty() {
+                        m.insert(
+                            "reasoning_content".into(),
+                            json!(reasoning_parts.join("")),
+                        );
+                    }
+                    // 多块思考各带签名时无法合成一个,宁可不带也不要贴错。
+                    if signatures.len() == 1 {
+                        m.insert("reasoning_signature".into(), json!(signatures[0]));
+                    }
                     if !tool_calls.is_empty() {
                         m.insert("tool_calls".into(), json!(tool_calls));
                     }
@@ -709,12 +851,14 @@ pub fn valid_response_shape(resp: &Value, protocol: &str) -> bool {
 
 fn anthropic_resp_to_openai(resp: &Value, model: &str) -> Value {
     let mut text = String::new();
+    let mut reasoning = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
 
     if let Some(blocks) = resp["content"].as_array() {
         for b in blocks {
             match b["type"].as_str() {
                 Some("text") => text.push_str(b["text"].as_str().unwrap_or("")),
+                Some("thinking") => reasoning.push_str(b["thinking"].as_str().unwrap_or("")),
                 Some("tool_use") => tool_calls.push(json!({
                     "id": b["id"],
                     "type": "function",
@@ -743,6 +887,9 @@ fn anthropic_resp_to_openai(resp: &Value, model: &str) -> Value {
     let mut message = Map::new();
     message.insert("role".into(), json!("assistant"));
     message.insert("content".into(), json!(text));
+    if !reasoning.is_empty() {
+        message.insert("reasoning_content".into(), json!(reasoning));
+    }
     if !tool_calls.is_empty() {
         message.insert("tool_calls".into(), json!(tool_calls));
     }
@@ -781,6 +928,18 @@ fn openai_resp_to_anthropic(resp: &Value) -> Value {
     let message = &choice["message"];
 
     let mut blocks: Vec<Value> = Vec::new();
+    if let Some(reasoning) = message["reasoning_content"].as_str() {
+        if !reasoning.is_empty() {
+            let mut thinking = json!({"type": "thinking", "thinking": reasoning});
+            if let Some(sig) = message["reasoning_signature"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+            {
+                thinking["signature"] = json!(sig);
+            }
+            blocks.push(thinking);
+        }
+    }
     if let Some(text) = message["content"].as_str() {
         if !text.is_empty() {
             blocks.push(json!({"type": "text", "text": text}));
@@ -1273,6 +1432,9 @@ pub struct OaStreamState {
     finished: bool,
     next_block: usize,
     text_block: Option<usize>,
+    /// 当前打开的 thinking 块。推理增量通常在正文之前到达,正文或工具
+    /// 开始前由 close_open_block 关掉。
+    thinking_block: Option<usize>,
     tool_blocks: HashMap<u64, usize>,
     open_tool_block: Option<usize>,
     stop_reason: Option<&'static str>,
@@ -1288,6 +1450,7 @@ impl OaStreamState {
             finished: false,
             next_block: 0,
             text_block: None,
+            thinking_block: None,
             tool_blocks: HashMap::new(),
             open_tool_block: None,
             stop_reason: None,
@@ -1360,6 +1523,20 @@ impl OaStreamState {
             for choice in choices {
                 let delta = &choice["delta"];
 
+                if let Some(text) = delta["reasoning_content"].as_str() {
+                    if !text.is_empty() {
+                        let idx = self.ensure_thinking_block(&mut out);
+                        out.push(SseOut::json(
+                            "content_block_delta",
+                            json!({
+                                "type": "content_block_delta",
+                                "index": idx,
+                                "delta": {"type": "thinking_delta", "thinking": text},
+                            }),
+                        ));
+                    }
+                }
+
                 if let Some(text) = delta["content"].as_str() {
                     if !text.is_empty() {
                         let idx = self.ensure_text_block(&mut out);
@@ -1423,6 +1600,25 @@ impl OaStreamState {
         out
     }
 
+    fn ensure_thinking_block(&mut self, out: &mut Vec<SseOut>) -> usize {
+        if let Some(idx) = self.thinking_block {
+            return idx;
+        }
+        self.close_open_block(out);
+        let idx = self.next_block;
+        self.next_block += 1;
+        self.thinking_block = Some(idx);
+        out.push(SseOut::json(
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": idx,
+                "content_block": {"type": "thinking", "thinking": ""},
+            }),
+        ));
+        idx
+    }
+
     fn ensure_text_block(&mut self, out: &mut Vec<SseOut>) -> usize {
         if let Some(idx) = self.text_block {
             return idx;
@@ -1446,8 +1642,18 @@ impl OaStreamState {
     /// 关闭当前打开的块（文本或 tool_use）。任何新块开启前必须先调用，
     /// 否则违反 Anthropic 的 content_block_start/stop 顺序约束。
     fn close_open_block(&mut self, out: &mut Vec<SseOut>) {
+        self.close_thinking_block(out);
         self.close_text_block(out);
         if let Some(idx) = self.open_tool_block.take() {
+            out.push(SseOut::json(
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": idx}),
+            ));
+        }
+    }
+
+    fn close_thinking_block(&mut self, out: &mut Vec<SseOut>) {
+        if let Some(idx) = self.thinking_block.take() {
             out.push(SseOut::json(
                 "content_block_stop",
                 json!({"type": "content_block_stop", "index": idx}),
@@ -1623,6 +1829,16 @@ impl AnStreamState {
                             vec![self.chunk(json!({"content": text}), None, None)]
                         }
                     }
+                    Some("thinking_delta") => {
+                        let text = delta["thinking"].as_str().unwrap_or("");
+                        if text.is_empty() {
+                            vec![]
+                        } else {
+                            vec![self.chunk(json!({"reasoning_content": text}), None, None)]
+                        }
+                    }
+                    // signature 没有 OpenAI 对应增量,丢掉即可。
+                    Some("signature_delta") => vec![],
                     Some("input_json_delta") => {
                         let tc_index = *self.block_to_tc.get(&index).unwrap_or(&0);
                         vec![self.chunk(
@@ -2224,6 +2440,61 @@ mod tests {
         assert_eq!(msgs[2]["tool_calls"][0]["function"]["arguments"], "{\"a\":1}");
     }
 
+    #[test]
+    fn request_openai_to_anthropic_keeps_reasoning_and_cache_control() {
+        let body = json!({
+            "model": "m",
+            "thinking": {"type": "enabled"},
+            "messages": [
+                {"role": "system", "content": [
+                    {"type": "text", "text": "rules", "cache_control": {"type": "ephemeral"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}
+                ]},
+                {"role": "assistant", "content": "answer", "reasoning_content": "because", "reasoning_signature": "sig"}
+            ]
+        });
+        let out = convert_request(&body, "openai", "anthropic");
+        assert_eq!(out["thinking"], json!({"type": "enabled"}));
+        assert_eq!(out["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(out["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(out["messages"][1]["content"][0]["type"], "thinking");
+        assert_eq!(out["messages"][1]["content"][0]["thinking"], "because");
+        assert_eq!(out["messages"][1]["content"][0]["signature"], "sig");
+        assert_eq!(out["messages"][1]["content"][1]["text"], "answer");
+        // 不从 reasoning_effort 编造 budget_tokens
+        assert!(out.get("budget_tokens").is_none());
+    }
+
+    #[test]
+    fn request_anthropic_to_openai_keeps_thinking_and_cache_control() {
+        let body = json!({
+            "model": "m",
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "system": [
+                {"type": "text", "text": "rules", "cache_control": {"type": "ephemeral"}}
+            ],
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "because", "signature": "sig"},
+                    {"type": "text", "text": "answer"}
+                ]}
+            ]
+        });
+        let out = convert_request(&body, "anthropic", "openai");
+        assert_eq!(out["thinking"]["budget_tokens"], 1024);
+        let msgs = out["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(msgs[1]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(msgs[2]["reasoning_content"], "because");
+        assert_eq!(msgs[2]["reasoning_signature"], "sig");
+        assert_eq!(msgs[2]["content"], "answer");
+    }
+
     // ---- convert_response ----
 
     #[test]
@@ -2260,6 +2531,30 @@ mod tests {
         assert_eq!(choice["message"]["tool_calls"][0]["function"]["name"], "f");
         assert_eq!(choice["finish_reason"], "tool_calls"); // tool_use → tool_calls
         assert_eq!(out["usage"]["total_tokens"], 15);
+    }
+
+    #[test]
+    fn response_reasoning_round_trip() {
+        let oa = json!({
+            "id": "chatcmpl-1",
+            "model": "m",
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "ans",
+                "reasoning_content": "think",
+                "reasoning_signature": "sig"
+            }, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        });
+        let an = convert_response(&oa, "openai", "anthropic", "m");
+        assert_eq!(an["content"][0]["type"], "thinking");
+        assert_eq!(an["content"][0]["thinking"], "think");
+        assert_eq!(an["content"][0]["signature"], "sig");
+        assert_eq!(an["content"][1]["text"], "ans");
+
+        let back = convert_response(&an, "anthropic", "openai", "m");
+        assert_eq!(back["choices"][0]["message"]["reasoning_content"], "think");
+        assert_eq!(back["choices"][0]["message"]["content"], "ans");
     }
 
     #[test]
@@ -2615,6 +2910,56 @@ mod tests {
         let outs = c.finish();
         assert_eq!(outs.len(), 1);
         assert_eq!(outs[0].data, "[DONE]");
+    }
+
+    #[test]
+    fn stream_openai_to_anthropic_reasoning_before_text() {
+        let mut c = StreamConverter::new("anthropic", "openai", "m");
+        let outs = c.push(&sse(
+            r#"{"choices":[{"delta":{"reasoning_content":"think"}}]}"#,
+        ));
+        assert_eq!(
+            out_types(&outs),
+            vec!["message_start", "content_block_start", "content_block_delta"]
+        );
+        let start: Value = serde_json::from_str(&outs[1].data).unwrap();
+        assert_eq!(start["content_block"]["type"], "thinking");
+        let delta: Value = serde_json::from_str(&outs[2].data).unwrap();
+        assert_eq!(delta["delta"]["thinking"], "think");
+
+        let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"ans"}}]}"#));
+        assert_eq!(
+            out_types(&outs),
+            vec!["content_block_stop", "content_block_start", "content_block_delta"]
+        );
+        let start: Value = serde_json::from_str(&outs[1].data).unwrap();
+        assert_eq!(start["content_block"]["type"], "text");
+        assert_eq!(start["index"], 1);
+    }
+
+    #[test]
+    fn stream_anthropic_to_openai_thinking_delta() {
+        let mut c = StreamConverter::new("openai", "anthropic", "m");
+        c.push(&sse_typed(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1}}}"#,
+        ));
+        let outs = c.push(&sse_typed(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+        ));
+        assert!(outs.is_empty());
+        let outs = c.push(&sse_typed(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#,
+        ));
+        let chunk: Value = serde_json::from_str(&outs[0].data).unwrap();
+        assert_eq!(chunk["choices"][0]["delta"]["reasoning_content"], "hmm");
+        let outs = c.push(&sse_typed(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}"#,
+        ));
+        assert!(outs.is_empty());
     }
 
     #[test]

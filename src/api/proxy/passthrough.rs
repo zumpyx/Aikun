@@ -24,7 +24,9 @@ use super::chat::{
 use crate::auth::{AuthContext, Claims};
 use crate::proxy::client::{build_api_url, cached_client};
 use crate::proxy::convert::{extract_usage_any, PROTOCOL_OPENAI};
-use crate::router::selector::{select_provider_async, spawn_record_failure, spawn_record_result};
+use crate::router::selector::{
+    select_provider_async, spawn_pin_channel, spawn_record_failure, spawn_record_result,
+};
 use crate::AppState;
 
 /// 允许透传的路径白名单(/v1/ 之后):都是 body 带 model 的 JSON 端点。
@@ -138,7 +140,14 @@ pub async fn passthrough(
     let mut last_error: Option<(Value, u16)> = None;
 
     for _ in 0..max_attempts {
-        let provider = match select_provider_async(state.pool.clone(), model.clone(), tried.clone()).await {
+        let provider = match select_provider_async(
+            state.pool.clone(),
+            model.clone(),
+            tried.clone(),
+            auth_ctx.api_key_id.clone(),
+        )
+        .await
+        {
             Some(p) => p,
             None => break,
         };
@@ -234,6 +243,12 @@ pub async fn passthrough(
             match read_json_limited(resp).await {
                 Ok(resp_body) => {
                     spawn_record_result(state.pool.clone(), provider.id.clone(), latency, true);
+                    spawn_pin_channel(
+                        state.pool.clone(),
+                        auth_ctx.api_key_id.clone(),
+                        model.clone(),
+                        provider.id.clone(),
+                    );
                     // 有 usage 计费,无 usage(images/moderations)0 元记账;
                     // 计费级:响应返回前日志与扣费已落库(await)。
                     let (p, c, t, k) = extract_usage_any(&resp_body);

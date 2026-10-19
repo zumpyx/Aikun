@@ -2014,3 +2014,200 @@ async fn passthrough_failover_and_credential_masking() {
     assert_eq!(body["error"]["type"], "upstream_error");
     assert!(!body["error"]["message"].as_str().unwrap().contains("sk-secret"));
 }
+
+fn chat_count(mock: &MockUpstream) -> usize {
+    mock.requests()
+        .iter()
+        .filter(|r| r.path == "/v1/chat/completions")
+        .count()
+}
+
+/// 低分渠道被钉住时必须压过高权重渠道;它返回 500 后改钉到接手的渠道,
+/// 下一次请求不再回头。
+#[tokio::test]
+async fn channel_affinity_sticks_then_repins_after_failure() {
+    let low = MockUpstream::start().await;
+    let high = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_provider(
+        &app.db(),
+        &ProviderSeed {
+            id: "p-low",
+            name: "p-low",
+            protocol: "openai",
+            base_url: &low.base,
+            models: "[\"gpt-4\"]",
+            priority: 1,
+            weight: 1.0,
+            health_status: "degraded",
+            error_rate: 1.0,
+        },
+    );
+    seed_provider(
+        &app.db(),
+        &ProviderSeed {
+            id: "p-high",
+            name: "p-high",
+            protocol: "openai",
+            base_url: &high.base,
+            models: "[\"gpt-4\"]",
+            priority: 100,
+            weight: 1000.0,
+            health_status: "healthy",
+            error_rate: 0.0,
+        },
+    );
+    app.db()
+        .execute(
+            "INSERT INTO channel_affinity (api_key_id, model, provider_id)
+             VALUES ('k-e2e', 'gpt-4', 'p-low')",
+            [],
+        )
+        .unwrap();
+
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(chat_count(&low), 1, "pinned channel must serve the request");
+    assert_eq!(chat_count(&high), 0, "a healthy higher-weight channel must not steal a live pin");
+
+    low.push_json(500, serde_json::json!({"error": "down"}));
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 200, "failure of the pin must fail over");
+    assert_eq!(chat_count(&low), 2);
+    assert_eq!(chat_count(&high), 1);
+
+    wait_until("affinity repinned to the channel that succeeded", WAIT, || {
+        app.db()
+            .query_row(
+                "SELECT provider_id FROM channel_affinity WHERE api_key_id = 'k-e2e' AND model = 'gpt-4'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .as_deref()
+            == Some("p-high")
+    })
+    .await;
+
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(chat_count(&low), 2, "the failed channel must stay unused after repin");
+    assert_eq!(chat_count(&high), 2);
+}
+
+#[tokio::test]
+async fn public_prices_expand_wildcard_for_logged_in_users() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_provider(
+        &app.db(),
+        &ProviderSeed {
+            id: "p1",
+            name: "p1",
+            protocol: "openai",
+            base_url: &mock.base,
+            models: "[\"gpt-4\",\"unpriced-model\"]",
+            priority: 1,
+            weight: 1.0,
+            health_status: "healthy",
+            error_rate: 0.0,
+        },
+    );
+    app.db()
+        .execute(
+            "INSERT INTO model_prices (id, model, prompt_price, completion_price)
+             VALUES ('price-wild', 'gpt-*', 1.0, 2.0), ('price-other', 'other-*', 9.0, 9.0)",
+            [],
+        )
+        .unwrap();
+
+    let anon = app
+        .client()
+        .get(format!("{}/api/prices", app.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), 401);
+
+    let resp = app
+        .client()
+        .get(format!("{}/api/prices", app.base))
+        .bearer_auth(common::admin_jwt())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let rows: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let gpt = rows.iter().find(|r| r["model"] == "gpt-4").expect("gpt-4 offered");
+    assert_eq!(gpt["prompt_price"], 1.0);
+    assert_eq!(gpt["completion_price"], 2.0);
+    assert!(gpt["cached_price"].is_null());
+    let bare = rows.iter().find(|r| r["model"] == "unpriced-model").unwrap();
+    assert!(bare["prompt_price"].is_null());
+    assert!(rows.iter().all(|r| r["model"] != "gpt-*" && r["model"] != "other-*"));
+}
+
+#[tokio::test]
+async fn cross_protocol_keeps_reasoning_and_cache_control() {
+    let mock = MockUpstream::start().await;
+    mock.push_json(
+        200,
+        serde_json::json!({
+            "id": "chatcmpl-mock",
+            "object": "chat.completion",
+            "model": "gpt-4",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "ans",
+                    "reasoning_content": "think",
+                    "reasoning_signature": "sig"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+        }),
+    );
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+
+    let req = app
+        .client()
+        .post(format!("{}/v1/messages", app.base))
+        .header("anthropic-version", "2023-06-01")
+        .json(&serde_json::json!({
+            "model": "gpt-4",
+            "max_tokens": 16,
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "because", "signature": "sig"},
+                    {"type": "text", "text": "earlier"}
+                ]}
+            ]
+        }));
+    let resp = app.auth(req).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["content"][0]["type"], "thinking");
+    assert_eq!(body["content"][0]["thinking"], "think");
+    assert_eq!(body["content"][0]["signature"], "sig");
+    assert_eq!(body["content"][1]["text"], "ans");
+
+    let upstream = mock
+        .requests()
+        .into_iter()
+        .find(|r| r.path == "/v1/chat/completions")
+        .expect("converted request must reach the openai channel");
+    let sent: serde_json::Value = serde_json::from_str(&upstream.body).unwrap();
+    let msgs = sent["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(msgs[1]["reasoning_content"], "because");
+    assert_eq!(msgs[1]["reasoning_signature"], "sig");
+}

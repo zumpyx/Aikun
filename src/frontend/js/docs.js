@@ -11,7 +11,7 @@ function renderApiDocs(container) {
 
     <div class="card">
       <div class="card-header"><h2>AI 代理 — OpenAI 兼容接口</h2></div>
-      <p style="font-size:14px;color:var(--muted);margin-bottom:12px">与 OpenAI API 格式完全兼容，可用任何 OpenAI SDK 直接调用。支持流式（stream: true）。</p>
+      <p style="font-size:14px;color:var(--muted);margin-bottom:12px">与 OpenAI API 格式完全兼容，可用任何 OpenAI SDK 直接调用。支持流式（stream: true）。同一把密钥请求同一个模型时固定走同一个渠道，这个渠道失败后才会切换。</p>
 
       <h3 style="margin:12px 0 8px">Chat Completions</h3>
       <div class="code-block">POST ${baseUrl}/v1/chat/completions
@@ -60,7 +60,7 @@ Content-Type: application/json
     <div class="card">
       <div class="card-header"><h2>AI 代理 — 通用端点透传</h2></div>
       <p style="font-size:14px;color:var(--muted);margin-bottom:12px">
-        chat 之外的 OpenAI 兼容端点按<b>字节级透传</b>:按 <code>model</code> 选路、应用渠道模型映射、
+        chat 之外的 OpenAI 兼容端点按<b>字节级透传</b>:按 <code>model</code> 选路(同一把密钥、同一个模型固定渠道,失败才切换)、应用渠道模型映射、
         替换为渠道凭证原样转发，响应原样回传——<b>不做协议转换</b>,因此只会路由到勾选 openai 协议的渠道。
         响应里有 usage 的（embeddings）按价格表计费；没有的（images/moderations）按 0 元记账，日志照常落库。
       </p>

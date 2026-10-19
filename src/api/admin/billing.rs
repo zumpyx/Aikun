@@ -1,5 +1,7 @@
 //! 计费管理:模型价格表 CRUD、用户余额调账、调账流水查询。
-//! 全部挂 admin_routes(require_admin)。价格单位:每 1M tokens(元)。
+//! 写操作与管理端列表挂 admin_routes(require_admin)。
+//! `list_public_prices` 是登录用户的只读价目,挂在 protected_routes:
+//! 按当前在售模型把通配价展开成具体价格。价格单位:每 1M tokens(元)。
 
 use axum::{
     Json,
@@ -94,6 +96,41 @@ pub async fn list_prices(
         }
         Err(e) => {
             tracing::error!("Failed to list prices: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})))
+        }
+    }
+}
+
+/// 登录用户看到的价目:健康渠道正在提供的模型,以及 `find_price` 会命中的
+/// 单价(精确或通配展开后的结果)。未定价的模型三个价格都是 null,请求按 0 元记账。
+/// 不按某把密钥的模型白名单过滤——这是网关级目录。
+pub async fn list_public_prices(State(state): State<AppState>) -> impl IntoResponse {
+    let pool = state.pool.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let models = crate::router::selector::list_available_models(&pool);
+        let conn = pool.read().lock().map_err(|e| e.to_string())?;
+        let mut rows = Vec::with_capacity(models.len());
+        for model in models {
+            let price = crate::billing::find_price(&conn, &model);
+            rows.push(json!({
+                "model": model,
+                "prompt_price": price.as_ref().map(|p| p.0),
+                "completion_price": price.as_ref().map(|p| p.1),
+                "cached_price": price.as_ref().and_then(|p| p.2),
+            }));
+        }
+        Ok::<Vec<Value>, String>(rows)
+    })
+    .await;
+
+    match joined {
+        Ok(Ok(rows)) => (StatusCode::OK, Json(json!(rows))),
+        Ok(Err(e)) => {
+            tracing::error!("Failed to list public prices: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})))
+        }
+        Err(e) => {
+            tracing::error!("Failed to list public prices: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})))
         }
     }

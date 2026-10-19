@@ -28,7 +28,8 @@ use crate::proxy::convert::{
     PROTOCOL_OPENAI, PROTOCOL_RESPONSES,
 };
 use crate::router::selector::{
-    list_available_models_async, select_provider_async, spawn_record_failure, spawn_record_result,
+    list_available_models_async, select_provider_async, spawn_pin_channel, spawn_record_failure,
+    spawn_record_result,
 };
 use crate::AppState;
 
@@ -398,7 +399,14 @@ async fn attempt_loop(
     let mut last_error: Option<(Value, u16)> = None;
 
     for _ in 0..max_attempts {
-        let provider = match select_provider_async(state.pool.clone(), model.clone(), tried.clone()).await {
+        let provider = match select_provider_async(
+            state.pool.clone(),
+            model.clone(),
+            tried.clone(),
+            api_key_id.clone(),
+        )
+        .await
+        {
             Some(p) => p,
             None => break,
         };
@@ -474,6 +482,12 @@ async fn attempt_loop(
                 match read_json_limited(resp).await {
                     Ok(resp_body) if valid_response_shape(&resp_body, provider_protocol) => {
                         spawn_record_result(state.pool.clone(), provider.id.clone(), latency, true);
+                        spawn_pin_channel(
+                            state.pool.clone(),
+                            api_key_id.clone(),
+                            model.clone(),
+                            provider.id.clone(),
+                        );
                         let (p, c, t, k) = extract_usage_any(&resp_body);
                         // 计费级:响应返回前日志与扣费已落库(await)。
                         request_log_sync(
@@ -561,10 +575,18 @@ async fn attempt_loop(
             }
             // 流式不在此记录成功：流结束时统一记一次 record_request_result /
             // record_failure（中途失败），避免指标重复或自相矛盾。
+            // 渠道亲和在交出 SSE 时就钉上:上游已经接受了这条对话。流中途
+            // 失败也不会改钉,下一次仍先试这个渠道,再失败才换。
             // 客户端是否自己请求了 include_usage:未请求时转发前剥掉
             // 网关注入的 usage chunk。
             let client_wants_usage =
                 body["stream_options"]["include_usage"].as_bool().unwrap_or(false);
+            spawn_pin_channel(
+                state.pool.clone(),
+                api_key_id.clone(),
+                model.clone(),
+                provider.id.clone(),
+            );
             return stream_response(
                 state, resp, client_protocol, provider_protocol,
                 provider.id.clone(), provider.timeout_secs, model, user_id,

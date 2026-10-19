@@ -13,11 +13,14 @@ const fmtWalletCost = n => {
 async function renderWallet(container) {
   const seq = ++walletSeq;
   container.innerHTML = `
-    <div class="page-head"><h2>钱包</h2><p>余额与每日消费分析</p></div>
+    <div class="page-head"><h2>钱包</h2><p>余额、消费与模型价格</p></div>
     <div class="stats-grid" id="wallet-grid"><div class="stat-card"><div class="spinner"></div><div class="label" style="margin-left:10px">加载中...</div></div></div>`;
 
   try {
-    const r = await api('GET', '/api/wallet');
+    const [r, pricesRes] = await Promise.all([
+      api('GET', '/api/wallet'),
+      api('GET', '/api/prices'),
+    ]);
     if (seq !== walletSeq) return; // 已有更新的渲染在进行,丢弃旧响应
     if (!r.ok) {
       container.insertAdjacentHTML('beforeend',
@@ -78,11 +81,41 @@ async function renderWallet(container) {
           <div class="card-header"><h2>模型消费分布</h2><span style="font-size:12.5px;color:var(--muted)">近 30 天</span></div>
           ${renderModelCostBars(w.top_models || [])}
         </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2>模型价格</h2><span style="font-size:12.5px;color:var(--muted)">当前在售模型,只读。密钥若限制了可用模型,实际能调用的是其中一部分</span></div>
+        ${renderPublicPrices(pricesRes)}
       </div>`);
   } catch (e) {
     if (seq !== walletSeq) return;
     container.insertAdjacentHTML('beforeend', '<div class="card"><div class="empty"><p>加载失败: ' + esc(e.message) + '</p></div></div>');
   }
+}
+
+// 只读价目。prompt_price 为 null 表示没有命中任何价格条目,请求按 0 元记账。
+function renderPublicPrices(pricesRes) {
+  if (!pricesRes || !pricesRes.ok || !Array.isArray(pricesRes.data)) {
+    return '<div class="empty"><p>价格加载失败</p></div>';
+  }
+  if (pricesRes.data.length === 0) return '<div class="empty"><p>暂无在售模型</p></div>';
+  const rows = pricesRes.data.map(p => {
+    if (p.prompt_price == null) {
+      return `<tr><td><strong>${esc(p.model)}</strong></td><td colspan="3" style="color:var(--faint)">未定价,按 0 元记账</td></tr>`;
+    }
+    const cached = p.cached_price == null
+      ? '<span style="color:var(--faint)">同输入价</span>'
+      : fmtCost(p.cached_price);
+    return `<tr>
+      <td><strong>${esc(p.model)}</strong></td>
+      <td>${fmtCost(p.prompt_price)}</td>
+      <td>${fmtCost(p.completion_price)}</td>
+      <td>${cached}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>模型</th><th>输入价(元/1M)</th><th>输出价(元/1M)</th><th>缓存价(元/1M)</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
 }
 
 // 纯 SVG 柱状图(与总览页同款手法,无第三方库)。悬停 <title> 显示

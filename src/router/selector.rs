@@ -93,15 +93,68 @@ fn weighted_pick(candidates: &[&Provider]) -> Option<Provider> {
     Some(candidates[candidates.len() - 1].clone())
 }
 
+/// 钉住的渠道还能不能接着用:仍在候选里(调用方已过滤模型与启用状态)、
+/// 密钥解得开、没有被本请求排除、也不是 unhealthy。degraded 仍留下——
+/// 提示缓存比略差的健康分更值钱。
+fn affinity_usable(p: &Provider, exclude: &HashSet<String>) -> bool {
+    p.is_active
+        && p.health_status != "unhealthy"
+        && !p.key_decrypt_failed
+        && !exclude.contains(&p.id)
+}
+
+fn pinned_provider_id(conn: &Connection, api_key_id: &str, model: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT provider_id FROM channel_affinity WHERE api_key_id = ?1 AND model = ?2",
+        params![api_key_id, model],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+/// 把 (API Key, 模型) 钉到这次成功的渠道。下一次同密钥同模型优先走它。
+pub fn pin_channel(pool: &DbPool, api_key_id: &str, model: &str, provider_id: &str) {
+    if api_key_id.is_empty() || model.is_empty() || provider_id.is_empty() {
+        return;
+    }
+    let Ok(conn) = pool.conn.lock() else {
+        return;
+    };
+    let _ = conn.execute(
+        "INSERT INTO channel_affinity (api_key_id, model, provider_id, updated_at)
+         VALUES (?1, ?2, ?3, datetime('now'))
+         ON CONFLICT(api_key_id, model) DO UPDATE SET
+            provider_id = excluded.provider_id,
+            updated_at = datetime('now')",
+        params![api_key_id, model, provider_id],
+    );
+}
+
 /// Select the best provider for a given model, excluding already-tried ones.
-/// Uses weighted random selection from healthy providers, preferring lower latency.
+///
+/// 有 API Key 时先看渠道亲和:同一把密钥、同一个模型尽量一直走上次成功
+/// 的渠道(上游提示缓存按渠道分开,中途换渠道等于缓存作废)。钉住的渠道
+/// 不健康、解不开密钥、不再提供该模型,或已经在本请求的排除集里,才退回
+/// 加权随机。没有 API Key(管理端试请求)不钉。
 pub fn select_provider(
     pool: &DbPool,
     model: &str,
     exclude: &HashSet<String>,
+    api_key_id: Option<&str>,
 ) -> Option<Provider> {
     let conn = pool.read().lock().ok()?;
     let providers = find_providers_for_model(&conn, &pool.cipher, model)?;
+
+    if let Some(key_id) = api_key_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(pinned_id) = pinned_provider_id(&conn, key_id, model) {
+            if let Some(p) = providers
+                .iter()
+                .find(|p| p.id == pinned_id && affinity_usable(p, exclude))
+            {
+                return Some(p.clone());
+            }
+        }
+    }
 
     let mut candidates: Vec<&Provider> = providers
         .iter()
@@ -330,16 +383,34 @@ pub fn record_failure(
 // ---- 异步包装:热路径(每请求的鉴权/选路/记账)不得在 async executor 上
 // 同步持锁访问 SQLite,一律派发到 blocking 线程池(M35)。----
 
-/// select_provider 的异步包装。
+/// select_provider 的异步包装。`api_key_id` 为空时不做渠道亲和。
 pub async fn select_provider_async(
     pool: Arc<DbPool>,
     model: String,
     exclude: HashSet<String>,
+    api_key_id: Option<String>,
 ) -> Option<Provider> {
-    tokio::task::spawn_blocking(move || select_provider(&pool, &model, &exclude))
-        .await
-        .ok()
-        .flatten()
+    tokio::task::spawn_blocking(move || {
+        select_provider(&pool, &model, &exclude, api_key_id.as_deref())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// 成功后改钉渠道。没有 API Key 时什么都不做。
+pub fn spawn_pin_channel(
+    pool: Arc<DbPool>,
+    api_key_id: Option<String>,
+    model: String,
+    provider_id: String,
+) {
+    let Some(key_id) = api_key_id.filter(|s| !s.is_empty()) else {
+        return;
+    };
+    tokio::task::spawn_blocking(move || {
+        pin_channel(&pool, &key_id, &model, &provider_id);
+    });
 }
 
 /// record_request_result 的 fire-and-forget 异步包装。
@@ -583,5 +654,120 @@ mod tests {
         // mapping 的 key(请求侧模型名)也要出现在列表里;空 key 除外
         assert!(models.contains(&"claude-".to_string()));
         assert!(!models.contains(&"".to_string()));
+    }
+
+    fn insert_provider(pool: &crate::db::DbPool, id: &str, models: &str, weight: f64) {
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO providers (id, name, provider_type, openai_base_url, api_key, models, weight)
+                 VALUES (?1, ?1, 'openai', 'http://x', 'k', ?2, ?3)",
+                params![id, models, weight],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn affinity_prefers_pinned_channel_over_higher_weight() {
+        let pool = test_pool();
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET models = '[\"gpt-4\"]', weight = 1 WHERE id = 'p'",
+                [],
+            )
+            .unwrap();
+        insert_provider(&pool, "heavy", "[\"gpt-4\"]", 100.0);
+        pin_channel(&pool, "key-1", "gpt-4", "p");
+
+        let picked = select_provider(&pool, "gpt-4", &HashSet::new(), Some("key-1")).unwrap();
+        assert_eq!(picked.id, "p");
+
+        // 本请求已经失败过的渠道不再钉住,改走别的候选。
+        let mut excluded = HashSet::new();
+        excluded.insert("p".to_string());
+        let picked = select_provider(&pool, "gpt-4", &excluded, Some("key-1")).unwrap();
+        assert_eq!(picked.id, "heavy");
+
+        // 略差(degraded)仍留下:缓存比健康分重要。
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET health_status = 'degraded' WHERE id = 'p'",
+                [],
+            )
+            .unwrap();
+        let picked = select_provider(&pool, "gpt-4", &HashSet::new(), Some("key-1")).unwrap();
+        assert_eq!(picked.id, "p");
+
+        // unhealthy 则放弃这颗钉,改去健康渠道。
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET health_status = 'unhealthy' WHERE id = 'p'",
+                [],
+            )
+            .unwrap();
+        let picked = select_provider(&pool, "gpt-4", &HashSet::new(), Some("key-1")).unwrap();
+        assert_eq!(picked.id, "heavy");
+    }
+
+    #[test]
+    fn affinity_repin_and_ignores_missing_key() {
+        let pool = test_pool();
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET models = '[\"gpt-4\"]' WHERE id = 'p'",
+                [],
+            )
+            .unwrap();
+        insert_provider(&pool, "heavy", "[\"gpt-4\"]", 1.0);
+        pin_channel(&pool, "key-1", "gpt-4", "p");
+        pin_channel(&pool, "key-1", "gpt-4", "heavy");
+        let picked = select_provider(&pool, "gpt-4", &HashSet::new(), Some("key-1")).unwrap();
+        assert_eq!(picked.id, "heavy");
+
+        // 另一把密钥没有钉,不继承 key-1 的渠道。这里只断言函数不 panic,
+        // 具体落到谁由加权随机决定。
+        assert!(select_provider(&pool, "gpt-4", &HashSet::new(), None).is_some());
+        assert!(select_provider(&pool, "gpt-4", &HashSet::new(), Some("")).is_some());
+    }
+
+    #[test]
+    fn affinity_skips_pin_that_no_longer_serves_the_model() {
+        let pool = test_pool();
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE providers SET models = '[]' WHERE id = 'p'", [])
+            .unwrap();
+        insert_provider(&pool, "heavy", "[\"gpt-4\"]", 1.0);
+        pin_channel(&pool, "key-1", "gpt-4", "p");
+        let picked = select_provider(&pool, "gpt-4", &HashSet::new(), Some("key-1")).unwrap();
+        assert_eq!(picked.id, "heavy");
+    }
+
+    #[test]
+    fn affinity_usable_rejects_bad_pin() {
+        let mut p = provider(r#"["gpt-4"]"#, "");
+        let exclude = HashSet::new();
+        assert!(affinity_usable(&p, &exclude));
+        p.health_status = "degraded".into();
+        assert!(affinity_usable(&p, &exclude));
+        p.health_status = "unhealthy".into();
+        assert!(!affinity_usable(&p, &exclude));
+        p.health_status = "healthy".into();
+        p.key_decrypt_failed = true;
+        assert!(!affinity_usable(&p, &exclude));
+        p.key_decrypt_failed = false;
+        let mut exclude = HashSet::new();
+        exclude.insert("p".into());
+        assert!(!affinity_usable(&p, &exclude));
     }
 }
