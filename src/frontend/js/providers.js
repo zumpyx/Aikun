@@ -163,6 +163,29 @@ function installChannelPresets({ prefix, provider, protoBoxes, defaultRadios, sy
   select(selected ? selected.id : 'custom', false);
 }
 
+// 渠道类型(插件)下拉:选项来自后端注册表 /api/admin/channel-kinds。
+// generic 的取值为空串(库里 channel_kind='' 即 generic,编辑时不产生 diff)。
+let CHANNEL_KINDS_CACHE = null;
+async function fillChannelKinds(prefix, current) {
+  const sel = document.getElementById(`${prefix}-kind`);
+  const hint = document.getElementById(`${prefix}-kind-hint`);
+  if (!sel) return;
+  if (!CHANNEL_KINDS_CACHE) {
+    const r = await api('GET', '/api/admin/channel-kinds');
+    CHANNEL_KINDS_CACHE = r.ok && Array.isArray(r.data) ? r.data : [{ kind: 'generic', label: '通用', description: '' }];
+  }
+  const kinds = CHANNEL_KINDS_CACHE;
+  const valueOf = k => (k.kind === 'generic' ? '' : k.kind);
+  sel.innerHTML = kinds.map(k => `<option value="${esc(valueOf(k))}">${esc(k.label)}</option>`).join('');
+  sel.value = current && current !== 'generic' ? current : '';
+  const sync = () => {
+    const k = kinds.find(x => valueOf(x) === sel.value);
+    if (hint) hint.textContent = k ? (k.experimental ? '⚠ ' : '') + (k.description || '') : '';
+  };
+  sel.onchange = sync;
+  sync();
+}
+
 async function renderProviders(container) {
   container.innerHTML = `
     <div class="card-header">
@@ -260,6 +283,7 @@ async function showProviderModal(id) {
         <div class="form-group"><label>备注</label><input id="pf-note" value="${esc(provider?.note || '')}"></div>
       </div>
       <div class="form-group"><label>官网地址</label><input id="pf-website" value="${esc(provider?.website_url || '')}" placeholder="https://..."></div>
+      <div class="form-group"><label>渠道类型(插件)</label><select id="pf-kind"></select><p class="preset-hint" id="pf-kind-hint"></p></div>
       <div class="form-group" id="pf-url-block">
         <div style="display:grid;grid-template-columns:auto auto 1fr;gap:10px 14px;align-items:center">
           <span style="font-size:12.5px;font-weight:600;color:var(--text-2);text-align:center">默认</span>
@@ -349,11 +373,13 @@ async function showProviderModal(id) {
         api_key: document.getElementById('pf-key').value,
         protocol: proto,
         proxy_url: document.getElementById('pf-proxy').value.trim(),
+        channel_kind: document.getElementById('pf-kind').value,
         provider_id: provider?.id || null,
       });
     },
   });
 
+  fillChannelKinds('pf', provider?.channel_kind || '');
   document.getElementById('pf-cancel').onclick = () => overlay.remove();
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 
@@ -370,6 +396,7 @@ async function showProviderModal(id) {
         api_key: document.getElementById('pf-key').value,
         protocol: proto,
         proxy_url: document.getElementById('pf-proxy').value.trim(),
+        channel_kind: document.getElementById('pf-kind').value,
         provider_id: provider?.id || null,
       });
       if (r.ok && (r.data.models || []).length > 0) {
@@ -397,6 +424,7 @@ async function showProviderModal(id) {
       name: document.getElementById('pf-name').value,
       note: document.getElementById('pf-note').value.trim(),
       website_url: document.getElementById('pf-website').value.trim(),
+      channel_kind: document.getElementById('pf-kind').value,
       protocols,
       default_protocol: (defaultRadios.find(r => r.checked && !r.disabled) || {}).value
         || ['openai', 'anthropic'].find(t => protocols.includes(t)) || protocols[0],
@@ -473,6 +501,7 @@ function showBatchProviderModal() {
         <div class="form-group"><label>备注</label><input id="bf-note"></div>
       </div>
       <div class="form-group"><label>官网地址</label><input id="bf-website" placeholder="https://..."></div>
+      <div class="form-group"><label>渠道类型(插件)</label><select id="bf-kind"></select><p class="preset-hint" id="bf-kind-hint"></p></div>
       <div class="form-group" id="bf-url-block">
         <div style="display:grid;grid-template-columns:auto auto 1fr;gap:10px 14px;align-items:center">
           <span style="font-size:12.5px;font-weight:600;color:var(--text-2);text-align:center">默认</span>
@@ -556,11 +585,13 @@ function showBatchProviderModal() {
         api_key: firstKey(),
         protocol: proto,
         proxy_url: document.getElementById('bf-proxy').value.trim(),
+        channel_kind: document.getElementById('bf-kind').value,
         provider_id: null,
       });
     },
   });
 
+  fillChannelKinds('bf', '');
   document.getElementById('bf-cancel').onclick = () => overlay.remove();
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
 
@@ -575,6 +606,7 @@ function showBatchProviderModal() {
         api_key: firstKey(),
         protocol: proto,
         proxy_url: document.getElementById('bf-proxy').value.trim(),
+        channel_kind: document.getElementById('bf-kind').value,
         provider_id: null,
       });
       if (r.ok && (r.data.models || []).length > 0) {
@@ -603,6 +635,7 @@ function showBatchProviderModal() {
       name: document.getElementById('bf-name').value.trim(),
       note: document.getElementById('bf-note').value.trim(),
       website_url: document.getElementById('bf-website').value.trim(),
+      channel_kind: document.getElementById('bf-kind').value,
       protocols,
       default_protocol: (defaultRadios.find(r => r.checked && !r.disabled) || {}).value
         || ['openai', 'anthropic'].find(t => protocols.includes(t)) || protocols[0],

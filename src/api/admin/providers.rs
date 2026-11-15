@@ -25,12 +25,10 @@ pub async fn list_providers(
     };
 
     let mut stmt = match conn.prepare(
-        "SELECT id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models, priority, weight,
-                is_active, health_status, latency_ms, error_rate, last_health_check,
-                max_retries, timeout_secs, created_at, updated_at, proxy_url,
-                model_mapping, consecutive_failures, disabled_reason,
-                protocols, default_protocol, note, website_url
-         FROM providers ORDER BY priority DESC, name ASC"
+        &format!(
+         "SELECT {} FROM providers ORDER BY priority DESC, name ASC",
+         crate::models::PROVIDER_SELECT_COLUMNS
+     )
     ) {
         Ok(s) => s,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"}))),
@@ -42,7 +40,7 @@ pub async fn list_providers(
                 .map(|p| {
                     let mut resp = ProviderResponse::from(p);
                     // proxy_url 可能内嵌凭证，列表响应一律脱敏回显
-                    resp.proxy_url = crate::proxy::client::sanitize_proxy_url(&resp.proxy_url);
+                    resp.proxy_url = crate::channels::transport::sanitize_proxy_url(&resp.proxy_url);
                     resp
                 })
                 .collect(),
@@ -75,6 +73,25 @@ pub fn valid_provider_type(t: &str) -> bool {
 
 /// weight 必须有限且在 0.1..=1000：inf/NaN 会持久化并让选路
 /// random_range panic。
+/// channel_kind:空串(= generic)或已注册的渠道插件类型。
+pub fn valid_channel_kind(k: &str) -> bool {
+    crate::channels::registry().is_valid_kind(k)
+}
+
+fn channel_kind_names() -> String {
+    crate::channels::registry()
+        .list()
+        .iter()
+        .map(|i| i.kind)
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+/// 管理端「渠道类型」下拉:列出全部已注册的渠道插件。
+pub async fn list_channel_kinds() -> impl IntoResponse {
+    (StatusCode::OK, Json(json!(crate::channels::registry().list())))
+}
+
 pub fn valid_weight(w: f64) -> bool {
     w.is_finite() && (0.1..=1000.0).contains(&w)
 }
@@ -203,6 +220,13 @@ fn insert_provider(
         .unwrap_or_else(|_| "{}".to_string());
     let note = req.note.unwrap_or_default().trim().to_string();
     let website_url = req.website_url.unwrap_or_default().trim().to_string();
+    let channel_kind = req.channel_kind.unwrap_or_default().trim().to_string();
+    if !valid_channel_kind(&channel_kind) {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({
+            "error": "invalid_channel_kind",
+            "message": format!("channel_kind 仅支持: {}", channel_kind_names())
+        }))));
+    }
     // 静态加密落库(enc:v1: 前缀),明文只存在于本次请求内存中。
     let encrypted_key = cipher.encrypt(&req.api_key);
     // key 的 sha256 用于重复检测:密文每次随机 nonce 无法比对,哈希可以。
@@ -232,12 +256,12 @@ fn insert_provider(
         "INSERT INTO providers (id, name, provider_type, openai_base_url, anthropic_base_url,
                                 api_key, key_hash, models, priority, weight,
                                 max_retries, timeout_secs, proxy_url, model_mapping,
-                                protocols, default_protocol, note, website_url)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                                protocols, default_protocol, note, website_url, channel_kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![id, name, provider_type, openai_base_url, anthropic_base_url,
                  encrypted_key, key_hash, models_json,
                  priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
-                 protocols_json, default_protocol, note, website_url],
+                 protocols_json, default_protocol, note, website_url, channel_kind],
     ) {
         Ok(_) => Ok(ProviderResponse {
             id,
@@ -255,13 +279,14 @@ fn insert_provider(
             last_health_check: None,
             max_retries,
             timeout_secs,
-            proxy_url: crate::proxy::client::sanitize_proxy_url(&proxy_url),
+            proxy_url: crate::channels::transport::sanitize_proxy_url(&proxy_url),
             model_mapping: serde_json::from_str(&model_mapping).unwrap_or_default(),
             disabled_reason: String::new(),
             protocols,
             default_protocol,
             note,
             website_url,
+            channel_kind,
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
         }),
@@ -382,12 +407,10 @@ pub async fn get_provider(
     };
 
     let provider = conn.query_row(
-        "SELECT id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models, priority, weight,
-                is_active, health_status, latency_ms, error_rate, last_health_check,
-                max_retries, timeout_secs, created_at, updated_at, proxy_url,
-                model_mapping, consecutive_failures, disabled_reason,
-                protocols, default_protocol, note, website_url
-         FROM providers WHERE id = ?1",
+        &format!(
+         "SELECT {} FROM providers WHERE id = ?1",
+         crate::models::PROVIDER_SELECT_COLUMNS
+     ),
         params![provider_id],
         row_to_provider,
     );
@@ -396,7 +419,7 @@ pub async fn get_provider(
         Ok(p) => {
             let mut resp = ProviderResponse::from(p);
             // proxy_url 可能内嵌凭证,详情响应同样脱敏
-            resp.proxy_url = crate::proxy::client::sanitize_proxy_url(&resp.proxy_url);
+            resp.proxy_url = crate::channels::transport::sanitize_proxy_url(&resp.proxy_url);
             (StatusCode::OK, Json(json!(resp)))
         }
         Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
@@ -455,6 +478,17 @@ pub async fn update_provider(
     if let Some(website_url) = &req.website_url {
         updates.push("website_url = ?");
         params_vec.push(Box::new(website_url.trim().to_string()));
+    }
+    if let Some(kind) = &req.channel_kind {
+        let kind = kind.trim().to_string();
+        if !valid_channel_kind(&kind) {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "error": "invalid_channel_kind",
+                "message": format!("channel_kind 仅支持: {}", channel_kind_names())
+            })));
+        }
+        updates.push("channel_kind = ?");
+        params_vec.push(Box::new(kind));
     }
     if let Some(key) = &req.api_key {
         // 换 key 时同步刷新哈希并做重复检测(排除自身);空 key 哈希置空。
@@ -720,7 +754,7 @@ pub async fn duplicate_provider(
     let source = conn.query_row(
         "SELECT name, provider_type, openai_base_url, anthropic_base_url, api_key, key_hash, models,
                 priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
-                protocols, default_protocol, note, website_url
+                protocols, default_protocol, note, website_url, channel_kind
          FROM providers WHERE id = ?1",
         params![provider_id],
         |row| {
@@ -742,13 +776,14 @@ pub async fn duplicate_provider(
                 row.get::<_, String>(14)?,
                 row.get::<_, String>(15)?,
                 row.get::<_, String>(16)?,
+                row.get::<_, String>(17)?,
             ))
         },
     );
 
     let (name, provider_type, openai_base_url, anthropic_base_url, api_key, key_hash, models,
          priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
-         protocols, default_protocol, note, website_url) = match source {
+         protocols, default_protocol, note, website_url, channel_kind) = match source {
         Ok(s) => s,
         Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
     };
@@ -760,11 +795,11 @@ pub async fn duplicate_provider(
         "INSERT INTO providers (id, name, provider_type, openai_base_url, anthropic_base_url,
                                 api_key, key_hash, models, priority, weight,
                                 max_retries, timeout_secs, proxy_url, model_mapping,
-                                protocols, default_protocol, note, website_url)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                                protocols, default_protocol, note, website_url, channel_kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![new_id, new_name, provider_type, openai_base_url, anthropic_base_url,
                 api_key, key_hash, models, priority, weight, max_retries, timeout_secs,
-                proxy_url, model_mapping, protocols, default_protocol, note, website_url],
+                proxy_url, model_mapping, protocols, default_protocol, note, website_url, channel_kind],
     ) {
         Ok(_) => {
             let models_parsed: Vec<String> =
@@ -785,13 +820,14 @@ pub async fn duplicate_provider(
                 last_health_check: None,
                 max_retries,
                 timeout_secs,
-                proxy_url: crate::proxy::client::sanitize_proxy_url(&proxy_url),
+                proxy_url: crate::channels::transport::sanitize_proxy_url(&proxy_url),
                 model_mapping: serde_json::from_str(&model_mapping).unwrap_or_default(),
                 disabled_reason: String::new(),
                 protocols: serde_json::from_str(&protocols).unwrap_or_default(),
                 default_protocol,
                 note,
                 website_url,
+                channel_kind,
                 created_at: chrono::Utc::now().to_rfc3339(),
                 updated_at: chrono::Utc::now().to_rfc3339(),
             })))
@@ -820,7 +856,7 @@ pub async fn test_provider(
         match conn.query_row(
             "SELECT id, name, openai_base_url, anthropic_base_url, api_key,
                     COALESCE(NULLIF(default_protocol, ''), provider_type),
-                    timeout_secs, proxy_url FROM providers WHERE id = ?1",
+                    timeout_secs, proxy_url, channel_kind FROM providers WHERE id = ?1",
             params![provider_id],
             |row| {
                 Ok((
@@ -832,6 +868,7 @@ pub async fn test_provider(
                     row.get::<_, String>(5)?,
                     row.get::<_, i32>(6)?,
                     row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             },
         ) {
@@ -840,7 +877,7 @@ pub async fn test_provider(
         }
     }; // MutexGuard dropped here
 
-    let (id, name, openai_url, anthropic_url, api_key, protocol, timeout, proxy_url) = provider_info;
+    let (id, name, openai_url, anthropic_url, api_key, protocol, timeout, proxy_url, channel_kind) = provider_info;
     // api_key 出库解密(enc:v1: 前缀密文,明文兼容)
     let api_key = crate::crypto::decrypt_or_plain(&state.pool.cipher, &api_key);
 
@@ -854,7 +891,7 @@ pub async fn test_provider(
     };
 
     // Step 2: Make health check request (async, no lock held)
-    let (status, latency) = check_provider_health(&state.clients, base_url, &api_key, &protocol, timeout.clamp(1, 600) as u64, &proxy_url).await;
+    let (status, latency) = check_provider_health(&state.clients, base_url, &api_key, &protocol, timeout.clamp(1, 600) as u64, &proxy_url, &channel_kind).await;
 
     // Step 3: Re-lock DB to update status
     {
@@ -950,6 +987,8 @@ pub struct FetchModelsRequest {
     /// Set when editing an existing channel: the form keeps the key empty
     /// ("unchanged"), so fall back to the stored key in that case.
     pub provider_id: Option<String>,
+    /// 渠道插件类型;缺省按 generic。
+    pub channel_kind: Option<String>,
 }
 
 /// Fetch the available model list from an upstream for a (possibly
@@ -1011,18 +1050,11 @@ pub async fn fetch_upstream_models(
         })));
     }
 
-    let client = crate::proxy::client::cached_client(&state.clients, &proxy_url, "fetch-models", 15);
-    let url = crate::router::health::build_health_url(&base_url);
-    let upstream_req = client.get(&url);
-    let upstream_req = match protocol.as_str() {
-        // 与 proxy/client.rs 的 apply_auth 保持一致:同时携带 x-api-key 与
-        // Authorization Bearer,兼容只检查 Authorization 的 Anthropic 上游。
-        "anthropic" => upstream_req
-            .header("x-api-key", &api_key)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("anthropic-version", "2023-06-01"),
-        _ => upstream_req.header("Authorization", format!("Bearer {}", api_key)),
-    };
+    let client = crate::channels::transport::cached_client(&state.clients, &proxy_url, "fetch-models", 15);
+    // URL 与鉴权头由渠道插件决定,与对话 / 健康检查路径同一口径。
+    let adapter = crate::channels::registry().resolve(req.channel_kind.as_deref().unwrap_or("").trim());
+    let url = adapter.models_url(&base_url, &protocol);
+    let upstream_req = adapter.apply_auth(client.get(&url), &api_key, &protocol);
 
     match upstream_req.send().await {
         Ok(resp) => {
@@ -1123,12 +1155,10 @@ pub async fn test_provider_model(
             }
         };
         match conn.query_row(
-            "SELECT id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models, priority, weight,
-                    is_active, health_status, latency_ms, error_rate, last_health_check,
-                    max_retries, timeout_secs, created_at, updated_at, proxy_url,
-                    model_mapping, consecutive_failures, disabled_reason,
-                    protocols, default_protocol, note, website_url
-             FROM providers WHERE id = ?1",
+            &format!(
+             "SELECT {} FROM providers WHERE id = ?1",
+             crate::models::PROVIDER_SELECT_COLUMNS
+         ),
             params![provider_id],
             row_to_provider,
         ) {

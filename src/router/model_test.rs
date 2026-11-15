@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::db::DbPool;
 use crate::models::Provider;
-use crate::proxy::client::send_request;
+use crate::channels::transport::send_request;
 use crate::protocol::convert::{parse_sse_events, PROTOCOL_ANTHROPIC};
 
 /// How often the background loop re-tests every (channel, model) pair.
@@ -141,7 +141,7 @@ pub async fn probe_model(
 ) -> ModelProbe {
     let body = build_probe_body(model, protocol, &messages, max_tokens, stream);
     let (resp, latency) = match send_request(
-        clients, provider, protocol, &body, stream, 120,
+        clients, provider, protocol, body, stream, 120,
     ).await {
         Ok(v) => v,
         Err((err_body, status, latency)) => {
@@ -374,12 +374,10 @@ async fn run_model_test_round(
             }
         };
         let mut stmt = match conn.prepare(
-            "SELECT id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models, priority, weight,
-                    is_active, health_status, latency_ms, error_rate, last_health_check,
-                    max_retries, timeout_secs, created_at, updated_at, proxy_url,
-                    model_mapping, consecutive_failures, disabled_reason,
-                    protocols, default_protocol, note, website_url
-             FROM providers WHERE is_active = 1",
+            &format!(
+             "SELECT {} FROM providers WHERE is_active = 1",
+             crate::models::PROVIDER_SELECT_COLUMNS
+         ),
         ) {
             Ok(s) => s,
             Err(e) => {

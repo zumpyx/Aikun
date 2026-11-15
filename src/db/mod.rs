@@ -239,6 +239,9 @@ fn initialize_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             default_protocol TEXT NOT NULL DEFAULT '',
             note            TEXT NOT NULL DEFAULT '',
             website_url     TEXT NOT NULL DEFAULT '',
+            -- 渠道插件类型(见 src/channels);空串 = generic。不加 CHECK:
+            -- 合法值由应用层注册表校验,新增插件无需改表。
+            channel_kind    TEXT NOT NULL DEFAULT '',
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -417,6 +420,9 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_column(conn, "providers", "note", "TEXT NOT NULL DEFAULT ''")?;
     // 渠道官网地址,仅用于后台展示。
     ensure_column(conn, "providers", "website_url", "TEXT NOT NULL DEFAULT ''")?;
+    // 渠道插件类型:只加列、不升 SCHEMA_VERSION——旧二进制按显式列名查询,
+    // 会忽略这一列(其渠道全部按 generic 行为工作,与重构前一致)。
+    ensure_column(conn, "providers", "channel_kind", "TEXT NOT NULL DEFAULT ''")?;
     // API key 限流/额度:每分钟请求数与每日 token 额度,0 表示不限制。
     ensure_column(conn, "api_keys", "rate_limit_rpm", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "api_keys", "quota_daily_tokens", "INTEGER NOT NULL DEFAULT 0")?;

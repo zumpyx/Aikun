@@ -7,7 +7,7 @@ mod db;
 mod gateway;
 mod models;
 mod protocol;
-mod proxy;
+mod channels;
 mod router;
 
 use std::collections::HashMap;
@@ -199,6 +199,7 @@ async fn main() {
         .route("/api/admin/providers/{id}/test-model", post(api::admin::providers::test_provider_model))
         .route("/api/admin/providers/{id}/duplicate", post(api::admin::providers::duplicate_provider))
         .route("/api/admin/model-health", get(api::admin::providers::list_model_health))
+        .route("/api/admin/channel-kinds", get(api::admin::providers::list_channel_kinds))
         .route("/api/admin/prices", get(api::admin::billing::list_prices))
         .route("/api/admin/prices", post(api::admin::billing::create_price))
         .route("/api/admin/prices/{id}", patch(api::admin::billing::update_price))

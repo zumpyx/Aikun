@@ -2211,3 +2211,98 @@ async fn cross_protocol_keeps_reasoning_and_cache_control() {
     assert_eq!(msgs[1]["reasoning_content"], "because");
     assert_eq!(msgs[1]["reasoning_signature"], "sig");
 }
+
+// ---------- 渠道插件(channel_kind) ----------
+
+#[tokio::test]
+async fn channel_kinds_listed_validated_and_routed() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    let jwt = common::admin_jwt();
+
+    // 注册表对管理端可见:generic 排第一,占位插件带 experimental 标记
+    let kinds: serde_json::Value = app
+        .client()
+        .get(format!("{}/api/admin/channel-kinds", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let list = kinds.as_array().unwrap();
+    assert_eq!(list[0]["kind"], "generic");
+    assert!(list.iter().any(|k| k["kind"] == "qoder" && k["experimental"] == true));
+    assert!(list.iter().any(|k| k["kind"] == "workbuddy"));
+
+    let payload = |kind: &str| {
+        serde_json::json!({
+            "name": format!("ck-{}", kind),
+            "openai_base_url": mock.base,
+            "api_key": format!("sk-{}", kind),
+            "models": ["gpt-4"],
+            "channel_kind": kind,
+        })
+    };
+    // 未注册的类型 → 400
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/providers", app.base))
+        .bearer_auth(&jwt)
+        .json(&payload("no-such-kind"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "invalid_channel_kind");
+
+    // 合法类型 → 201,回显 channel_kind
+    let resp = app
+        .client()
+        .post(format!("{}/api/admin/providers", app.base))
+        .bearer_auth(&jwt)
+        .json(&payload("workbuddy"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let created: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(created["channel_kind"], "workbuddy");
+    let id = created["id"].as_str().unwrap().to_string();
+    app.db()
+        .execute("UPDATE providers SET health_status = 'healthy' WHERE id = ?1", [&id])
+        .unwrap();
+
+    // 经插件路由的请求照常成功
+    let resp = chat_completions(&app).await;
+    assert_eq!(resp.status(), 200);
+    assert!(mock.requests().iter().any(|r| r.path == "/v1/chat/completions"));
+
+    // PATCH 改类型同样受注册表校验
+    let resp = app
+        .client()
+        .patch(format!("{}/api/admin/providers/{}", app.base, id))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"channel_kind": "bogus"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let resp = app
+        .client()
+        .patch(format!("{}/api/admin/providers/{}", app.base, id))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({"channel_kind": "qoder"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let kind: String = app
+        .db()
+        .query_row("SELECT channel_kind FROM providers WHERE id = ?1", [&id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kind, "qoder");
+}

@@ -21,7 +21,7 @@ use crate::billing::ledger::{request_log_sync, spawn_request_log};
 use crate::gateway::admission::{enforce_key_limits, has_positive_balance};
 use crate::gateway::pipeline::{apply_model_mapping, protocol_error, read_json_limited};
 use crate::auth::{AuthContext, Claims};
-use crate::proxy::client::{build_api_url, cached_client};
+use crate::channels::transport::{build_api_url, cached_client};
 use crate::protocol::convert::{extract_usage_any, PROTOCOL_OPENAI};
 use crate::router::selector::{
     select_provider_async, spawn_pin_channel, spawn_record_failure, spawn_record_result,
@@ -202,7 +202,8 @@ pub async fn passthrough(
         let req = if provider.api_key.is_empty() {
             req
         } else {
-            req.header("Authorization", format!("Bearer {}", provider.api_key))
+            // 鉴权头由渠道插件决定(透传只走 openai 协议)。
+            crate::channels::adapter_for(&provider).apply_auth(req, &provider.api_key, PROTOCOL_OPENAI)
         };
 
         debug!(

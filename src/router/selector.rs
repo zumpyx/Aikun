@@ -198,12 +198,10 @@ fn find_providers_for_model(
 ) -> Option<Vec<Provider>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models, priority, weight,
-                    is_active, health_status, latency_ms, error_rate, last_health_check,
-                    max_retries, timeout_secs, created_at, updated_at, proxy_url,
-                    model_mapping, consecutive_failures, disabled_reason,
-                    protocols, default_protocol, note, website_url
-             FROM providers WHERE is_active = 1",
+            &format!(
+             "SELECT {} FROM providers WHERE is_active = 1",
+             crate::models::PROVIDER_SELECT_COLUMNS
+         ),
         )
         .ok()?;
 
@@ -473,6 +471,7 @@ mod tests {
             default_protocol: "openai".into(),
             note: String::new(),
             website_url: String::new(),
+            channel_kind: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
         }

@@ -48,6 +48,9 @@ pub struct Provider {
     /// 渠道官网地址,仅用于后台展示。
     #[serde(default)]
     pub website_url: String,
+    /// 渠道类型(插件 kind,见 crate::channels)。空串 = generic。
+    #[serde(default)]
+    pub channel_kind: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -80,6 +83,7 @@ impl std::fmt::Debug for Provider {
             .field("default_protocol", &self.default_protocol)
             .field("note", &self.note)
             .field("website_url", &self.website_url)
+            .field("channel_kind", &self.channel_kind)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -174,7 +178,15 @@ pub fn channel_protocols(p: &Provider) -> Vec<String> {
 /// priority, weight, is_active, health_status, latency_ms, error_rate,
 /// last_health_check, max_retries, timeout_secs, created_at, updated_at,
 /// proxy_url, model_mapping, consecutive_failures, disabled_reason,
-/// protocols, default_protocol, note, website_url) to a Provider.
+/// protocols, default_protocol, note, website_url, channel_kind) to a Provider.
+/// 列顺序集中定义在 [`PROVIDER_SELECT_COLUMNS`]。
+/// providers 表标准查询列(与 [`row_to_provider`] 的下标一一对应)。
+pub const PROVIDER_SELECT_COLUMNS: &str = "id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models, priority, weight,
+                    is_active, health_status, latency_ms, error_rate, last_health_check,
+                    max_retries, timeout_secs, created_at, updated_at, proxy_url,
+                    model_mapping, consecutive_failures, disabled_reason,
+                    protocols, default_protocol, note, website_url, channel_kind";
+
 pub fn row_to_provider(row: &rusqlite::Row) -> rusqlite::Result<Provider> {
     Ok(Provider {
         id: row.get(0)?,
@@ -205,6 +217,7 @@ pub fn row_to_provider(row: &rusqlite::Row) -> rusqlite::Result<Provider> {
         default_protocol: row.get(23)?,
         note: row.get(24)?,
         website_url: row.get(25)?,
+        channel_kind: row.get(26)?,
     })
 }
 
@@ -227,6 +240,8 @@ pub struct CreateProviderRequest {
     pub default_protocol: Option<String>,
     pub note: Option<String>,
     pub website_url: Option<String>,
+    /// 渠道类型(插件 kind);缺省/空串 = generic。
+    pub channel_kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -248,6 +263,8 @@ pub struct UpdateProviderRequest {
     pub default_protocol: Option<String>,
     pub note: Option<String>,
     pub website_url: Option<String>,
+    /// 渠道类型(插件 kind);缺省/空串 = generic。
+    pub channel_kind: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -274,6 +291,7 @@ pub struct ProviderResponse {
     pub default_protocol: String,
     pub note: String,
     pub website_url: String,
+    pub channel_kind: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -308,16 +326,17 @@ impl From<Provider> for ProviderResponse {
             default_protocol,
             note: p.note,
             website_url: p.website_url,
+            channel_kind: p.channel_kind,
             created_at: p.created_at,
             updated_at: p.updated_at,
         }
     }
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn bare_provider() -> Provider {
+    pub(crate) fn bare_provider() -> Provider {
         Provider {
             id: "p".into(),
             name: "p".into(),
@@ -344,6 +363,7 @@ mod tests {
             default_protocol: String::new(),
             note: String::new(),
             website_url: String::new(),
+            channel_kind: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
         }

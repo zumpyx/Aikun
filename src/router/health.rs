@@ -8,14 +8,7 @@ use tracing::info;
 
 use crate::config::AppConfig;
 use crate::db::DbPool;
-use crate::proxy::client::{cached_client, sanitize_log_url, sanitize_proxy_url};
-
-/// Build a proper API URL for health checks. 与聊天路径共用 build_api_url,
-/// 保证带 query(如 ?api-version=...)或非 /v1 版本段(如 /v1beta)的
-/// base_url 也能拼出正确的 /models 端点。
-pub fn build_health_url(base_url: &str) -> String {
-    crate::proxy::client::build_api_url(base_url, "/models")
-}
+use crate::channels::transport::{cached_client, sanitize_log_url, sanitize_proxy_url};
 
 /// Check the health of a single provider by making a lightweight request to the models endpoint.
 pub async fn check_provider_health(
@@ -25,24 +18,18 @@ pub async fn check_provider_health(
     provider_type: &str,
     timeout_secs: u64,
     proxy_url: &str,
+    channel_kind: &str,
 ) -> (String, f64) {
     let start = Instant::now();
     let client = cached_client(clients, proxy_url, base_url, timeout_secs);
 
-    let url = build_health_url(base_url);
+    // URL 与鉴权头由渠道插件决定(见 crate::channels)。
+    let adapter = crate::channels::registry().resolve(channel_kind);
+    let url = adapter.models_url(base_url, provider_type);
     // 日志脱敏:URL 可能带 userinfo 或 query(如 ?key=...),不落明文。
     let log_url = sanitize_log_url(&url);
 
-    let req = client.get(&url);
-    let req = match provider_type {
-        // 同 proxy/client.rs 的 apply_auth:同时携带 x-api-key 与 Authorization
-        // Bearer,兼容只检查 Authorization 的 Anthropic 上游。
-        "anthropic" => req
-            .header("x-api-key", api_key)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("anthropic-version", "2023-06-01"),
-        _ => req.header("Authorization", format!("Bearer {}", api_key)),
-    };
+    let req = adapter.apply_auth(client.get(&url), api_key, provider_type);
 
     let result = req.send().await;
 
@@ -178,7 +165,7 @@ async fn run_health_check_round(
             let mut stmt = match conn.prepare(
                 "SELECT id, openai_base_url, anthropic_base_url, api_key,
                         COALESCE(NULLIF(default_protocol, ''), provider_type),
-                        timeout_secs, proxy_url FROM providers WHERE is_active = 1"
+                        timeout_secs, proxy_url, channel_kind FROM providers WHERE is_active = 1"
             ) {
                 Ok(s) => s,
                 Err(e) => {
@@ -187,7 +174,8 @@ async fn run_health_check_round(
                 }
             };
 
-            let result: Vec<(String, String, String, String, String, i32, String)> = match stmt.query_map([], |row| {
+            #[allow(clippy::type_complexity)]
+            let result: Vec<(String, String, String, String, String, i32, String, String)> = match stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -197,6 +185,7 @@ async fn run_health_check_round(
                     row.get::<_, String>(4)?,
                     row.get::<_, i32>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             }) {
                 Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
@@ -214,7 +203,7 @@ async fn run_health_check_round(
         // whole round — a timed-out probe simply counts as unhealthy and is
         // persisted like any other result.
         let probes = join_all(providers.iter().map(
-            |(id, openai_url, anthropic_url, api_key, protocol, timeout, proxy_url)| {
+            |(id, openai_url, anthropic_url, api_key, protocol, timeout, proxy_url, channel_kind)| {
                 let clients = clients.clone();
                 async move {
                     // Clamp defensively: timeout_secs is validated 1..=600 at the
@@ -232,6 +221,7 @@ async fn run_health_check_round(
                         std::time::Duration::from_secs(probe_timeout),
                         check_provider_health(
                             &clients, base_url, api_key, protocol, probe_timeout, proxy_url,
+                            channel_kind,
                         ),
                     )
                     .await

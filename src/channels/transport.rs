@@ -1,3 +1,6 @@
+//! 渠道公共传输层:HTTP client 复用(按代理 + 超时缓存)、上游 URL 拼接、
+//! 日志脱敏,以及经渠道插件定制后的请求发送。
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -7,7 +10,6 @@ use serde_json::{json, Value};
 use tracing::{debug, warn};
 
 use crate::models::Provider;
-use crate::protocol::convert::{PROTOCOL_ANTHROPIC, PROTOCOL_RESPONSES};
 
 /// Build a proper URL path based on provider type and base URL.
 pub fn build_api_url(base_url: &str, path: &str) -> String {
@@ -134,23 +136,6 @@ pub fn cached_client(
     }
 }
 
-/// Apply protocol-specific auth headers to a request builder.
-fn apply_auth(
-    req: reqwest::RequestBuilder,
-    provider: &Provider,
-    protocol: &str,
-) -> reqwest::RequestBuilder {
-    if protocol == PROTOCOL_ANTHROPIC {
-        // 同时携带 x-api-key 与 Authorization Bearer:Anthropic 官方两种都认,
-        // 而部分 Anthropic 兼容上游(如 SenseNova)只检查 Authorization。
-        req.header("x-api-key", &provider.api_key)
-            .header("Authorization", format!("Bearer {}", provider.api_key))
-            .header("anthropic-version", "2023-06-01")
-    } else {
-        req.header("Authorization", format!("Bearer {}", provider.api_key))
-    }
-}
-
 /// Send a chat request to the provider and return the raw HTTP response.
 /// The caller decides whether to read it as JSON or as an SSE byte stream.
 /// On transport failure returns a synthetic (error_body, 502, latency).
@@ -162,7 +147,7 @@ pub async fn send_request(
     clients: &Mutex<HashMap<String, Client>>,
     provider: &Provider,
     protocol: &str,
-    request_body: &Value,
+    mut request_body: Value,
     stream: bool,
     fallback_timeout_secs: u64,
 ) -> Result<(reqwest::Response, f64), (Value, u16, f64)> {
@@ -181,14 +166,10 @@ pub async fn send_request(
         if stream { 0 } else { non_stream_timeout },
     );
 
-    let path = if protocol == PROTOCOL_ANTHROPIC {
-        "/messages"
-    } else if protocol == PROTOCOL_RESPONSES {
-        "/responses"
-    } else {
-        "/chat/completions"
-    };
-    let url = build_api_url(crate::models::base_url_for(provider, protocol), path);
+    // URL、鉴权头与请求体修补都交给渠道插件(见 crate::channels)。
+    let adapter = crate::channels::adapter_for(provider);
+    adapter.prepare_request(provider, protocol, &mut request_body);
+    let url = adapter.chat_url(provider, protocol);
 
     // 同 chat.rs:转发日志是每请求热路径,降级 debug。
     debug!(
@@ -206,8 +187,8 @@ pub async fn send_request(
     let req = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .json(request_body);
-    let req = apply_auth(req, provider, protocol);
+        .json(&request_body);
+    let req = adapter.apply_auth(req, &provider.api_key, protocol);
 
     // 流式响应总时长任意,client 不带整体超时(中段 stall 由流读取侧的
     // idle 超时约束);但首字节必须有界:上游 accept 后迟迟不发响应头时

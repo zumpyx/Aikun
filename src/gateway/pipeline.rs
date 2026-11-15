@@ -25,7 +25,7 @@ use crate::auth::{AuthContext, Claims};
 use crate::billing::ledger::{insert_request_log, request_log_sync, spawn_request_log};
 use crate::gateway::admission::{enforce_key_limits, has_positive_balance, model_allowed, ConcurrencyGuard};
 use crate::models::Provider;
-use crate::proxy::client::{extract_model, send_request};
+use crate::channels::transport::{extract_model, send_request};
 use crate::protocol::convert::{
     anthropic_error_type, convert_request, convert_response, extract_usage_any,
     parse_sse_events, parse_sse_remaining, valid_response_shape, StreamConverter, SseOut,
@@ -301,8 +301,9 @@ async fn attempt_loop(
         let mut upstream_body = convert_request(&body, client_protocol, provider_protocol);
         apply_model_mapping(&provider, &mut upstream_body);
 
+        let adapter = crate::channels::adapter_for(&provider);
         let (resp, latency) =
-            match send_request(&state.clients, &provider, provider_protocol, &upstream_body, is_stream, state.config.request_timeout_secs).await {
+            match send_request(&state.clients, &provider, provider_protocol, upstream_body, is_stream, state.config.request_timeout_secs).await {
                 Ok(v) => v,
                 Err((err_body, status, latency)) => {
                     warn!(
@@ -327,7 +328,11 @@ async fn attempt_loop(
             if !is_stream {
                 // 读取并解析响应体（带 8MB 上限）；上游 200 但 body 不可用
                 // 时按失败处理并故障转移，绝不把错误形状 JSON 当 200 返回。
-                match read_json_limited(resp).await {
+                let read = read_json_limited(resp).await.map(|mut b| {
+                    adapter.normalize_response(provider_protocol, &mut b);
+                    b
+                });
+                match read {
                     Ok(resp_body) if valid_response_shape(&resp_body, provider_protocol) => {
                         spawn_record_result(state.pool.clone(), provider.id.clone(), latency, true);
                         spawn_pin_channel(
@@ -436,7 +441,7 @@ async fn attempt_loop(
                 provider.id.clone(),
             );
             return stream_response(
-                state, resp, client_protocol, provider_protocol,
+                state, resp, adapter, client_protocol, provider_protocol,
                 provider.id.clone(), provider.timeout_secs, model, user_id,
                 api_key_id, client_wants_usage, concurrency_guard.take(),
             );
@@ -620,6 +625,7 @@ impl Drop for StreamAbortGuard {
 fn stream_response(
     state: AppState,
     resp: reqwest::Response,
+    adapter: Arc<dyn crate::channels::ChannelAdapter>,
     client_protocol: &str,
     provider_protocol: &str,
     provider_id: String,
@@ -647,6 +653,7 @@ fn stream_response(
     };
     let idle_timeout = std::time::Duration::from_secs(idle_secs.clamp(1, 600));
     let client_protocol = client_protocol.to_string();
+    let provider_protocol_owned = provider_protocol.to_string();
 
     // Abort the stream if the upstream sends more than this without a
     // complete SSE event boundary — an unbounded buffer is a memory risk.
@@ -705,7 +712,8 @@ fn stream_response(
             match item {
                 Ok(bytes) => {
                     buf.extend_from_slice(&bytes);
-                    for ev in parse_sse_events(&mut buf) {
+                    for mut ev in parse_sse_events(&mut buf) {
+                        adapter.normalize_stream_event(&provider_protocol_owned, &mut ev);
                         events += 1;
                         for out in converter.push(&ev) {
                             // 转换型 converter 的错误事件带 event: error;
@@ -775,7 +783,8 @@ fn stream_response(
             return;
         }
 
-        if let Some(ev) = parse_sse_remaining(&mut buf) {
+        if let Some(mut ev) = parse_sse_remaining(&mut buf) {
+            adapter.normalize_stream_event(&provider_protocol_owned, &mut ev);
             events += 1;
             for out in converter.push(&ev) {
                 if out.event.as_deref() == Some("error")
@@ -998,6 +1007,7 @@ mod tests {
             default_protocol: "openai".into(),
             note: String::new(),
             website_url: String::new(),
+            channel_kind: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
         }
