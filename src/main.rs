@@ -4,6 +4,7 @@ mod billing;
 mod config;
 mod crypto;
 mod db;
+mod gateway;
 mod models;
 mod protocol;
 mod proxy;

@@ -103,7 +103,7 @@ pub fn compute_cost(
     yuan_to_micro(yuan)
 }
 
-/// 内置默认价格快照(src/default_prices.json):
+/// 内置默认价格快照(src/billing/default_prices.json):
 /// 源自 LiteLLM 的 model_prices_and_context_window.json(官方刊例价),
 /// 筛选主流 chat 模型,单位为 USD / 1M tokens。属售价基准,非渠道成本价。
 const DEFAULT_PRICES_JSON: &str = include_str!("default_prices.json");
@@ -288,3 +288,4 @@ mod tests {
         assert_eq!(kept, 1.0);
     }
 }
+pub mod ledger;

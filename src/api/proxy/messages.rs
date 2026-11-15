@@ -14,5 +14,5 @@ pub async fn messages(
     auth_ctx: AuthContext,
     Json(body): Json<Value>,
 ) -> Response {
-    super::chat::proxy_completion(state, claims, auth_ctx, PROTOCOL_ANTHROPIC, body).await
+    crate::gateway::pipeline::proxy_completion(state, claims, auth_ctx, PROTOCOL_ANTHROPIC, body).await
 }

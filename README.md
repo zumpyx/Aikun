@@ -180,7 +180,7 @@ API Key 的 `expires_at` 建议传带时区的 RFC3339;无时区的输入(如 `2
 ## 计费
 
 - 在「计费」页维护模型价格(元/1M tokens),模型名支持 `*` 前缀通配(如 `gpt-*`);精确命中优先,其次取最长通配前缀,单独的 `*` 为兜底价(匹配一切、优先级最低)
-- 价格表为空时(全新部署)启动会自动导入一份内置默认价格:源自 [LiteLLM 价格表](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) 的 210 个主流 chat 模型官方刊例价(快照见 `src/default_prices.json`),按汇率 7.2 折算为元;另含一条 `*` 兜底条目(输入 3 / 输出 7 元),快照未收录的模型按此计费。它们是售价基准而非渠道成本价,导入后可在「计费」页修改;只要表中已有任意条目就不会再导入
+- 价格表为空时(全新部署)启动会自动导入一份内置默认价格:源自 [LiteLLM 价格表](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) 的 210 个主流 chat 模型官方刊例价(快照见 `src/billing/default_prices.json`),按汇率 7.2 折算为元;另含一条 `*` 兜底条目(输入 3 / 输出 7 元),快照未收录的模型按此计费。它们是售价基准而非渠道成本价,导入后可在「计费」页修改;只要表中已有任意条目就不会再导入
 - 成功的请求按用量折算费用记入 `request_logs.cost`,并从用户余额中同步扣除(日志与扣费同一事务);无任何价格匹配(兜底条目也被删除)的模型按 0 元记账。金额在库中一律为**整数微元**(1 元 = 1,000,000 微元,单请求费用常小于 1 分,按分取整会让大量请求免费),累加/扣减无浮点漂移;对外 API 与前端展示仍为元
 - 缓存 token 单独计价:每条价格可设可空的缓存价(`cached_price`,元/1M tokens),留空时缓存 token 按输入价计。OpenAI 的 `prompt_tokens` 含命中缓存部分,会按 `prompt_tokens_details.cached_tokens` 拆出;Anthropic 的 `cache_read_input_tokens` 按缓存价、`cache_creation_input_tokens`(写缓存)按输入价计。缓存用量记入 `request_logs.cached_tokens`
 - 余额为用户级。**余额 ≤ 0 时请求在入口被拒绝**(HTTP 402,`insufficient_quota`),充值后自动恢复;在途请求不预留余额,单个请求可能扣成负数(用量先发生、费用后结算,属有意取舍)。充值/扣减由管理员在「用户」页手工调账,流水在「计费」页可查;用户本人在「钱包」页查看余额、近 30 天消费分析(趋势图、模型消费分布),以及当前在售模型的只读价格(通配价按具体模型展开;密钥的模型白名单不在这张表里过滤)

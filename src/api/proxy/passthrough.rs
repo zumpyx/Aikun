@@ -17,10 +17,9 @@ use axum::{
 use serde_json::{json, Value};
 use tracing::{debug, warn};
 
-use super::chat::{
-    apply_model_mapping, enforce_key_limits, has_positive_balance, protocol_error,
-    read_json_limited, request_log_sync, spawn_request_log,
-};
+use crate::billing::ledger::{request_log_sync, spawn_request_log};
+use crate::gateway::admission::{enforce_key_limits, has_positive_balance};
+use crate::gateway::pipeline::{apply_model_mapping, protocol_error, read_json_limited};
 use crate::auth::{AuthContext, Claims};
 use crate::proxy::client::{build_api_url, cached_client};
 use crate::protocol::convert::{extract_usage_any, PROTOCOL_OPENAI};
