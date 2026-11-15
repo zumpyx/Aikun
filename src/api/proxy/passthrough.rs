@@ -23,7 +23,7 @@ use super::chat::{
 };
 use crate::auth::{AuthContext, Claims};
 use crate::proxy::client::{build_api_url, cached_client};
-use crate::proxy::convert::{extract_usage_any, PROTOCOL_OPENAI};
+use crate::protocol::convert::{extract_usage_any, PROTOCOL_OPENAI};
 use crate::router::selector::{
     select_provider_async, spawn_pin_channel, spawn_record_failure, spawn_record_result,
 };

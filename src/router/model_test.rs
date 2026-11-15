@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use crate::db::DbPool;
 use crate::models::Provider;
 use crate::proxy::client::send_request;
-use crate::proxy::convert::{parse_sse_events, PROTOCOL_ANTHROPIC};
+use crate::protocol::convert::{parse_sse_events, PROTOCOL_ANTHROPIC};
 
 /// How often the background loop re-tests every (channel, model) pair.
 pub const MODEL_TEST_INTERVAL_SECS: u64 = 1800;
@@ -197,7 +197,7 @@ pub async fn probe_model(
         };
         // 与代理转发路径同一口径:200 但响应体不符合协议形状(MiniMax 式
         // 200+错误信封)判失败,否则会写成 healthy 并污染渠道 EMA。
-        if !crate::proxy::convert::valid_response_shape(&v, protocol) {
+        if !crate::protocol::convert::valid_response_shape(&v, protocol) {
             return ModelProbe {
                 ok: false,
                 latency_ms: latency,

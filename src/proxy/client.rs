@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use tracing::{debug, warn};
 
 use crate::models::Provider;
-use crate::proxy::convert::{PROTOCOL_ANTHROPIC, PROTOCOL_RESPONSES};
+use crate::protocol::convert::{PROTOCOL_ANTHROPIC, PROTOCOL_RESPONSES};
 
 /// Build a proper URL path based on provider type and base URL.
 pub fn build_api_url(base_url: &str, path: &str) -> String {

@@ -2,7 +2,7 @@ use axum::{extract::State, response::Response, Json};
 use serde_json::Value;
 
 use crate::auth::{AuthContext, Claims};
-use crate::proxy::convert::PROTOCOL_ANTHROPIC;
+use crate::protocol::convert::PROTOCOL_ANTHROPIC;
 use crate::AppState;
 
 /// Anthropic Messages endpoint.
