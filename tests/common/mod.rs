@@ -208,10 +208,17 @@ pub struct TestApp {
     port: u16,
     child: Child,
     dir: tempfile::TempDir,
+    extra_env: Vec<(String, String)>,
 }
 
-fn spawn_child(dir: &std::path::Path, db_path: &std::path::Path, port: u16) -> Child {
+fn spawn_child(
+    dir: &std::path::Path,
+    db_path: &std::path::Path,
+    port: u16,
+    extra_env: &[(String, String)],
+) -> Child {
     Command::new(env!("CARGO_BIN_EXE_aikun"))
+        .envs(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .current_dir(dir)
         .env("AIKUN_HOST", format!("127.0.0.1:{}", port))
         .env("AIKUN_JWT_SECRET", "e2e-test-secret-not-for-production")
@@ -230,16 +237,26 @@ impl TestApp {
     /// 拉起真实 aikun 二进制:独立临时目录作为 cwd(避免读到仓库的
     /// .env)、独立 SQLite、随机端口、超长健康检查间隔(不干扰断言)。
     pub async fn spawn() -> Self {
+        Self::spawn_with_env(&[]).await
+    }
+
+    /// 同 spawn,额外注入环境变量(如 AIKUN_CACHE_MODE)。
+    pub async fn spawn_with_env(extra: &[(&str, &str)]) -> Self {
+        let extra_env: Vec<(String, String)> = extra
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let port = free_port();
-        let child = spawn_child(dir.path(), &db_path, port);
+        let child = spawn_child(dir.path(), &db_path, port, &extra_env);
         let app = Self {
             base: format!("http://127.0.0.1:{}", port),
             db_path: db_path.clone(),
             port,
             child,
             dir,
+            extra_env,
         };
         app.wait_ready().await;
         // 全新库启动时会 seed 内置默认价格(见 billing::seed_default_prices);
@@ -255,7 +272,7 @@ impl TestApp {
     pub async fn restart(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        self.child = spawn_child(self.dir.path(), &self.db_path, self.port);
+        self.child = spawn_child(self.dir.path(), &self.db_path, self.port, &self.extra_env);
         self.wait_ready().await;
     }
 

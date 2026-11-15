@@ -18,6 +18,38 @@ pub struct AppConfig {
     pub cors_allowed_origins: Vec<String>,
     /// 是否信任 X-Forwarded-For 头(仅在反向代理后开启)。
     pub trust_x_forwarded_for: bool,
+    // ---- 响应缓存(见 src/cache)----
+    pub cache_mode: CacheMode,
+    /// memory(默认,进程内)| redis(需 --features redis-cache)
+    pub cache_backend: String,
+    pub cache_ttl_secs: u64,
+    pub cache_max_entries: usize,
+    pub cache_max_entry_bytes: usize,
+    pub cache_scope: CacheScope,
+    pub cache_hit_billing: CacheHitBilling,
+    pub redis_url: Option<String>,
+}
+
+/// 缓存模式:off(默认,与重构前一致)/ deterministic(仅 temperature == 0)/ always。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheMode {
+    Off,
+    Deterministic,
+    Always,
+}
+
+/// 缓存作用域:user(默认,按用户隔离)/ global(全站共享,仅单租户建议)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheScope {
+    User,
+    Global,
+}
+
+/// 命中缓存的计费口径:full(默认,按缓存的用量照常计费)/ free(不扣费,只记日志)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheHitBilling {
+    Full,
+    Free,
 }
 
 impl Default for AppConfig {
@@ -35,6 +67,14 @@ impl Default for AppConfig {
             log_retention_days: 30,
             cors_allowed_origins: Vec::new(),
             trust_x_forwarded_for: false,
+            cache_mode: CacheMode::Off,
+            cache_backend: "memory".to_string(),
+            cache_ttl_secs: 300,
+            cache_max_entries: 10_000,
+            cache_max_entry_bytes: 1024 * 1024,
+            cache_scope: CacheScope::User,
+            cache_hit_billing: CacheHitBilling::Full,
+            redis_url: None,
         }
     }
 }
@@ -54,6 +94,14 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     ("log-retention-days", "AIKUN_LOG_RETENTION_DAYS", "请求日志保留天数(≥1)"),
     ("cors-allowed-origins", "AIKUN_CORS_ALLOWED_ORIGINS", "CORS 允许来源,逗号分隔"),
     ("trust-x-forwarded-for", "AIKUN_TRUST_X_FORWARDED_FOR", "置 1 时信任 X-Forwarded-For(仅限反向代理后)"),
+    ("cache-mode", "AIKUN_CACHE_MODE", "响应缓存:off(默认)/ deterministic(仅 temperature=0)/ always"),
+    ("cache-backend", "AIKUN_CACHE_BACKEND", "缓存后端:memory(默认,进程内)/ redis(需 redis-cache 特性)"),
+    ("cache-ttl-secs", "AIKUN_CACHE_TTL_SECS", "缓存有效期(秒,≥1,默认 300)"),
+    ("cache-max-entries", "AIKUN_CACHE_MAX_ENTRIES", "内存缓存最大条目数(≥1,默认 10000)"),
+    ("cache-max-entry-bytes", "AIKUN_CACHE_MAX_ENTRY_BYTES", "单条缓存响应大小上限(字节,默认 1048576)"),
+    ("cache-scope", "AIKUN_CACHE_SCOPE", "缓存作用域:user(默认,按用户隔离)/ global"),
+    ("cache-hit-billing", "AIKUN_CACHE_HIT_BILLING", "命中缓存计费:full(默认,照常计费)/ free"),
+    ("redis-url", "AIKUN_REDIS_URL", "Redis 地址(cache-backend=redis 时必填)"),
 ];
 
 impl AppConfig {
@@ -110,6 +158,58 @@ impl AppConfig {
         }
         config.trust_x_forwarded_for =
             get("trust-x-forwarded-for", "AIKUN_TRUST_X_FORWARDED_FOR").as_deref() == Some("1");
+        if let Some(val) = get("cache-mode", "AIKUN_CACHE_MODE") {
+            config.cache_mode = match val.trim().to_ascii_lowercase().as_str() {
+                "off" | "" => CacheMode::Off,
+                "deterministic" => CacheMode::Deterministic,
+                "always" => CacheMode::Always,
+                other => {
+                    tracing::warn!("cache-mode={:?} 非法(off/deterministic/always),回退 off", other);
+                    CacheMode::Off
+                }
+            };
+        }
+        if let Some(val) = get("cache-backend", "AIKUN_CACHE_BACKEND") {
+            config.cache_backend = match val.trim().to_ascii_lowercase().as_str() {
+                "redis" => "redis".to_string(),
+                "memory" | "" => "memory".to_string(),
+                other => {
+                    tracing::warn!("cache-backend={:?} 非法(memory/redis),回退 memory", other);
+                    "memory".to_string()
+                }
+            };
+        }
+        if let Some(val) = get("cache-ttl-secs", "AIKUN_CACHE_TTL_SECS") {
+            config.cache_ttl_secs = parse_min(&val, "cache-ttl-secs", 1, config.cache_ttl_secs);
+        }
+        if let Some(val) = get("cache-max-entries", "AIKUN_CACHE_MAX_ENTRIES") {
+            config.cache_max_entries = parse_min(&val, "cache-max-entries", 1, config.cache_max_entries);
+        }
+        if let Some(val) = get("cache-max-entry-bytes", "AIKUN_CACHE_MAX_ENTRY_BYTES") {
+            config.cache_max_entry_bytes =
+                parse_min(&val, "cache-max-entry-bytes", 1, config.cache_max_entry_bytes);
+        }
+        if let Some(val) = get("cache-scope", "AIKUN_CACHE_SCOPE") {
+            config.cache_scope = match val.trim().to_ascii_lowercase().as_str() {
+                "global" => CacheScope::Global,
+                "user" | "" => CacheScope::User,
+                other => {
+                    tracing::warn!("cache-scope={:?} 非法(user/global),回退 user", other);
+                    CacheScope::User
+                }
+            };
+        }
+        if let Some(val) = get("cache-hit-billing", "AIKUN_CACHE_HIT_BILLING") {
+            config.cache_hit_billing = match val.trim().to_ascii_lowercase().as_str() {
+                "free" => CacheHitBilling::Free,
+                "full" | "" => CacheHitBilling::Full,
+                other => {
+                    tracing::warn!("cache-hit-billing={:?} 非法(full/free),回退 full", other);
+                    CacheHitBilling::Full
+                }
+            };
+        }
+        config.redis_url = get("redis-url", "AIKUN_REDIS_URL").filter(|s| !s.is_empty());
         config
     }
 }

@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod billing;
+mod cache;
 mod config;
 mod crypto;
 mod db;
@@ -79,6 +80,8 @@ pub struct AppState {
     /// 关停信号:收到 SIGINT/SIGTERM 后取消,流式生成器据此主动收尾——
     /// 已捕获 usage 照常记账,而不是被 30s 强杀跳过 Drop 丢账。
     pub shutdown: tokio_util::sync::CancellationToken,
+    /// 响应缓存(默认 off;后端默认进程内内存)。
+    pub cache: Arc<cache::GatewayCache>,
 }
 
 #[tokio::main]
@@ -149,6 +152,7 @@ async fn main() {
         redeem_attempts: Arc::new(Mutex::new(HashMap::new())),
         api_key_inflight: Arc::new(Mutex::new(HashMap::new())),
         shutdown: tokio_util::sync::CancellationToken::new(),
+        cache: Arc::new(cache::GatewayCache::from_config(&config)),
     };
 
     // --- Public routes (no auth) ---

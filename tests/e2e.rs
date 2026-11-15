@@ -2306,3 +2306,80 @@ async fn channel_kinds_listed_validated_and_routed() {
         .unwrap();
     assert_eq!(kind, "qoder");
 }
+
+// ---------- 响应缓存 ----------
+
+async fn chat_with(app: &TestApp, temperature: f64, extra_header: Option<(&str, &str)>) -> reqwest::Response {
+    let mut req = app
+        .client()
+        .post(format!("{}/v1/chat/completions", app.base))
+        .json(&serde_json::json!({
+            "model": "gpt-4",
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": "cache me"}]
+        }));
+    if let Some((k, v)) = extra_header {
+        req = req.header(k, v);
+    }
+    app.auth(req).send().await.unwrap()
+}
+
+fn upstream_chat_calls(mock: &MockUpstream) -> usize {
+    mock.requests().iter().filter(|r| r.path == "/v1/chat/completions").count()
+}
+
+#[tokio::test]
+async fn cache_off_by_default_every_request_hits_upstream() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+    for _ in 0..2 {
+        let resp = chat_with(&app, 0.0, None).await;
+        assert_eq!(resp.status(), 200);
+        assert!(resp.headers().get("x-aikun-cache").is_none());
+    }
+    assert_eq!(upstream_chat_calls(&mock), 2);
+}
+
+#[tokio::test]
+async fn deterministic_cache_hit_skips_upstream_and_still_logs() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn_with_env(&[("AIKUN_CACHE_MODE", "deterministic")]).await;
+    seed_api_key(&app.db());
+    seed_openai_provider(&app, &mock, "p1");
+
+    let first = chat_with(&app, 0.0, None).await;
+    assert_eq!(first.status(), 200);
+    assert_eq!(first.headers()["x-aikun-cache"], "MISS");
+    let first_body: serde_json::Value = first.json().await.unwrap();
+
+    // 响应返回前已写入缓存:同一请求紧接着必然命中
+    let second = chat_with(&app, 0.0, None).await;
+    assert_eq!(second.status(), 200);
+    assert_eq!(second.headers()["x-aikun-cache"], "HIT");
+    let hit_body: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(hit_body, first_body);
+    assert_eq!(upstream_chat_calls(&mock), 1, "cache hit must not reach upstream");
+
+    // temperature != 0 不缓存;Cache-Control: no-cache 跳过缓存
+    let warm = chat_with(&app, 0.7, None).await;
+    assert!(warm.headers().get("x-aikun-cache").is_none());
+    let bypass = chat_with(&app, 0.0, Some(("cache-control", "no-cache"))).await;
+    assert!(bypass.headers().get("x-aikun-cache").is_none());
+    assert_eq!(upstream_chat_calls(&mock), 3);
+
+    // 命中也写一条成功日志:provider_id 为空、用量照记
+    wait_until("cache hit logged", WAIT, || {
+        app.db()
+            .query_row(
+                "SELECT COUNT(*) FROM request_logs WHERE success = 1 AND provider_id IS NULL AND total_tokens = 8",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            >= 1
+    })
+    .await;
+}
+

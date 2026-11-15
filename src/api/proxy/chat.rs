@@ -18,9 +18,10 @@ pub async fn chat_completion(
     State(state): State<AppState>,
     claims: Claims,
     auth_ctx: AuthContext,
+    headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    proxy_completion(state, claims, auth_ctx, PROTOCOL_OPENAI, body).await
+    proxy_completion(state, claims, auth_ctx, PROTOCOL_OPENAI, body, &headers).await
 }
 
 /// List available models aggregated from all healthy providers.

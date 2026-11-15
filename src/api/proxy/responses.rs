@@ -13,7 +13,8 @@ pub async fn responses(
     State(state): State<AppState>,
     claims: Claims,
     auth_ctx: AuthContext,
+    headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    crate::gateway::pipeline::proxy_completion(state, claims, auth_ctx, PROTOCOL_RESPONSES, body).await
+    crate::gateway::pipeline::proxy_completion(state, claims, auth_ctx, PROTOCOL_RESPONSES, body, &headers).await
 }

@@ -76,6 +76,33 @@ pub(crate) async fn request_log_sync(
     }
 }
 
+/// 命中响应缓存时的记账:provider_id 为 NULL(未触达任何上游)、
+/// status 200。`billable = false`(AIKUN_CACHE_HIT_BILLING=free)时只记日志
+/// 与用量、不扣费。调用方 await,返回时已落库。
+pub(crate) async fn record_cache_hit(
+    pool: &Arc<DbPool>,
+    user_id: String,
+    api_key_id: Option<String>,
+    model: String,
+    request_type: &str,
+    usage: (i32, i32, i32, i32),
+    billable: bool,
+) {
+    let pool = pool.clone();
+    let request_type = request_type.to_string();
+    let (p, c, t, k) = usage;
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        insert_request_log_ext(
+            &pool, &user_id, api_key_id.as_deref(), None, &model, &request_type,
+            p, c, t, k, 0, 200, true, None, billable,
+        );
+    })
+    .await
+    {
+        warn!("cache-hit log blocking task failed to join: {}", e);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn insert_request_log(
     pool: &DbPool,
@@ -93,6 +120,31 @@ pub(crate) fn insert_request_log(
     success: bool,
     error_message: Option<String>,
 ) {
+    insert_request_log_ext(
+        pool, user_id, api_key_id, provider_id, model, request_type, prompt_tokens,
+        completion_tokens, total_tokens, cached_tokens, latency_ms, status_code, success,
+        error_message, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_request_log_ext(
+    pool: &DbPool,
+    user_id: &str,
+    api_key_id: Option<&str>,
+    provider_id: Option<&str>,
+    model: &str,
+    request_type: &str,
+    prompt_tokens: i32,
+    completion_tokens: i32,
+    total_tokens: i32,
+    cached_tokens: i32,
+    latency_ms: i32,
+    status_code: i32,
+    success: bool,
+    error_message: Option<String>,
+    billable: bool,
+) {
     let mut conn = match pool.conn.lock() {
         Ok(conn) => conn,
         Err(e) => {
@@ -108,7 +160,7 @@ pub(crate) fn insert_request_log(
         // 价格查询、日志插入、余额扣减包在同一个显式事务里——任何一步
         // 失败整体回滚,不会留下"记了日志没扣费"或"扣了费没日志"的中间态。
         let result = (|| -> Result<(), rusqlite::Error> {
-            let cost = if total_tokens > 0 {
+            let cost = if billable && total_tokens > 0 {
                 match crate::billing::find_price(&conn, model) {
                     Some(prices) => crate::billing::compute_cost(prompt_tokens, cached_tokens, completion_tokens, prices),
                     None => {

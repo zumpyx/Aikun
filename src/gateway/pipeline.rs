@@ -36,6 +36,9 @@ use crate::router::selector::{
 };
 use crate::AppState;
 
+/// 可缓存请求的响应头:HIT(命中)/ MISS(未命中,已写入缓存)。
+pub(crate) const CACHE_HEADER: &str = "x-aikun-cache";
+
 /// Shared proxy pipeline for both client protocols (OpenAI / Anthropic).
 ///
 /// Selects a provider, converts the request to the provider's native protocol
@@ -49,6 +52,7 @@ pub async fn proxy_completion(
     auth_ctx: AuthContext,
     client_protocol: &str,
     body: Value,
+    headers: &axum::http::HeaderMap,
 ) -> Response {
     let model = extract_model(&body);
     if model == "unknown" {
@@ -137,6 +141,23 @@ pub async fn proxy_completion(
     let is_stream = body["stream"].as_bool().unwrap_or(false);
     let max_attempts = state.config.max_retries.max(1);
 
+    // 响应缓存:准入(白名单 / 余额 / 限额)全部通过后才查缓存,命中时
+    // 不触达任何上游,但照常记日志(按 AIKUN_CACHE_HIT_BILLING 计费)。
+    let cache_key = state.cache.key_for(client_protocol, &claims.sub, &body, headers);
+    if let Some(key) = &cache_key {
+        if let Some(hit) = state.cache.get(key).await {
+            debug!("Cache hit: protocol={} model={} user={}", client_protocol, model, claims.username);
+            crate::billing::ledger::record_cache_hit(
+                &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), model.clone(),
+                client_protocol, hit.usage,
+                state.cache.hit_billing == crate::config::CacheHitBilling::Full,
+            )
+            .await;
+            drop(concurrency_guard);
+            return (StatusCode::OK, [(CACHE_HEADER, "HIT")], Json(hit.body)).into_response();
+        }
+    }
+
     // 单次尝试的超时取全局与渠道级 timeout_secs 的较大者:渠道允许配到
     // 600s,整体 deadline 若只按全局值算会把它静默截断。查询失败回退全局值。
     let max_channel_timeout = {
@@ -179,7 +200,7 @@ pub async fn proxy_completion(
         attempt_loop(
             state.clone(), client_protocol, model.clone(), body, is_stream,
             claims.sub.clone(), auth_ctx.api_key_id.clone(), tried_order.clone(),
-            concurrency_guard,
+            concurrency_guard, cache_key,
         ),
     )
     .await
@@ -229,6 +250,7 @@ async fn attempt_loop(
     api_key_id: Option<String>,
     tried_order: Arc<std::sync::Mutex<Vec<String>>>,
     concurrency_guard: Option<ConcurrencyGuard>,
+    cache_key: Option<String>,
 ) -> Response {
     let max_attempts = state.config.max_retries.max(1);
     let threshold = state.config.auto_disable_threshold;
@@ -355,6 +377,17 @@ async fn attempt_loop(
                         );
                         let client_body =
                             convert_response(&resp_body, provider_protocol, client_protocol, &model);
+                        if let Some(key) = cache_key {
+                            // 同步写入(内存后端为纳秒级;Redis 后端多一次 SET),
+                            // 保证响应返回后紧接着的同一请求必然命中。
+                            let entry = crate::cache::CacheEntry {
+                                body: client_body.clone(),
+                                usage: (p, c, t, k),
+                            };
+                            state.cache.put(&key, entry).await;
+                            return (StatusCode::OK, [(CACHE_HEADER, "MISS")], Json(client_body))
+                                .into_response();
+                        }
                         return (StatusCode::OK, Json(client_body)).into_response();
                     }
                     result => {
