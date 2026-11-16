@@ -14,7 +14,7 @@ use crate::models::{
     row_to_provider, valid_default_protocol, valid_protocol_list, CreateProviderRequest,
     ProviderResponse, UpdateProviderRequest,
 };
-use crate::router::health::check_provider_health;
+use crate::channel::health::check_provider_health;
 
 pub async fn list_providers(
     State(state): State<AppState>,
@@ -40,7 +40,7 @@ pub async fn list_providers(
                 .map(|p| {
                     let mut resp = ProviderResponse::from(p);
                     // proxy_url 可能内嵌凭证，列表响应一律脱敏回显
-                    resp.proxy_url = crate::channels::transport::sanitize_proxy_url(&resp.proxy_url);
+                    resp.proxy_url = crate::channel::transport::sanitize_proxy_url(&resp.proxy_url);
                     resp
                 })
                 .collect(),
@@ -75,11 +75,11 @@ pub fn valid_provider_type(t: &str) -> bool {
 /// random_range panic。
 /// channel_kind:空串(= generic)或已注册的渠道插件类型。
 pub fn valid_channel_kind(k: &str) -> bool {
-    crate::channels::registry().is_valid_kind(k)
+    crate::channel::registry().is_valid_kind(k)
 }
 
 fn channel_kind_names() -> String {
-    crate::channels::registry()
+    crate::channel::registry()
         .list()
         .iter()
         .map(|i| i.kind)
@@ -89,7 +89,7 @@ fn channel_kind_names() -> String {
 
 /// 管理端「渠道类型」下拉:列出全部已注册的渠道插件。
 pub async fn list_channel_kinds() -> impl IntoResponse {
-    (StatusCode::OK, Json(json!(crate::channels::registry().list())))
+    (StatusCode::OK, Json(json!(crate::channel::registry().list())))
 }
 
 pub fn valid_weight(w: f64) -> bool {
@@ -279,7 +279,7 @@ fn insert_provider(
             last_health_check: None,
             max_retries,
             timeout_secs,
-            proxy_url: crate::channels::transport::sanitize_proxy_url(&proxy_url),
+            proxy_url: crate::channel::transport::sanitize_proxy_url(&proxy_url),
             model_mapping: serde_json::from_str(&model_mapping).unwrap_or_default(),
             disabled_reason: String::new(),
             protocols,
@@ -419,7 +419,7 @@ pub async fn get_provider(
         Ok(p) => {
             let mut resp = ProviderResponse::from(p);
             // proxy_url 可能内嵌凭证,详情响应同样脱敏
-            resp.proxy_url = crate::channels::transport::sanitize_proxy_url(&resp.proxy_url);
+            resp.proxy_url = crate::channel::transport::sanitize_proxy_url(&resp.proxy_url);
             (StatusCode::OK, Json(json!(resp)))
         }
         Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
@@ -820,7 +820,7 @@ pub async fn duplicate_provider(
                 last_health_check: None,
                 max_retries,
                 timeout_secs,
-                proxy_url: crate::channels::transport::sanitize_proxy_url(&proxy_url),
+                proxy_url: crate::channel::transport::sanitize_proxy_url(&proxy_url),
                 model_mapping: serde_json::from_str(&model_mapping).unwrap_or_default(),
                 disabled_reason: String::new(),
                 protocols: serde_json::from_str(&protocols).unwrap_or_default(),
@@ -1050,9 +1050,9 @@ pub async fn fetch_upstream_models(
         })));
     }
 
-    let client = crate::channels::transport::cached_client(&state.clients, &proxy_url, "fetch-models", 15);
+    let client = crate::channel::transport::cached_client(&state.clients, &proxy_url, "fetch-models", 15);
     // URL 与鉴权头由渠道插件决定,与对话 / 健康检查路径同一口径。
-    let adapter = crate::channels::registry().resolve(req.channel_kind.as_deref().unwrap_or("").trim());
+    let adapter = crate::channel::registry().resolve(req.channel_kind.as_deref().unwrap_or("").trim());
     let url = adapter.models_url(&base_url, &protocol);
     let upstream_req = adapter.apply_auth(client.get(&url), &api_key, &protocol);
 
@@ -1060,7 +1060,7 @@ pub async fn fetch_upstream_models(
         Ok(resp) => {
             let status = resp.status().as_u16();
             // 响应体加 8MB 上限，避免异常大的上游响应撑爆内存
-            let body: serde_json::Value = match crate::router::model_test::read_json_limited(resp, 8 * 1024 * 1024).await {
+            let body: serde_json::Value = match crate::channel::model_test::read_json_limited(resp, 8 * 1024 * 1024).await {
                 Ok(v) => v,
                 Err(e) => {
                     return (StatusCode::BAD_GATEWAY, Json(json!({
@@ -1199,10 +1199,10 @@ pub async fn test_provider_model(
     };
 
     let stream = req.stream.unwrap_or(false);
-    let probe = crate::router::model_test::probe_model(
+    let probe = crate::channel::model_test::probe_model(
         &state.clients, &provider, protocol, &model, messages, 1024, stream,
     ).await;
-    crate::router::model_test::record_model_health_async(
+    crate::channel::model_test::record_model_health_async(
         state.pool.clone(),
         provider.id.clone(),
         model,

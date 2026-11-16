@@ -15,5 +15,5 @@ pub async fn messages(
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    crate::gateway::pipeline::proxy_completion(state, claims, auth_ctx, PROTOCOL_ANTHROPIC, body, &headers).await
+    crate::pipeline::proxy_completion(state, claims, auth_ctx, PROTOCOL_ANTHROPIC, body, &headers).await
 }

@@ -7,10 +7,10 @@ use axum::{
 use serde_json::{json, Value};
 
 use crate::auth::{AuthContext, Claims};
-use crate::gateway::admission::model_allowed;
-use crate::gateway::pipeline::proxy_completion;
+use crate::pipeline::admission::model_allowed;
+use crate::pipeline::proxy_completion;
 use crate::protocol::convert::PROTOCOL_OPENAI;
-use crate::router::selector::list_available_models_async;
+use crate::channel::selector::list_available_models_async;
 use crate::AppState;
 
 /// Unified chat completions endpoint (OpenAI-compatible).

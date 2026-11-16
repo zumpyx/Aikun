@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::db::DbPool;
 use crate::models::Provider;
-use crate::channels::transport::send_request;
+use crate::channel::transport::send_request;
 use crate::protocol::convert::{parse_sse_events, PROTOCOL_ANTHROPIC};
 
 /// How often the background loop re-tests every (channel, model) pair.
@@ -320,7 +320,7 @@ pub fn record_model_health(
             ],
         );
     }
-    crate::router::selector::record_request_result(pool, provider_id, latency_ms, ok);
+    crate::channel::selector::record_request_result(pool, provider_id, latency_ms, ok);
 }
 
 /// record_model_health 的异步包装:持 DB 锁的写派发到 blocking 线程池,

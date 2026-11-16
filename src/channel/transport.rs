@@ -167,7 +167,7 @@ pub async fn send_request(
     );
 
     // URL、鉴权头与请求体修补都交给渠道插件(见 crate::channels)。
-    let adapter = crate::channels::adapter_for(provider);
+    let adapter = crate::channel::adapter_for(provider);
     adapter.prepare_request(provider, protocol, &mut request_body);
     let url = adapter.chat_url(provider, protocol);
 

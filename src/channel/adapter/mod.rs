@@ -1,4 +1,7 @@
-//! 渠道插件层(Channel plugins)。
+//! 渠道适配层(Channel adapters)。
+//!
+//! 注意:这不是运行时插件系统(roadmap-v0.5「明确不做:插件系统」)——适配器
+//! 在编译期静态注册,只是把"厂商与标准协议的差异"收敛到一个 trait 里。
 //!
 //! 每一种上游"渠道类型"(channel kind)实现一个 [`ChannelAdapter`]:它决定
 //! 请求发到哪个 URL、带什么鉴权头、发送前后要不要对请求体 / 响应体 / SSE
@@ -7,7 +10,7 @@
 //!
 //! ## 新增一个渠道类型(三步)
 //!
-//! 1. 在 `src/channels/` 下新建 `xxx.rs`,实现 [`ChannelAdapter`]
+//! 1. 在 `src/channel/adapter/` 下新建 `xxx.rs`,实现 [`ChannelAdapter`]
 //!    (通常只需覆写 `kind` / `label` 和少数几个钩子,其余用默认实现);
 //! 2. 在本文件加一行 `pub mod xxx;`,并在 [`registry::ChannelRegistry::builtin`]
 //!    里加一行 `reg.register(Arc::new(xxx::XxxAdapter))`;
@@ -19,7 +22,6 @@
 pub mod generic;
 pub mod qoder;
 pub mod registry;
-pub mod transport;
 pub mod workbuddy;
 
 use reqwest::RequestBuilder;
@@ -59,7 +61,7 @@ pub trait ChannelAdapter: Send + Sync + 'static {
 
     /// 对话请求的完整上游 URL。
     fn chat_url(&self, provider: &Provider, protocol: &str) -> String {
-        transport::build_api_url(
+        crate::channel::transport::build_api_url(
             crate::models::base_url_for(provider, protocol),
             self.endpoint_path(protocol),
         )
@@ -68,7 +70,7 @@ pub trait ChannelAdapter: Send + Sync + 'static {
     /// 模型列表 / 健康探测 URL。只拿 base_url:管理端「获取模型」在渠道
     /// 落库之前就会调用,没有完整的 Provider。
     fn models_url(&self, base_url: &str, _protocol: &str) -> String {
-        transport::build_api_url(base_url, "/models")
+        crate::channel::transport::build_api_url(base_url, "/models")
     }
 
     /// 写入鉴权头。默认:anthropic 协议同时带 x-api-key 与 Bearer

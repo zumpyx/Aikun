@@ -5,11 +5,10 @@ mod cache;
 mod config;
 mod crypto;
 mod db;
-mod gateway;
 mod models;
+mod pipeline;
 mod protocol;
-mod channels;
-mod router;
+mod channel;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -227,7 +226,7 @@ async fn main() {
     tokio::spawn(async move {
         use futures_util::FutureExt;
         loop {
-            let result = std::panic::AssertUnwindSafe(crate::router::health::run_health_check_loop(
+            let result = std::panic::AssertUnwindSafe(crate::channel::health::run_health_check_loop(
                 health_pool.clone(),
                 health_config.clone(),
                 health_clients.clone(),
@@ -248,7 +247,7 @@ async fn main() {
     tokio::spawn(async move {
         use futures_util::FutureExt;
         loop {
-            let result = std::panic::AssertUnwindSafe(crate::router::model_test::run_model_test_loop(
+            let result = std::panic::AssertUnwindSafe(crate::channel::model_test::run_model_test_loop(
                 model_test_pool.clone(),
                 model_test_clients.clone(),
             ))

@@ -107,7 +107,7 @@ pub async fn list_prices(
 pub async fn list_public_prices(State(state): State<AppState>) -> impl IntoResponse {
     let pool = state.pool.clone();
     let joined = tokio::task::spawn_blocking(move || {
-        let models = crate::router::selector::list_available_models(&pool);
+        let models = crate::channel::selector::list_available_models(&pool);
         let conn = pool.read().lock().map_err(|e| e.to_string())?;
         let mut rows = Vec::with_capacity(models.len());
         for model in models {

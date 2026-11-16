@@ -8,7 +8,7 @@ use tracing::info;
 
 use crate::config::AppConfig;
 use crate::db::DbPool;
-use crate::channels::transport::{cached_client, sanitize_log_url, sanitize_proxy_url};
+use crate::channel::transport::{cached_client, sanitize_log_url, sanitize_proxy_url};
 
 /// Check the health of a single provider by making a lightweight request to the models endpoint.
 pub async fn check_provider_health(
@@ -24,7 +24,7 @@ pub async fn check_provider_health(
     let client = cached_client(clients, proxy_url, base_url, timeout_secs);
 
     // URL 与鉴权头由渠道插件决定(见 crate::channels)。
-    let adapter = crate::channels::registry().resolve(channel_kind);
+    let adapter = crate::channel::registry().resolve(channel_kind);
     let url = adapter.models_url(base_url, provider_type);
     // 日志脱敏:URL 可能带 userinfo 或 query(如 ?key=...),不落明文。
     let log_url = sanitize_log_url(&url);
