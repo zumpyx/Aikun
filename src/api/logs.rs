@@ -417,6 +417,35 @@ pub async fn admin_stats(
 
 /// 钱包:当前登录用户(任意角色)的余额与近 30 天消费分析。
 /// 只查本人数据(user_id = claims.sub),与 usage_stats 同口径(UTC 日期)。
+/// 钱包每日序列:(日期, 费用微元, tokens, 请求数),`since` 起(含)。
+/// 合并 request_logs(未过保留期的明细)与 usage_daily(已清理明细的日聚合)。
+/// purge 在同一事务里"聚合 + 删除",同一行明细只会出现在其中一张表,
+/// 部分清理的日期两边相加即为全量,不会重复计数。
+pub(crate) fn wallet_daily(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    since: &str,
+) -> rusqlite::Result<Vec<(String, i64, i64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT d, COALESCE(SUM(c), 0), COALESCE(SUM(t), 0), COALESCE(SUM(r), 0) FROM (
+             SELECT substr(created_at, 1, 10) AS d, SUM(cost) AS c,
+                    SUM(total_tokens) AS t, COUNT(*) AS r
+             FROM request_logs
+             WHERE user_id = ?1 AND substr(created_at, 1, 10) >= ?2
+             GROUP BY d
+             UNION ALL
+             SELECT date AS d, cost AS c, tokens AS t, requests AS r
+             FROM usage_daily
+             WHERE user_id = ?1 AND date >= ?2
+         )
+         GROUP BY d ORDER BY d",
+    )?;
+    let rows = stmt.query_map(params![user_id, since], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
+    })?;
+    rows.collect()
+}
+
 pub async fn wallet_stats(
     State(state): State<AppState>,
     claims: Claims,
@@ -440,46 +469,10 @@ pub async fn wallet_stats(
         |row| row.get::<_, i64>(0),
     );
 
-    // 近 30 天总额 + 今日/近 7 天拆出(与 usage_stats 同一段位手法)
-    let totals = conn.query_row(
-        "SELECT COALESCE(SUM(cost), 0), COALESCE(SUM(total_tokens), 0), COUNT(*),
-                COALESCE(SUM(CASE WHEN substr(created_at, 1, 10) = ?1 THEN cost ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN substr(created_at, 1, 10) = ?1 THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN substr(created_at, 1, 10) >= ?2 THEN cost ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN substr(created_at, 1, 10) >= ?2 THEN 1 ELSE 0 END), 0)
-         FROM request_logs
-         WHERE user_id = ?3 AND substr(created_at, 1, 10) >= ?4",
-        params![today_s, week_s, uid, month_s],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?, row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?, row.get::<_, i64>(6)?,
-            ))
-        },
-    );
-
-    // 每日序列:费用、Token、请求数
-    let daily_rows = conn
-        .prepare(
-            "SELECT substr(created_at, 1, 10) AS d, COALESCE(SUM(cost), 0),
-                    COALESCE(SUM(total_tokens), 0), COUNT(*)
-             FROM request_logs
-             WHERE user_id = ?1 AND substr(created_at, 1, 10) >= ?2
-             GROUP BY d",
-        )
-        .and_then(|mut stmt| {
-            stmt.query_map(params![uid, month_s], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            })
-            .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
-        });
-
+    // 每日序列:费用、Token、请求数。明细(request_logs)超过保留期会被
+    // purge 聚合进 usage_daily 后删除,所以按日合并两表(bug ② 修复);
+    // 今日 / 近 7 天 / 近 30 天合计都由每日序列求和,口径一致。
+    let daily_rows = wallet_daily(&conn, uid, &month_s);
     // 模型消费分布(近 30 天,按费用排序)
     let model_rows = conn
         .prepare(
@@ -499,14 +492,27 @@ pub async fn wallet_stats(
             .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
         });
 
-    let (Ok(balance), Ok((month_cost, month_tok, month_req, today_cost, today_req, week_cost, week_req)), Ok(daily_rows), Ok(model_rows)) =
-        (balance, totals, daily_rows, model_rows)
-    else {
+    let (Ok(balance), Ok(daily_rows), Ok(model_rows)) = (balance, daily_rows, model_rows) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
             "error": "query_failed",
             "message": "Internal server error"
         }))).into_response();
     };
+    let (mut month_cost, mut month_tok, mut month_req) = (0i64, 0i64, 0i64);
+    let (mut week_cost, mut week_req, mut today_cost, mut today_req) = (0i64, 0i64, 0i64, 0i64);
+    for (d, c, t, r) in &daily_rows {
+        month_cost += c;
+        month_tok += t;
+        month_req += r;
+        if d.as_str() >= week_s.as_str() {
+            week_cost += c;
+            week_req += r;
+        }
+        if *d == today_s {
+            today_cost += c;
+            today_req += r;
+        }
+    }
 
     // 补齐缺失日期为 0,保证图表是完整的 30 天序列
     let daily_map: std::collections::HashMap<String, (i64, i64, i64)> =
@@ -542,4 +548,54 @@ pub async fn wallet_stats(
         "daily": daily,
         "top_models": top_models,
     }))).into_response()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn wallet_daily_survives_log_purge() {
+        // 回归(bug ②):明细被保留期清理(聚合进 usage_daily)后,钱包每日
+        // 序列与合计不能变少;部分清理的日期也不能重复计数。
+        let config = crate::config::AppConfig { database_url: ":memory:".into(), ..Default::default() };
+        let pool = Arc::new(crate::db::DbPool::new(&config).unwrap());
+        let now = chrono::Utc::now();
+        let day = |n: i64| now - chrono::Duration::days(n);
+        {
+            let conn = pool.conn.lock().unwrap();
+            conn.execute("INSERT INTO users (id, username, password_hash) VALUES ('u1', 'u1', 'h')", []).unwrap();
+            let mut i = 0;
+            let mut insert = |ts: chrono::DateTime<chrono::Utc>, tokens: i64, cost: i64| {
+                i += 1;
+                conn.execute(
+                    "INSERT INTO request_logs (id, user_id, model, total_tokens, cost, created_at)
+                     VALUES (?1, 'u1', 'm', ?2, ?3, ?4)",
+                    params![format!("l{}", i), tokens, cost, ts.to_rfc3339()],
+                )
+                .unwrap();
+            };
+            insert(day(20), 100, 10_000);
+            insert(day(20), 200, 20_000);
+            insert(day(10), 50, 5_000);
+            insert(now, 10, 1_000);
+        }
+        let since = (now - chrono::Duration::days(29)).format("%Y-%m-%d").to_string();
+        let read = || {
+            let conn = pool.conn.lock().unwrap();
+            wallet_daily(&conn, "u1", &since).unwrap()
+        };
+        let before = read();
+        assert_eq!(before.iter().map(|r| r.1).sum::<i64>(), 36_000);
+
+        crate::channel::health::purge_old_request_logs(&pool, 5);
+        let remaining: i64 = pool
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM request_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1, "过保留期的明细应已清理");
+        assert_eq!(read(), before, "清理后钱包每日序列应保持不变");
+    }
 }
