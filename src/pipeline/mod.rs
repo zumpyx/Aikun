@@ -15,7 +15,6 @@ use axum::{
     },
     Json,
 };
-use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tracing::{debug, warn};
 
@@ -262,25 +261,12 @@ pub(crate) fn apply_model_mapping(provider: &Provider, upstream_body: &mut Value
     }
 }
 
-/// 上游响应体大小上限（8MB）：异常上游的超大 body 不再造成内存 DoS。
-const MAX_RESP_BODY: usize = 8 * 1024 * 1024;
-
-/// 读取上游响应 body 并解析为 JSON；读取失败、超过上限或解析失败都返回
-/// Err，由调用方按失败路径处理。
+/// 读取上游 JSON 响应体(8MB 上限),错误转成对话路径的英文文案。
+/// 统一实现见 [`crate::channel::transport::read_json_limited`]。
 pub(crate) async fn read_json_limited(resp: reqwest::Response) -> Result<Value, String> {
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("failed to read upstream body: {}", e))?;
-        if buf.len() + chunk.len() > MAX_RESP_BODY {
-            return Err(format!(
-                "upstream response body exceeded {} bytes",
-                MAX_RESP_BODY
-            ));
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&buf).map_err(|e| format!("failed to parse upstream response: {}", e))
+    crate::channel::transport::read_json_limited(resp, crate::channel::transport::MAX_RESP_BODY)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 截断 JSON 值用于日志/审计:上游错误信封可能很大,只保留前 200 字符。

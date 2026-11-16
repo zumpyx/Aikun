@@ -11,6 +11,57 @@ use tracing::{debug, warn};
 
 use crate::models::Provider;
 
+/// 上游响应体大小上限(8MB):异常上游的超大 body 不再造成内存 DoS。
+pub const MAX_RESP_BODY: usize = 8 * 1024 * 1024;
+
+/// [`read_json_limited`] 的失败原因。对话路径沿用英文文案(`Display`),
+/// 管理端(模型实测 / fetch-models)沿用中文文案([`BodyReadError::zh`]),
+/// 与合并前两份实现的对外文案逐字一致。
+#[derive(Debug)]
+pub enum BodyReadError {
+    Read(String),
+    TooLarge(usize),
+    Parse(String),
+}
+
+impl std::fmt::Display for BodyReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BodyReadError::Read(e) => write!(f, "failed to read upstream body: {}", e),
+            BodyReadError::TooLarge(max) => write!(f, "upstream response body exceeded {} bytes", max),
+            BodyReadError::Parse(e) => write!(f, "failed to parse upstream response: {}", e),
+        }
+    }
+}
+
+impl BodyReadError {
+    /// 管理端中文文案。
+    pub fn zh(&self) -> String {
+        match self {
+            BodyReadError::Read(e) => format!("读取响应体失败: {}", e),
+            BodyReadError::TooLarge(max) => format!("响应体超过 {} 字节上限", max),
+            BodyReadError::Parse(e) => format!("响应体不是合法 JSON: {}", e),
+        }
+    }
+}
+
+/// 读取上游 JSON 响应体,带硬性字节上限。读取失败、超限或解析失败都返回
+/// Err —— 解析失败必须报错而不是当空对象:否则 200+HTML 错误页/非 JSON
+/// 响应会被当成"合法的 200"。对话、直通、模型实测、fetch-models 共用。
+pub async fn read_json_limited(resp: reqwest::Response, max_bytes: usize) -> Result<Value, BodyReadError> {
+    use futures_util::StreamExt;
+    let mut stream = std::pin::pin!(resp.bytes_stream());
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|e| BodyReadError::Read(e.to_string()))?;
+        if buf.len() + bytes.len() > max_bytes {
+            return Err(BodyReadError::TooLarge(max_bytes));
+        }
+        buf.extend_from_slice(&bytes);
+    }
+    serde_json::from_slice(&buf).map_err(|e| BodyReadError::Parse(e.to_string()))
+}
+
 /// Build a proper URL path based on provider type and base URL.
 pub fn build_api_url(base_url: &str, path: &str) -> String {
     // base_url 可能带 query（如 Azure 的 ?api-version=...），先拆出来最后拼回

@@ -16,7 +16,9 @@ pub struct RequestLog {
     pub status_code: i32,
     pub success: bool,
     pub error_message: Option<String>,
-    pub cost: f64,
+    /// 整数微元(与 DB 列一致,roadmap-v0.5 阶段 1);对外 API 由
+    /// [`RequestLogResponse`] 换算成元。
+    pub cost: i64,
     pub created_at: String,
 }
 
@@ -40,6 +42,7 @@ pub struct RequestLogResponse {
     pub status_code: i32,
     pub success: bool,
     pub error_message: Option<String>,
+    /// 对外 API 口径:元(f64),仅在序列化边界由微元换算。
     pub cost: f64,
     pub created_at: String,
 }
@@ -64,7 +67,7 @@ impl From<RequestLog> for RequestLogResponse {
             status_code: l.status_code,
             success: l.success,
             error_message: l.error_message,
-            cost: l.cost,
+            cost: crate::billing::micro_to_yuan(l.cost),
             created_at: l.created_at,
         }
     }

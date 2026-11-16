@@ -1066,12 +1066,12 @@ pub async fn fetch_upstream_models(
         Ok(resp) => {
             let status = resp.status().as_u16();
             // 响应体加 8MB 上限，避免异常大的上游响应撑爆内存
-            let body: serde_json::Value = match crate::channel::model_test::read_json_limited(resp, 8 * 1024 * 1024).await {
+            let body: serde_json::Value = match crate::channel::transport::read_json_limited(resp, crate::channel::transport::MAX_RESP_BODY).await {
                 Ok(v) => v,
                 Err(e) => {
                     return (StatusCode::BAD_GATEWAY, Json(json!({
                         "error": "upstream_error",
-                        "message": format!("上游响应读取失败: {}", e)
+                        "message": format!("上游响应读取失败: {}", e.zh())
                     })));
                 }
             };

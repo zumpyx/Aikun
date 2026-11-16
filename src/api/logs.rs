@@ -152,8 +152,8 @@ pub async fn list_logs(
                 status_code: row.get(11)?,
                 success: row.get(12)?,
                 error_message: row.get(13)?,
-                // DB 存整数微元,对外 API 口径为元(f64)
-                cost: crate::billing::micro_to_yuan(row.get::<_, i64>(14)?),
+                // DB 与模型均为整数微元,对外换算在 RequestLogResponse::from。
+                cost: row.get(14)?,
                 created_at: row.get(15)?,
             },
             row.get::<_, Option<String>>(16)?,

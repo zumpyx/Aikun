@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::db::DbPool;
 use crate::models::Provider;
-use crate::channel::transport::send_request;
+use crate::channel::transport::{read_json_limited, send_request, MAX_RESP_BODY};
 use crate::protocol::{parse_sse_events, Protocol};
 
 /// How often the background loop re-tests every (channel, model) pair.
@@ -27,7 +27,7 @@ const ROUND_BUDGET_SECS: u64 = 600;
 /// 实测并发 worker 数（参照前端 test-all 的有界并发模式）。
 const ROUND_WORKERS: usize = 4;
 /// 非流式响应体的读取上限。
-const BODY_CAP: usize = 8 * 1024 * 1024;
+const BODY_CAP: usize = MAX_RESP_BODY;
 /// 流式探针的整体 deadline（秒）、SSE 缓冲上限与可见文本截断上限。
 const STREAM_DEADLINE_SECS: u64 = 120;
 const STREAM_BUF_CAP: usize = 1024 * 1024;
@@ -108,24 +108,6 @@ fn extract_delta(protocol: Protocol, data: &str) -> String {
     }
 }
 
-/// Read an upstream JSON body with a hard byte cap so a huge or hostile
-/// response cannot exhaust memory. Used by model probes and fetch-models.
-pub async fn read_json_limited(resp: reqwest::Response, max_bytes: usize) -> Result<Value, String> {
-    use futures_util::StreamExt;
-    let mut stream = std::pin::pin!(resp.bytes_stream());
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| format!("读取响应体失败: {}", e))?;
-        if buf.len() + bytes.len() > max_bytes {
-            return Err(format!("响应体超过 {} 字节上限", max_bytes));
-        }
-        buf.extend_from_slice(&bytes);
-    }
-    // 解析失败必须报错而不是当空对象:否则 200+HTML 错误页/非 JSON
-    // 响应会被探针和 fetch-models 误判为"合法的 200"。
-    serde_json::from_slice(&buf).map_err(|e| format!("响应体不是合法 JSON: {}", e))
-}
-
 /// Run one live test of `model` through `provider` and report the outcome.
 /// When `stream` is true the upstream is asked for SSE and the stream is
 /// consumed to completion (bounded by the provider idle timeout) so streaming
@@ -189,7 +171,7 @@ pub async fn probe_model(
                     ok: false,
                     latency_ms: latency,
                     status,
-                    error: Some(e),
+                    error: Some(e.zh()),
                     snippet: None,
                     response: None,
                 };
