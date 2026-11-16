@@ -8,8 +8,8 @@ use std::sync::{Arc, OnceLock};
 
 use serde::Serialize;
 
-use super::ChannelAdapter;
-use crate::models::Provider;
+use crate::ChannelAdapter;
+use crate::provider::Provider;
 
 pub struct ChannelRegistry {
     adapters: BTreeMap<&'static str, Arc<dyn ChannelAdapter>>,
@@ -153,7 +153,7 @@ mod tests {
         let mut reg = ChannelRegistry::builtin();
         reg.register(Arc::new(DemoAdapter));
         let a = reg.resolve("demo");
-        let mut p = crate::models::provider::tests::bare_provider();
+        let mut p = crate::provider::tests::bare_provider();
         p.openai_base_url = "https://vendor.example/v1".into();
         assert_eq!(
             a.chat_url(&p, aikun_protocol::Protocol::OpenAi),

@@ -86,7 +86,7 @@ fn __query_empty_marker(
 pub struct AdminListBillingTransactionsQuery {
     pub limit: ::std::option::Option<i64>,
     pub offset: ::std::option::Option<i64>,
-    pub user_id: ::std::option::Option<i64>,
+    pub user_id: ::std::option::Option<String>,
 }
 fn __decode_admin_list_billing_transactions_query(
     raw: ::std::option::Option<&str>,
@@ -115,7 +115,7 @@ fn __decode_admin_list_billing_transactions_query(
 pub struct AdminListModelHealthQuery {
     pub limit: ::std::option::Option<i64>,
     pub offset: ::std::option::Option<i64>,
-    pub provider_id: ::std::option::Option<i64>,
+    pub provider_id: ::std::option::Option<String>,
 }
 fn __decode_admin_list_model_health_query(
     raw: ::std::option::Option<&str>,
@@ -249,7 +249,7 @@ fn __decode_admin_list_users_query(
 pub struct GetLogStatsQuery {
     pub model: ::std::option::Option<String>,
     pub success: ::std::option::Option<GetLogStatsSuccess>,
-    pub user_id: ::std::option::Option<i64>,
+    pub user_id: ::std::option::Option<String>,
     pub since: ::std::option::Option<String>,
 }
 fn __decode_get_log_stats_query(
@@ -283,7 +283,7 @@ fn __decode_get_log_stats_query(
 pub struct ListApiKeysQuery {
     pub limit: ::std::option::Option<i64>,
     pub offset: ::std::option::Option<i64>,
-    pub user_id: ::std::option::Option<i64>,
+    pub user_id: ::std::option::Option<String>,
 }
 fn __decode_list_api_keys_query(
     raw: ::std::option::Option<&str>,
@@ -314,7 +314,7 @@ pub struct ListLogsQuery {
     pub offset: ::std::option::Option<i64>,
     pub model: ::std::option::Option<String>,
     pub success: ::std::option::Option<ListLogsSuccess>,
-    pub user_id: ::std::option::Option<i64>,
+    pub user_id: ::std::option::Option<String>,
     pub since: ::std::option::Option<String>,
 }
 fn __decode_list_logs_query(
@@ -516,13 +516,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_23_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -734,13 +734,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_30_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -774,13 +774,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_31_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -814,13 +814,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_32_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -854,13 +854,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_33_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -894,13 +894,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_34_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -968,13 +968,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_36_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -1016,13 +1016,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_37_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -1045,6 +1045,23 @@ async fn admin_list_billing_transactions_handler<T>(
 where
     T: super::api::AdminApi + Clone + Send + Sync + 'static,
 {
+    if let Some(raw) = __raw_query.as_deref() {
+        if __validate_urlencoded(raw).is_err() {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    }
+    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "user_id") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_40_QUERY_2,
+            "/query/user_id",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
     let __q: AdminListBillingTransactionsQuery =
         match __decode_admin_list_billing_transactions_query(__raw_query.as_deref()) {
             Ok(query) => query,
@@ -1101,6 +1118,23 @@ async fn admin_list_model_health_handler<T>(
 where
     T: super::api::AdminApi + Clone + Send + Sync + 'static,
 {
+    if let Some(raw) = __raw_query.as_deref() {
+        if __validate_urlencoded(raw).is_err() {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    }
+    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "provider_id") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_43_QUERY_2,
+            "/query/provider_id",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
     let __q: AdminListModelHealthQuery =
         match __decode_admin_list_model_health_query(__raw_query.as_deref()) {
             Ok(query) => query,
@@ -1380,13 +1414,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_55_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -1421,13 +1455,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_57_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -1479,13 +1513,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_59_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -1537,13 +1571,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_61_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -1596,13 +1630,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_63_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -1819,13 +1853,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_3_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {
@@ -1877,6 +1911,15 @@ where
         if let Err(rejection) = super::validation::validate_string_parameter(
             super::validation::VALIDATION_TARGET_5_QUERY_1,
             "/query/success",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "user_id") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_6_QUERY_2,
+            "/query/user_id",
             &raw,
         ) {
             return ::axum::response::IntoResponse::into_response(rejection);
@@ -1963,6 +2006,23 @@ async fn list_api_keys_handler<T>(
 where
     T: super::api::UserApi + Clone + Send + Sync + 'static,
 {
+    if let Some(raw) = __raw_query.as_deref() {
+        if __validate_urlencoded(raw).is_err() {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    }
+    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "user_id") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_10_QUERY_2,
+            "/query/user_id",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
     let __q: ListApiKeysQuery = match __decode_list_api_keys_query(__raw_query.as_deref()) {
         Ok(query) => query,
         Err(_) => {
@@ -2030,6 +2090,15 @@ where
         if let Err(rejection) = super::validation::validate_string_parameter(
             super::validation::VALIDATION_TARGET_14_QUERY_3,
             "/query/success",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "user_id") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_15_QUERY_4,
+            "/query/user_id",
             &raw,
         ) {
             return ::axum::response::IntoResponse::into_response(rejection);
@@ -2201,13 +2270,13 @@ where
             );
         }
     };
-    let id: i64 = match __path_values.remove("id") {
+    let id: String = match __path_values.remove("id") {
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
                 super::validation::VALIDATION_TARGET_21_PATH_0,
                 "/path/id",
-                false,
+                true,
             ) {
                 Ok(value) => value,
                 Err(rejection) => {

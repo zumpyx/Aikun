@@ -41,7 +41,7 @@ pub trait AdminApi: Send + Sync + 'static {
     /// `POST /api/users/{id}/balance-transactions`
     async fn admin_adjust_user_balance(
         &self,
-        id: i64,
+        id: String,
         body: AdjustBalanceRequest,
     ) -> AdminAdjustUserBalanceResponse;
     /// 新建价格条目
@@ -83,23 +83,24 @@ pub trait AdminApi: Send + Sync + 'static {
     /// 删除价格条目
     ///
     /// `DELETE /api/prices/{id}`
-    async fn admin_delete_price(&self, id: i64) -> AdminDeletePriceResponse;
+    async fn admin_delete_price(&self, id: String) -> AdminDeletePriceResponse;
     /// 物理删除渠道
     ///
     /// `DELETE /api/providers/{id}`
-    async fn admin_delete_provider(&self, id: i64) -> AdminDeleteProviderResponse;
+    async fn admin_delete_provider(&self, id: String) -> AdminDeleteProviderResponse;
     /// 禁用用户(软删除)
     ///
     /// `DELETE /api/users/{id}`
-    async fn admin_delete_user(&self, id: i64) -> AdminDeleteUserResponse;
+    async fn admin_delete_user(&self, id: String) -> AdminDeleteUserResponse;
     /// 禁用未使用的兑换码
     ///
     /// `DELETE /api/redemption-codes/{id}`
-    async fn admin_disable_redemption_code(&self, id: i64) -> AdminDisableRedemptionCodeResponse;
+    async fn admin_disable_redemption_code(&self, id: String)
+    -> AdminDisableRedemptionCodeResponse;
     /// 复制渠道(创建一个副本)
     ///
     /// `POST /api/providers/{id}/duplicates`
-    async fn admin_duplicate_provider(&self, id: i64) -> AdminDuplicateProviderResponse;
+    async fn admin_duplicate_provider(&self, id: String) -> AdminDuplicateProviderResponse;
     /// 为(尚未保存的)渠道配置拉取上游模型列表
     ///
     /// `POST /api/providers/fetch-models`
@@ -114,7 +115,7 @@ pub trait AdminApi: Send + Sync + 'static {
     /// 渠道详情
     ///
     /// `GET /api/providers/{id}`
-    async fn admin_get_provider(&self, id: i64) -> AdminGetProviderResponse;
+    async fn admin_get_provider(&self, id: String) -> AdminGetProviderResponse;
     /// 仪表盘用量聚合
     ///
     /// `GET /api/usage-stats`
@@ -122,7 +123,7 @@ pub trait AdminApi: Send + Sync + 'static {
     /// 查单个用户(含余额)
     ///
     /// `GET /api/users/{id}`
-    async fn admin_get_user(&self, id: i64) -> AdminGetUserResponse;
+    async fn admin_get_user(&self, id: String) -> AdminGetUserResponse;
     /// 调账/充值流水查询
     ///
     /// `GET /api/balance-transactions`
@@ -130,7 +131,7 @@ pub trait AdminApi: Send + Sync + 'static {
         &self,
         limit: ::std::option::Option<i64>,
         offset: ::std::option::Option<i64>,
-        user_id: ::std::option::Option<i64>,
+        user_id: ::std::option::Option<String>,
     ) -> AdminListBillingTransactionsResponse;
     /// 渠道适配器类型下拉(目录)
     ///
@@ -143,7 +144,7 @@ pub trait AdminApi: Send + Sync + 'static {
         &self,
         limit: ::std::option::Option<i64>,
         offset: ::std::option::Option<i64>,
-        provider_id: ::std::option::Option<i64>,
+        provider_id: ::std::option::Option<String>,
     ) -> AdminListModelHealthResponse;
     /// 模型价格表(管理端全量,含通配条目)
     ///
@@ -183,13 +184,13 @@ pub trait AdminApi: Send + Sync + 'static {
     /// 渠道连通性测试(创建一次探测)
     ///
     /// `POST /api/providers/{id}/tests`
-    async fn admin_test_provider(&self, id: i64) -> AdminTestProviderResponse;
+    async fn admin_test_provider(&self, id: String) -> AdminTestProviderResponse;
     /// 对渠道 + 模型发真实对话请求(端到端验证,可流式)
     ///
     /// `POST /api/providers/{id}/model-tests`
     async fn admin_test_provider_model(
         &self,
-        id: i64,
+        id: String,
         body: ModelTestRequest,
     ) -> AdminTestProviderModelResponse;
     /// 部分更新价格条目
@@ -197,7 +198,7 @@ pub trait AdminApi: Send + Sync + 'static {
     /// `PATCH /api/prices/{id}`
     async fn admin_update_price(
         &self,
-        id: i64,
+        id: String,
         body: UpsertPriceRequest,
     ) -> AdminUpdatePriceResponse;
     /// 部分更新渠道
@@ -205,13 +206,17 @@ pub trait AdminApi: Send + Sync + 'static {
     /// `PATCH /api/providers/{id}`
     async fn admin_update_provider(
         &self,
-        id: i64,
+        id: String,
         body: UpdateProviderRequest,
     ) -> AdminUpdateProviderResponse;
     /// 部分更新用户(改密/启停/改角色)
     ///
     /// `PATCH /api/users/{id}`
-    async fn admin_update_user(&self, id: i64, body: UpdateUserRequest) -> AdminUpdateUserResponse;
+    async fn admin_update_user(
+        &self,
+        id: String,
+        body: UpdateUserRequest,
+    ) -> AdminUpdateUserResponse;
 }
 /// Operations under the `Auth` tag.
 #[async_trait::async_trait]
@@ -239,7 +244,7 @@ pub trait UserApi: Send + Sync + 'static {
     /// 删除 API key
     ///
     /// `DELETE /api/api-keys/{id}`
-    async fn delete_api_key(&self, id: i64) -> DeleteApiKeyResponse;
+    async fn delete_api_key(&self, id: String) -> DeleteApiKeyResponse;
     /// 当前登录用户信息 + 余额
     ///
     /// `GET /api/users/me`
@@ -251,7 +256,7 @@ pub trait UserApi: Send + Sync + 'static {
         &self,
         model: ::std::option::Option<String>,
         success: ::std::option::Option<GetLogStatsSuccess>,
-        user_id: ::std::option::Option<i64>,
+        user_id: ::std::option::Option<String>,
         since: ::std::option::Option<String>,
     ) -> GetLogStatsResponse;
     /// 服务版本号
@@ -269,7 +274,7 @@ pub trait UserApi: Send + Sync + 'static {
         &self,
         limit: ::std::option::Option<i64>,
         offset: ::std::option::Option<i64>,
-        user_id: ::std::option::Option<i64>,
+        user_id: ::std::option::Option<String>,
     ) -> ListApiKeysResponse;
     /// 请求日志列表
     ///
@@ -280,7 +285,7 @@ pub trait UserApi: Send + Sync + 'static {
         offset: ::std::option::Option<i64>,
         model: ::std::option::Option<String>,
         success: ::std::option::Option<ListLogsSuccess>,
-        user_id: ::std::option::Option<i64>,
+        user_id: ::std::option::Option<String>,
         since: ::std::option::Option<String>,
     ) -> ListLogsResponse;
     /// 在售模型价目(登录用户只读)
@@ -298,5 +303,5 @@ pub trait UserApi: Send + Sync + 'static {
     /// 部分更新 API key
     ///
     /// `PATCH /api/api-keys/{id}`
-    async fn update_api_key(&self, id: i64, body: UpdateApiKeyRequest) -> UpdateApiKeyResponse;
+    async fn update_api_key(&self, id: String, body: UpdateApiKeyRequest) -> UpdateApiKeyResponse;
 }

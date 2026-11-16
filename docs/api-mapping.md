@@ -12,6 +12,7 @@
 |---|---|---|---|---|
 | 1 | 管理面前缀 | `/api/admin/**` 与 `/api/**` 并存 | 保留 `/api`,**取消 `/admin` 段**;admin 边界由 tag + `require_admin` 中间件承担 | 全部管理端前端调用 |
 | 2 | ID 类型 | UUID 字符串(`src/models/*.rs`) | **integer int64** | 全部 `{id}` 路径参数与引用字段;**impl 迁移方案待定,见备注 1** |
+> **已拍板(2026-11-16)**:ID 保持不透明 string,弃 int64——JS Number 仅 53 位安全整数(Google AIP-140 亦要求 int64 序列化为 string),且 SurrealDB record ID 天生字符串。零数据迁移,现网 UUID 直接沿用。
 | 3 | 列表响应 | 绝大多数裸数组(仅 redemption-codes 已是 `{total,items}`) | 统一 `{items, total}` 信封 + `limit/offset` 分页(默认 50,clamp 1..=200) | 所有列表消费方 |
 | 4 | 删除成功 | `200 {message:'deleted'/'disabled'}` | **204 No Content** | api-keys / users / providers / prices / redemption-codes 的删除分支 |
 | 5 | 创建成功 | 混合(多数 201;调账 200;兑换 200;tests 200) | **统一 201**(创建资源/流水/测试记录) | balance-transactions、redemptions、tests、model-tests |

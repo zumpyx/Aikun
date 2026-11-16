@@ -89,7 +89,7 @@ pub struct UserWithBalance {
     pub balance: f64,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub display_name: String,
-    pub id: i64,
+    pub id: String,
     pub is_active: bool,
     pub role: UserRole,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -360,7 +360,7 @@ pub struct RedemptionCode {
         deserialize_with = "tri_state_serde::deserialize"
     )]
     pub expires_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
-    pub id: i64,
+    pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub status: RedemptionCodeStatus,
@@ -413,7 +413,7 @@ pub struct ProviderTestResult {
     pub latency_ms: f64,
     pub message: String,
     pub name: String,
-    pub provider_id: i64,
+    pub provider_id: String,
     pub status: ProviderTestResultStatus,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -493,7 +493,7 @@ pub struct Provider {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_rate: Option<f64>,
     pub health_status: ProviderHealthStatus,
-    pub id: i64,
+    pub id: String,
     pub is_active: bool,
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -677,7 +677,7 @@ pub struct Price {
     pub cached_price: Option<Option<f64>>,
     pub completion_price: f64,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    pub id: i64,
+    pub id: String,
     ///精确模型名或末尾通配(如 gpt-*;只允许末尾单个 * 且前缀非空)
     pub model: String,
     pub prompt_price: f64,
@@ -866,7 +866,7 @@ pub struct ModelHealth {
     pub error: Option<String>,
     pub latency_ms: f64,
     pub model: String,
-    pub provider_id: i64,
+    pub provider_id: String,
     ///最近一次实测结果
     pub status: ModelHealthStatus,
 }
@@ -908,7 +908,7 @@ pub struct LoginResponse {
 pub struct User {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub display_name: String,
-    pub id: i64,
+    pub id: String,
     pub is_active: bool,
     pub role: UserRole,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -966,7 +966,7 @@ pub struct RequestLog {
         deserialize_with = "tri_state_serde::deserialize"
     )]
     pub error_message: Option<Option<String>>,
-    pub id: i64,
+    pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<i32>,
     pub model: String,
@@ -1052,7 +1052,7 @@ pub struct FetchModelsRequest {
     pub protocol: Option<FetchModelsRequestProtocol>,
     ///编辑已有渠道时传入,用于回退库存密钥/代理
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_id: Option<i64>,
+    pub provider_id: Option<String>,
     ///旧客户端回退字段,protocol 缺省时使用
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_type: Option<String>,
@@ -1110,7 +1110,7 @@ impl FetchModelsRequestBuilder {
     }
     #[doc = concat!("Set the optional `", "provider_id", "` request field.")]
     #[must_use]
-    pub fn provider_id(mut self, provider_id: i64) -> Self {
+    pub fn provider_id(mut self, provider_id: String) -> Self {
         self.value.provider_id = Some(provider_id);
         self
     }
@@ -1816,7 +1816,7 @@ pub struct BatchUserItemResult {
     pub code: Option<String>,
     ///成功时的用户 ID
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<i64>,
+    pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     pub ok: bool,
@@ -1882,12 +1882,12 @@ pub struct BalanceTransaction {
     ///交易后余额(元)
     pub balance_after: f64,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    pub id: i64,
+    pub id: String,
     ///recharge=充值/兑换;adjust=管理员负向调账
     pub kind: BalanceTransactionKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    pub user_id: i64,
+    pub user_id: String,
     ///LEFT JOIN;用户已删除时 null
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -1966,7 +1966,7 @@ pub struct ApiKeyCreated {
         deserialize_with = "tri_state_serde::deserialize"
     )]
     pub expires_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
-    pub id: i64,
+    pub id: String,
     pub is_active: bool,
     ///完整明文 key,仅创建响应返回一次;此后仅可见掩码
     pub key: String,
@@ -1988,7 +1988,7 @@ pub struct ApiKeyCreated {
     ///每分钟请求上限;0 = 不限
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_rpm: Option<i64>,
-    pub user_id: i64,
+    pub user_id: String,
 }
 ///列表/更新视角的 API key;key 恒为掩码 sk-**** + 后 4 位
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2001,7 +2001,7 @@ pub struct ApiKey {
         deserialize_with = "tri_state_serde::deserialize"
     )]
     pub expires_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
-    pub id: i64,
+    pub id: String,
     pub is_active: bool,
     ///掩码(如 sk-****a1b2);完整明文仅创建响应返回一次
     pub key: String,
@@ -2023,7 +2023,7 @@ pub struct ApiKey {
     ///每分钟请求上限;0 = 不限
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_rpm: Option<i64>,
-    pub user_id: i64,
+    pub user_id: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AdjustBalanceResult {
