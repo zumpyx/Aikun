@@ -127,9 +127,9 @@ pub fn first_defaultable_protocol(protocols: &[String]) -> String {
 /// default, falling back to the legacy provider_type mapping.
 pub fn channel_protocol(p: &Provider) -> &'static str {
     match p.default_protocol.as_str() {
-        "anthropic" => crate::protocol::convert::PROTOCOL_ANTHROPIC,
-        "openai" => crate::protocol::convert::PROTOCOL_OPENAI,
-        _ => crate::protocol::convert::provider_protocol(&p.provider_type),
+        "anthropic" => crate::protocol::PROTOCOL_ANTHROPIC,
+        "openai" => crate::protocol::PROTOCOL_OPENAI,
+        _ => crate::protocol::provider_protocol(&p.provider_type),
     }
 }
 
@@ -138,10 +138,10 @@ pub fn channel_protocol(p: &Provider) -> &'static str {
 /// responses 只作支持协议声明,不作 default_protocol,故此处只需处理
 /// 客户端协议为 responses 的情形。
 pub fn upstream_protocol_for(p: &Provider, client_protocol: &str) -> &'static str {
-    if client_protocol == crate::protocol::convert::PROTOCOL_RESPONSES
+    if client_protocol == crate::protocol::PROTOCOL_RESPONSES
         && channel_protocols(p).iter().any(|x| x == "responses")
     {
-        return crate::protocol::convert::PROTOCOL_RESPONSES;
+        return crate::protocol::PROTOCOL_RESPONSES;
     }
     channel_protocol(p)
 }
@@ -150,7 +150,7 @@ pub fn upstream_protocol_for(p: &Provider, client_protocol: &str) -> &'static st
 /// 提供不同路由。协议专属地址为空时回退另一个,保证只配了一个地址的
 /// 渠道照常工作。
 pub fn base_url_for<'a>(p: &'a Provider, protocol: &str) -> &'a str {
-    if protocol == crate::protocol::convert::PROTOCOL_ANTHROPIC {
+    if protocol == crate::protocol::PROTOCOL_ANTHROPIC {
         if p.anthropic_base_url.is_empty() {
             &p.openai_base_url
         } else {
@@ -170,7 +170,7 @@ pub fn channel_protocols(p: &Provider) -> Vec<String> {
     if valid_protocol_list(&list) {
         return list;
     }
-    vec![crate::protocol::convert::provider_protocol(&p.provider_type).to_string()]
+    vec![crate::protocol::provider_protocol(&p.provider_type).to_string()]
 }
 
 /// Map a row of the standard providers-table select order (id, name,

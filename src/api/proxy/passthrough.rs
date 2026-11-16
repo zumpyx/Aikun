@@ -22,7 +22,7 @@ use crate::pipeline::admission::{enforce_key_limits, has_positive_balance};
 use crate::pipeline::{apply_model_mapping, protocol_error, read_json_limited};
 use crate::auth::{AuthContext, Claims};
 use crate::channel::transport::{build_api_url, cached_client};
-use crate::protocol::convert::{extract_usage_any, PROTOCOL_OPENAI};
+use crate::protocol::{extract_usage_any, PROTOCOL_OPENAI};
 use crate::channel::selector::{
     select_provider_async, spawn_pin_channel, spawn_record_failure, spawn_record_result,
 };

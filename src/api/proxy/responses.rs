@@ -2,7 +2,7 @@ use axum::{extract::State, response::Response, Json};
 use serde_json::Value;
 
 use crate::auth::{AuthContext, Claims};
-use crate::protocol::convert::PROTOCOL_RESPONSES;
+use crate::protocol::PROTOCOL_RESPONSES;
 use crate::AppState;
 
 /// OpenAI Responses API endpoint.

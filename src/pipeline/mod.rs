@@ -24,7 +24,7 @@ use crate::billing::ledger::spawn_request_log;
 use crate::pipeline::admission::{enforce_key_limits, has_positive_balance, model_allowed};
 use crate::models::Provider;
 use crate::channel::transport::extract_model;
-use crate::protocol::convert::{
+use crate::protocol::{
     anthropic_error_type, SseOut,
     PROTOCOL_RESPONSES,
 };
@@ -267,7 +267,7 @@ pub(crate) fn apply_model_mapping(provider: &Provider, upstream_body: &mut Value
 
 /// Build an error body in the client-facing protocol shape.
 pub(crate) fn protocol_error(client_protocol: &str, err_type: &str, message: &str) -> Value {
-    if client_protocol == crate::protocol::convert::PROTOCOL_ANTHROPIC {
+    if client_protocol == crate::protocol::PROTOCOL_ANTHROPIC {
         json!({
             "type": "error",
             "error": {"type": anthropic_error_type(err_type), "message": message}
@@ -289,7 +289,7 @@ fn convert_error(err_body: &Value, client_protocol: &str) -> Value {
     let err_type = err_body["error"]["type"]
         .as_str()
         .unwrap_or("upstream_error");
-    if client_protocol == crate::protocol::convert::PROTOCOL_ANTHROPIC {
+    if client_protocol == crate::protocol::PROTOCOL_ANTHROPIC {
         json!({
             "type": "error",
             "error": {"type": anthropic_error_type(err_type), "message": message}
@@ -330,7 +330,7 @@ fn truncate_json(v: &Value) -> String {
 
 /// 流中途失败时发给客户端的协议对应错误事件。
 fn stream_error_event(client_protocol: &str, message: &str) -> SseOut {
-    if client_protocol == crate::protocol::convert::PROTOCOL_ANTHROPIC {
+    if client_protocol == crate::protocol::PROTOCOL_ANTHROPIC {
         SseOut {
             event: Some("error".to_string()),
             data: json!({
@@ -365,7 +365,7 @@ fn stream_error_event(client_protocol: &str, message: &str) -> SseOut {
 /// Responses API 无终止帧(response.completed 或 error 事件后流直接结束),
 /// 调用方对 responses 客户端应跳过此函数。
 fn stream_terminal_event(client_protocol: &str) -> SseOut {
-    if client_protocol == crate::protocol::convert::PROTOCOL_ANTHROPIC {
+    if client_protocol == crate::protocol::PROTOCOL_ANTHROPIC {
         SseOut {
             event: Some("message_stop".to_string()),
             data: json!({"type": "message_stop"}).to_string(),

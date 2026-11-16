@@ -18,7 +18,7 @@ use super::*;
 use crate::billing::ledger::{request_log_sync, spawn_request_log};
 use crate::pipeline::admission::ConcurrencyGuard;
 use crate::channel::transport::send_request;
-use crate::protocol::convert::{
+use crate::protocol::{
     convert_request, convert_response, extract_usage_any, valid_response_shape,
 };
 use crate::channel::selector::{

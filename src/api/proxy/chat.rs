@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use crate::auth::{AuthContext, Claims};
 use crate::pipeline::admission::model_allowed;
 use crate::pipeline::proxy_completion;
-use crate::protocol::convert::PROTOCOL_OPENAI;
+use crate::protocol::PROTOCOL_OPENAI;
 use crate::channel::selector::list_available_models_async;
 use crate::AppState;
 

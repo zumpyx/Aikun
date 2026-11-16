@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 use super::*;
 use crate::billing::ledger::{insert_request_log, request_log_sync, spawn_request_log};
 use crate::pipeline::admission::ConcurrencyGuard;
-use crate::protocol::convert::{
+use crate::protocol::{
     parse_sse_events, parse_sse_remaining, StreamConverter, SseOut,
     PROTOCOL_RESPONSES,
 };
