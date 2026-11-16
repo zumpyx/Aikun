@@ -202,7 +202,7 @@ pub async fn passthrough(
         let req = if provider.api_key.is_empty() {
             req
         } else {
-            // 鉴权头由渠道插件决定(透传只走 openai 协议)。
+            // 鉴权头由渠道适配器决定(透传只走 openai 协议)。
             crate::channel::adapter_for(&provider).apply_auth(req, &provider.api_key, Protocol::OpenAi)
         };
 

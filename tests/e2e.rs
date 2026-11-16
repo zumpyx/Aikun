@@ -2212,7 +2212,7 @@ async fn cross_protocol_keeps_reasoning_and_cache_control() {
     assert_eq!(msgs[1]["reasoning_signature"], "sig");
 }
 
-// ---------- 渠道插件(channel_kind) ----------
+// ---------- 渠道适配器(channel_kind) ----------
 
 #[tokio::test]
 async fn channel_kinds_listed_validated_and_routed() {
@@ -2221,7 +2221,7 @@ async fn channel_kinds_listed_validated_and_routed() {
     seed_api_key(&app.db());
     let jwt = common::admin_jwt();
 
-    // 注册表对管理端可见:generic 排第一,占位插件带 experimental 标记
+    // 注册表对管理端可见:generic 排第一,占位适配器带 experimental 标记
     let kinds: serde_json::Value = app
         .client()
         .get(format!("{}/api/admin/channel-kinds", app.base))
@@ -2276,7 +2276,7 @@ async fn channel_kinds_listed_validated_and_routed() {
         .execute("UPDATE providers SET health_status = 'healthy' WHERE id = ?1", [&id])
         .unwrap();
 
-    // 经插件路由的请求照常成功
+    // 经适配器路由的请求照常成功
     let resp = chat_completions(&app).await;
     assert_eq!(resp.status(), 200);
     assert!(mock.requests().iter().any(|r| r.path == "/v1/chat/completions"));

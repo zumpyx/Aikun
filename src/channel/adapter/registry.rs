@@ -1,6 +1,6 @@
-//! 渠道类型注册表:channel_kind → 插件实例。
+//! 渠道类型注册表:channel_kind → 适配器实例。
 //!
-//! 内置插件在 [`ChannelRegistry::builtin`] 里集中注册——这是新增渠道类型
+//! 内置适配器在 [`ChannelRegistry::builtin`] 里集中注册——这是新增渠道类型
 //! 时唯一需要改动的注册点。
 
 use std::collections::BTreeMap;
@@ -15,7 +15,7 @@ pub struct ChannelRegistry {
     adapters: BTreeMap<&'static str, Arc<dyn ChannelAdapter>>,
 }
 
-/// 管理端下拉列表用的插件描述。
+/// 管理端下拉列表用的适配器描述。
 #[derive(Debug, Serialize)]
 pub struct ChannelKindInfo {
     pub kind: &'static str,
@@ -29,12 +29,12 @@ impl ChannelRegistry {
         Self { adapters: BTreeMap::new() }
     }
 
-    /// 注册一个插件;同名 kind 后注册者覆盖先注册者。
+    /// 注册一个适配器;同名 kind 后注册者覆盖先注册者。
     pub fn register(&mut self, adapter: Arc<dyn ChannelAdapter>) {
         self.adapters.insert(adapter.kind(), adapter);
     }
 
-    /// 全部内置插件。**新增渠道类型时在这里加一行。**
+    /// 全部内置适配器。**新增渠道类型时在这里加一行。**
     pub fn builtin() -> Self {
         let mut reg = Self::empty();
         reg.register(Arc::new(super::generic::GenericAdapter));
@@ -52,7 +52,7 @@ impl ChannelRegistry {
         kind.is_empty() || self.adapters.contains_key(kind)
     }
 
-    /// 按 kind 取插件;空串或未注册(例如库是更新版本的二进制写的)
+    /// 按 kind 取适配器;空串或未注册(例如库是更新版本的二进制写的)
     /// 一律回退 generic,保证存量渠道照常可用。
     pub fn resolve(&self, kind: &str) -> Arc<dyn ChannelAdapter> {
         if let Some(a) = self.get(kind) {
@@ -84,12 +84,12 @@ impl ChannelRegistry {
 
 static REGISTRY: OnceLock<ChannelRegistry> = OnceLock::new();
 
-/// 进程级注册表(首次访问时构建内置插件)。
+/// 进程级注册表(首次访问时构建内置适配器)。
 pub fn registry() -> &'static ChannelRegistry {
     REGISTRY.get_or_init(ChannelRegistry::builtin)
 }
 
-/// 取渠道对应的插件。
+/// 取渠道对应的适配器。
 pub fn adapter_for(provider: &Provider) -> Arc<dyn ChannelAdapter> {
     registry().resolve(provider.channel_kind.trim())
 }
@@ -124,7 +124,7 @@ mod tests {
         assert!(!reg.is_valid_kind("nope"));
     }
 
-    /// 自定义插件可以覆写 URL、鉴权与请求体,其余走默认实现。
+    /// 自定义适配器可以覆写 URL、鉴权与请求体,其余走默认实现。
     struct DemoAdapter;
     impl ChannelAdapter for DemoAdapter {
         fn kind(&self) -> &'static str {

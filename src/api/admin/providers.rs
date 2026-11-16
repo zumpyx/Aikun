@@ -74,7 +74,7 @@ pub fn valid_provider_type(t: &str) -> bool {
 
 /// weight 必须有限且在 0.1..=1000：inf/NaN 会持久化并让选路
 /// random_range panic。
-/// channel_kind:空串(= generic)或已注册的渠道插件类型。
+/// channel_kind:空串(= generic)或已注册的渠道适配器类型。
 pub fn valid_channel_kind(k: &str) -> bool {
     crate::channel::registry().is_valid_kind(k)
 }
@@ -88,7 +88,7 @@ fn channel_kind_names() -> String {
         .join(" / ")
 }
 
-/// 管理端「渠道类型」下拉:列出全部已注册的渠道插件。
+/// 管理端「渠道类型」下拉:列出全部已注册的渠道适配器。
 pub async fn list_channel_kinds() -> impl IntoResponse {
     (StatusCode::OK, Json(json!(crate::channel::registry().list())))
 }
@@ -984,7 +984,7 @@ pub struct FetchModelsRequest {
     /// Set when editing an existing channel: the form keeps the key empty
     /// ("unchanged"), so fall back to the stored key in that case.
     pub provider_id: Option<String>,
-    /// 渠道插件类型;缺省按 generic。
+    /// 渠道适配器类型;缺省按 generic。
     pub channel_kind: Option<String>,
 }
 
@@ -1051,7 +1051,7 @@ pub async fn fetch_upstream_models(
     }
 
     let client = crate::channel::transport::cached_client(&state.clients, &proxy_url, "fetch-models", 15);
-    // URL 与鉴权头由渠道插件决定,与对话 / 健康检查路径同一口径。
+    // URL 与鉴权头由渠道适配器决定,与对话 / 健康检查路径同一口径。
     let adapter = crate::channel::registry().resolve(req.channel_kind.as_deref().unwrap_or("").trim());
     let url = adapter.models_url(&base_url, protocol);
     let upstream_req = adapter.apply_auth(client.get(&url), &api_key, protocol);

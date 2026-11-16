@@ -6,7 +6,7 @@
 //! 每一种上游"渠道类型"(channel kind)实现一个 [`ChannelAdapter`]:它决定
 //! 请求发到哪个 URL、带什么鉴权头、发送前后要不要对请求体 / 响应体 / SSE
 //! 事件做厂商特有的修补。HTTP 发送、超时、代理、故障转移与协议转换仍由
-//! 公共层负责,插件只描述"这个厂商和标准协议有什么不同"。
+//! 公共层负责,适配器只描述"这个厂商和标准协议有什么不同"。
 //!
 //! ## 新增一个渠道类型(三步)
 //!
@@ -32,11 +32,11 @@ use crate::protocol::{Protocol, SseEvent};
 
 pub use registry::{adapter_for, registry};
 
-/// 渠道插件接口。所有方法都有与现网行为一致的默认实现,
-/// 插件只覆写和标准协议不同的部分。
+/// 渠道适配器接口。所有方法都有与现网行为一致的默认实现,
+/// 适配器只覆写和标准协议不同的部分。
 ///
 /// 方法均为同步:网络 I/O 统一在 [`transport::send_request`] 里完成,
-/// 插件只做请求 / 响应的"形状修补",便于单测、也不引入 async-trait 依赖。
+/// 适配器只做请求 / 响应的"形状修补",便于单测、也不引入 async-trait 依赖。
 pub trait ChannelAdapter: Send + Sync + 'static {
     /// 渠道类型标识,写入 providers.channel_kind(小写、稳定、不可改名)。
     fn kind(&self) -> &'static str;

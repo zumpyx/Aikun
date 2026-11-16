@@ -23,7 +23,7 @@ pub async fn check_provider_health(
     let start = Instant::now();
     let client = cached_client(clients, proxy_url, base_url, timeout_secs);
 
-    // URL 与鉴权头由渠道插件决定(见 crate::channels)。
+    // URL 与鉴权头由渠道适配器决定(见 crate::channel::adapter)。
     let adapter = crate::channel::registry().resolve(channel_kind);
     let url = adapter.models_url(base_url, protocol);
     // 日志脱敏:URL 可能带 userinfo 或 query(如 ?key=...),不落明文。

@@ -163,7 +163,7 @@ function installChannelPresets({ prefix, provider, protoBoxes, defaultRadios, sy
   select(selected ? selected.id : 'custom', false);
 }
 
-// 渠道类型(插件)下拉:选项来自后端注册表 /api/admin/channel-kinds。
+// 渠道类型(适配器)下拉:选项来自后端注册表 /api/admin/channel-kinds。
 // generic 的取值为空串(库里 channel_kind='' 即 generic,编辑时不产生 diff)。
 let CHANNEL_KINDS_CACHE = null;
 async function fillChannelKinds(prefix, current) {
@@ -283,7 +283,7 @@ async function showProviderModal(id) {
         <div class="form-group"><label>备注</label><input id="pf-note" value="${esc(provider?.note || '')}"></div>
       </div>
       <div class="form-group"><label>官网地址</label><input id="pf-website" value="${esc(provider?.website_url || '')}" placeholder="https://..."></div>
-      <div class="form-group"><label>渠道类型(插件)</label><select id="pf-kind"></select><p class="preset-hint" id="pf-kind-hint"></p></div>
+      <div class="form-group"><label>渠道类型(适配器)</label><select id="pf-kind"></select><p class="preset-hint" id="pf-kind-hint"></p></div>
       <div class="form-group" id="pf-url-block">
         <div style="display:grid;grid-template-columns:auto auto 1fr;gap:10px 14px;align-items:center">
           <span style="font-size:12.5px;font-weight:600;color:var(--text-2);text-align:center">默认</span>
@@ -501,7 +501,7 @@ function showBatchProviderModal() {
         <div class="form-group"><label>备注</label><input id="bf-note"></div>
       </div>
       <div class="form-group"><label>官网地址</label><input id="bf-website" placeholder="https://..."></div>
-      <div class="form-group"><label>渠道类型(插件)</label><select id="bf-kind"></select><p class="preset-hint" id="bf-kind-hint"></p></div>
+      <div class="form-group"><label>渠道类型(适配器)</label><select id="bf-kind"></select><p class="preset-hint" id="bf-kind-hint"></p></div>
       <div class="form-group" id="bf-url-block">
         <div style="display:grid;grid-template-columns:auto auto 1fr;gap:10px 14px;align-items:center">
           <span style="font-size:12.5px;font-weight:600;color:var(--text-2);text-align:center">默认</span>

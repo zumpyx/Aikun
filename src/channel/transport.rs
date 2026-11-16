@@ -1,5 +1,5 @@
 //! 渠道公共传输层:HTTP client 复用(按代理 + 超时缓存)、上游 URL 拼接、
-//! 日志脱敏,以及经渠道插件定制后的请求发送。
+//! 日志脱敏,以及经渠道适配器定制后的请求发送。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -217,7 +217,7 @@ pub async fn send_request(
         if stream { 0 } else { non_stream_timeout },
     );
 
-    // URL、鉴权头与请求体修补都交给渠道插件(见 crate::channels)。
+    // URL、鉴权头与请求体修补都交给渠道适配器(见 crate::channel::adapter)。
     let adapter = crate::channel::adapter_for(provider);
     adapter.prepare_request(provider, protocol, &mut request_body);
     let url = adapter.chat_url(provider, protocol);

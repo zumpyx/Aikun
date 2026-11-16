@@ -50,7 +50,7 @@ pub struct Provider {
     /// 渠道官网地址,仅用于后台展示。
     #[serde(default)]
     pub website_url: String,
-    /// 渠道类型(插件 kind,见 crate::channels)。空串 = generic。
+    /// 渠道类型(适配器 kind,见 crate::channel::adapter)。空串 = generic。
     #[serde(default)]
     pub channel_kind: String,
     pub created_at: String,
@@ -244,7 +244,7 @@ pub struct CreateProviderRequest {
     pub default_protocol: Option<String>,
     pub note: Option<String>,
     pub website_url: Option<String>,
-    /// 渠道类型(插件 kind);缺省/空串 = generic。
+    /// 渠道类型(适配器 kind);缺省/空串 = generic。
     pub channel_kind: Option<String>,
 }
 
@@ -267,7 +267,7 @@ pub struct UpdateProviderRequest {
     pub default_protocol: Option<String>,
     pub note: Option<String>,
     pub website_url: Option<String>,
-    /// 渠道类型(插件 kind);缺省/空串 = generic。
+    /// 渠道类型(适配器 kind);缺省/空串 = generic。
     pub channel_kind: Option<String>,
 }
 

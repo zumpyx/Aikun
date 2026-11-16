@@ -20,7 +20,7 @@
 - **计费与兑换码**:按模型价格表实时计费(整数微元记账,无浮点漂移);余额不足即 402 拒绝请求;管理员可批量生成兑换码,用户在钱包页自助充值,并查看当前在售模型的只读价格
 - **Key 限额**:每把 API Key 可独立配置每分钟请求数、每日 Token 额度与并发请求上限
 - **健康观测**:渠道健康检查(默认每 30 秒 ping 一次)+ 模型级测试矩阵(每 30 分钟自动探测,绿/红/灰小方格一目了然),也可手动单点测试或一键全测
-- **插件化渠道**:每种上游是一个渠道插件(`ChannelAdapter`),URL、鉴权、请求/响应修补都在插件里;兼容 OpenAI/Anthropic 的上游直接用「通用」类型,特殊上游(如 WorkBuddy、Qoder,目前为占位实现)新增一个文件即可接入,详见 [docs/refactor-plan.md](docs/refactor-plan.md)
+- **渠道适配器**:每种上游是一个渠道适配器(`ChannelAdapter`),URL、鉴权、请求/响应修补都在适配器里;兼容 OpenAI/Anthropic 的上游直接用「通用」类型,特殊上游(如 WorkBuddy、Qoder,目前为占位实现)新增一个文件即可接入,详见 [docs/refactor-plan.md](docs/refactor-plan.md)
 - **响应缓存(可选)**:非流式请求的网关侧响应缓存,默认关闭;进程内内存后端(零外部依赖),按用户隔离、命中照常计费
 - **轻量稳定**:Rust 编写,单二进制内嵌管理前端与 SQLite,无外部服务依赖;musl 静态编译,解压即跑
 - **安全默认**:API Key 哈希存储(明文仅在创建时展示一次)、JWT 改密即失效、登录限流、CSP / CORS 白名单、渠道凭证脱敏回显
@@ -187,18 +187,23 @@ API Key 的 `expires_at` 建议传带时区的 RFC3339;无时区的输入(如 `2
 
 ## 架构与扩展
 
+模块边界按 [docs/roadmap-v0.5.md](docs/roadmap-v0.5.md) 的 0.5 目标架构组织(单 crate):
+
 ```
 src/
-├── protocol/   协议层:OpenAI Chat ⇄ Anthropic Messages ⇄ OpenAI Responses(含流式)
-├── gateway/    网关管线:准入(白名单/余额/限额)→ 缓存 → 选路 → 发送 → 故障转移 → 记账
-├── channels/   渠道插件:ChannelAdapter trait + 注册表 + 公共传输层(generic / workbuddy / qoder)
-├── cache/      响应缓存:CacheBackend trait + 进程内 memory 后端
-├── router/     选路(渠道亲和 + 加权评分)、健康检查、模型测试矩阵
+├── api/        薄 HTTP 层:/v1/* 端点、管理端、登录 / 日志 / 钱包
+├── pipeline/   请求管线:准入(白名单/余额/限额)→ 缓存 → 选路 → 转换 → 发送 → 故障转移 → 流式 → 记账
+│               mod.rs 编排 · dispatch.rs 重试/故障转移 · stream.rs 流式转发 · admission.rs 准入
+├── protocol/   协议层(纯数据变换):enum Protocol + 穷举 match;sse / usage / stream / error,
+│               openai/ anthropic/ responses/ 各含 request / response / stream 转换
+├── channel/    渠道:adapter/(ChannelAdapter 编译期静态注册,generic / workbuddy / qoder)、
+│               transport(client 复用 / 代理 / 超时)、selector(亲和 + 加权评分)、health、model_test
+├── cache/      响应缓存:CacheBackend trait + 进程内 memory 后端(默认关闭)
 ├── billing/    价格表与记账(日志 + 扣费同事务)
-└── api/ auth/ db/ models/ frontend/
+└── auth/ crypto.rs db/ models/ frontend/
 ```
 
-**新增一种渠道**:在 `src/channels/` 新建 `xxx.rs` 实现 `ChannelAdapter`(只覆写与标准协议不同的钩子:`chat_url` / `apply_auth` / `prepare_request` / `normalize_response` / `normalize_stream_event`),在 `ChannelRegistry::builtin()` 注册一行,管理端「渠道类型(插件)」下拉即可选择。完整设计、迁移步骤与风险见 [docs/refactor-plan.md](docs/refactor-plan.md)。
+**新增一种渠道**:上游兼容 OpenAI / Anthropic 时无需写代码,选「通用」即可。特殊上游在 `src/channel/adapter/` 新建 `xxx.rs` 实现 `ChannelAdapter`(只覆写与标准协议不同的钩子:`chat_url` / `apply_auth` / `prepare_request` / `normalize_response` / `normalize_stream_event`),在 `ChannelRegistry::builtin()` 注册一行,管理端「渠道类型(适配器)」下拉即可选择。适配器在编译期注册,不是运行时插件系统。完整设计与各阶段进度见 [docs/refactor-plan.md](docs/refactor-plan.md)。
 
 **响应缓存**:设置 `AIKUN_CACHE_MODE=deterministic` 开启。只缓存非流式成功响应;准入检查先于缓存(余额/限额不会被绕过);命中时响应头带 `x-aikun-cache: HIT`,请求日志照常记录(`provider_id` 为空);请求头 `Cache-Control: no-cache` 可跳过缓存。
 
