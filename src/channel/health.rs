@@ -73,49 +73,91 @@ pub async fn check_provider_health(
     }
 }
 
+/// 每批清理的明细行数:批与批之间释放写锁,避免一次性 DELETE 数十万行
+/// 长时间独占唯一的写连接、阻塞计费写入(roadmap-v0.5 阶段 0 修复 ③)。
+const PURGE_BATCH: usize = 5000;
+
 /// Delete request logs older than the configured retention period.
 /// Runs inside `spawn_blocking` since it holds the DB mutex.
-/// 删除前先把将删明细按 (用户, 日) 聚合进 usage_daily(同一事务):
+/// 删除前先把将删明细按 (用户, 日) 聚合进 usage_daily(每批同一事务):
 /// 明细随保留期清除后,余额对账(Σ充值 − Σ消费)仍有永久依据。
-fn purge_old_request_logs(pool: &Arc<DbPool>, retention_days: u32) {
-    let mut conn = match pool.conn.lock() {
-        Ok(c) => c,
+pub(crate) fn purge_old_request_logs(pool: &Arc<DbPool>, retention_days: u32) {
+    purge_old_request_logs_batched(pool, retention_days, PURGE_BATCH)
+}
+
+fn purge_old_request_logs_batched(pool: &Arc<DbPool>, retention_days: u32, batch: usize) {
+    // 截止时间只算一次:分批期间 'now' 前移不应扩大清理范围。
+    // request_logs.created_at 存的是 RFC3339(含 T),截止时间用同一格式比较。
+    let cutoff: String = match pool.conn.lock() {
+        Ok(conn) => match conn.query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%S', 'now', '-' || ?1 || ' days')",
+            params![retention_days],
+            |r| r.get(0),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to compute log purge cutoff: {}", e);
+                return;
+            }
+        },
         Err(e) => {
             tracing::error!("Failed to lock DB for log purge: {}", e);
             return;
         }
     };
-    let result = (|| -> Result<usize, rusqlite::Error> {
-        let tx = conn.transaction()?;
-        // request_logs.created_at 存的是 RFC3339(含 T),截止时间用同一格式比较
-        tx.execute(
-            "INSERT INTO usage_daily (user_id, date, requests, tokens, cost)
-             SELECT user_id, substr(created_at, 1, 10), COUNT(*),
-                    COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost), 0)
-             FROM request_logs
-             WHERE created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', '-' || ?1 || ' days')
-             GROUP BY user_id, substr(created_at, 1, 10)
-             ON CONFLICT(user_id, date) DO UPDATE SET
-                requests = requests + excluded.requests,
-                tokens = tokens + excluded.tokens,
-                cost = cost + excluded.cost",
-            params![retention_days],
-        )?;
-        let n = tx.execute(
-            "DELETE FROM request_logs WHERE created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', '-' || ?1 || ' days')",
-            params![retention_days],
-        )?;
-        tx.commit()?;
-        Ok(n)
-    })();
-    match result {
-        Ok(n) if n > 0 => {
-            info!("Purged {} request logs older than {} days (aggregated into usage_daily)", n, retention_days);
+
+    let mut total = 0usize;
+    loop {
+        // 每批单独加锁 + 单独事务;锁在本次循环体结束时释放。
+        let result = (|| -> Result<usize, rusqlite::Error> {
+            let mut conn = pool
+                .conn
+                .lock()
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let tx = conn.transaction()?;
+            let batch_rows = "SELECT rowid FROM request_logs WHERE created_at < ?1 ORDER BY rowid LIMIT ?2";
+            tx.execute(
+                &format!(
+                    "INSERT INTO usage_daily (user_id, date, requests, tokens, cost)
+                     SELECT user_id, substr(created_at, 1, 10), COUNT(*),
+                            COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost), 0)
+                     FROM request_logs
+                     WHERE rowid IN ({batch_rows})
+                     GROUP BY user_id, substr(created_at, 1, 10)
+                     ON CONFLICT(user_id, date) DO UPDATE SET
+                        requests = requests + excluded.requests,
+                        tokens = tokens + excluded.tokens,
+                        cost = cost + excluded.cost"
+                ),
+                params![cutoff, batch as i64],
+            )?;
+            let n = tx.execute(
+                &format!("DELETE FROM request_logs WHERE rowid IN ({batch_rows})"),
+                params![cutoff, batch as i64],
+            )?;
+            tx.commit()?;
+            Ok(n)
+        })();
+        match result {
+            Ok(n) => {
+                total += n;
+                if n < batch {
+                    break;
+                }
+                // 让出写锁给计费 / 日志写入。
+                std::thread::yield_now();
+            }
+            Err(e) => {
+                tracing::error!("Failed to purge old request logs: {}", e);
+                break;
+            }
         }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::error!("Failed to purge old request logs: {}", e);
-        }
+    }
+    if total > 0 {
+        info!(
+            "Purged {} request logs older than {} days (aggregated into usage_daily)",
+            total, retention_days
+        );
     }
 }
 
@@ -336,5 +378,32 @@ mod tests {
             .query_row("SELECT SUM(requests) FROM usage_daily", [], |r| r.get(0))
             .unwrap();
         assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn purge_in_small_batches_matches_single_pass() {
+        // 回归(bug ③):分批清理(每批 1 行,跨日期跨批)的聚合结果与一次性
+        // 清理一致,保留期内的行不受影响。
+        let pool = test_pool();
+        purge_old_request_logs_batched(&pool, 30, 1);
+        let conn = pool.conn.lock().unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM request_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+        let rows: Vec<(String, i64, i64, i64)> = conn
+            .prepare("SELECT date, requests, tokens, cost FROM usage_daily ORDER BY date")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("2020-01-15".to_string(), 2, 300, 30_000),
+                ("2020-01-16".to_string(), 1, 50, 5_000),
+            ]
+        );
     }
 }
