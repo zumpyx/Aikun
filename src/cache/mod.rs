@@ -1,8 +1,8 @@
 //! 响应缓存层(可插拔后端)。
 //!
-//! - 后端抽象为 [`CacheBackend`];默认 [`memory::MemoryCache`](进程内、
-//!   零外部依赖,保持"单二进制"部署);`--features redis-cache` 编译后可选
-//!   Redis 后端,供多实例共享缓存。
+//! - 后端抽象为 [`CacheBackend`],当前唯一实现 [`memory::MemoryCache`]
+//!   (进程内、零外部依赖,保持"单二进制"部署)。roadmap-v0.5 明确不做
+//!   多实例 / 外部 Redis 状态,trait 只作为将来的接缝保留。
 //! - 只缓存**非流式**、成功(200 且通过协议形状校验)的响应;缓存的是已经
 //!   转换成客户端协议的响应体,所以键里包含客户端协议。
 //! - 默认 `mode = off`(与重构前行为一致);`deterministic` 只缓存
@@ -13,8 +13,6 @@
 //! - 后端故障一律 fail-open:读失败按未命中处理,写失败只记日志。
 
 pub mod memory;
-#[cfg(feature = "redis-cache")]
-pub mod redis;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -146,25 +144,7 @@ impl GatewayCache {
 }
 
 fn build_backend(config: &AppConfig) -> Arc<dyn CacheBackend> {
-    match config.cache_backend.as_str() {
-        "redis" => {
-            #[cfg(feature = "redis-cache")]
-            {
-                let url = config.redis_url.clone().unwrap_or_else(|| {
-                    panic!("AIKUN_CACHE_BACKEND=redis 需要同时设置 AIKUN_REDIS_URL")
-                });
-                match redis::RedisCache::new(&url) {
-                    Ok(c) => Arc::new(c),
-                    Err(e) => panic!("Redis 缓存初始化失败: {}", e),
-                }
-            }
-            #[cfg(not(feature = "redis-cache"))]
-            {
-                panic!("AIKUN_CACHE_BACKEND=redis 需要以 `--features redis-cache` 编译")
-            }
-        }
-        _ => Arc::new(memory::MemoryCache::new(config.cache_max_entries)),
-    }
+    Arc::new(memory::MemoryCache::new(config.cache_max_entries))
 }
 
 /// Cache-Control 含 no-cache / no-store 时跳过缓存。

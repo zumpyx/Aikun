@@ -49,14 +49,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Config
 dotenvy = "0.15"
 
-# 可选:Redis 缓存后端(默认不编译,保持单二进制零外部依赖)
-redis = { version = "0.27", optional = true, default-features = false, features = ["tokio-comp", "aio"] }
-
-[features]
-default = []
-# 编译 Redis 缓存后端:cargo build --release --features redis-cache
-redis-cache = ["dep:redis"]
-
 [dev-dependencies]
 # E2E:拉起真实二进制 + axum mock 上游(tests/)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

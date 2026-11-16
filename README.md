@@ -21,7 +21,7 @@
 - **Key 限额**:每把 API Key 可独立配置每分钟请求数、每日 Token 额度与并发请求上限
 - **健康观测**:渠道健康检查(默认每 30 秒 ping 一次)+ 模型级测试矩阵(每 30 分钟自动探测,绿/红/灰小方格一目了然),也可手动单点测试或一键全测
 - **插件化渠道**:每种上游是一个渠道插件(`ChannelAdapter`),URL、鉴权、请求/响应修补都在插件里;兼容 OpenAI/Anthropic 的上游直接用「通用」类型,特殊上游(如 WorkBuddy、Qoder,目前为占位实现)新增一个文件即可接入,详见 [docs/refactor-plan.md](docs/refactor-plan.md)
-- **响应缓存(可选)**:非流式请求的网关侧响应缓存,默认关闭;默认进程内内存后端,按用户隔离、命中照常计费,可选编译 Redis 后端用于多实例共享
+- **响应缓存(可选)**:非流式请求的网关侧响应缓存,默认关闭;进程内内存后端(零外部依赖),按用户隔离、命中照常计费
 - **轻量稳定**:Rust 编写,单二进制内嵌管理前端与 SQLite,无外部服务依赖;musl 静态编译,解压即跑
 - **安全默认**:API Key 哈希存储(明文仅在创建时展示一次)、JWT 改密即失效、登录限流、CSP / CORS 白名单、渠道凭证脱敏回显
 
@@ -132,13 +132,11 @@ export AIKUN_JWT_SECRET=$(openssl rand -hex 32)
 | `--cors-allowed-origins` | `AIKUN_CORS_ALLOWED_ORIGINS` | (空,仅同源) | CORS 白名单,逗号分隔 |
 | `--trust-x-forwarded-for` | `AIKUN_TRUST_X_FORWARDED_FOR` | (关) | 置 `1` 信任 X-Forwarded-For,仅限可信反代之后 |
 | `--cache-mode` | `AIKUN_CACHE_MODE` | `off` | 响应缓存:`off` / `deterministic`(仅 temperature=0)/ `always` |
-| `--cache-backend` | `AIKUN_CACHE_BACKEND` | `memory` | `memory`(进程内)/ `redis`(需 `--features redis-cache` 编译) |
 | `--cache-ttl-secs` | `AIKUN_CACHE_TTL_SECS` | `300` | 缓存有效期(秒) |
 | `--cache-max-entries` | `AIKUN_CACHE_MAX_ENTRIES` | `10000` | 内存缓存最大条目数 |
 | `--cache-max-entry-bytes` | `AIKUN_CACHE_MAX_ENTRY_BYTES` | `1048576` | 单条缓存响应大小上限 |
 | `--cache-scope` | `AIKUN_CACHE_SCOPE` | `user` | `user`(按用户隔离)/ `global`(仅单租户建议) |
 | `--cache-hit-billing` | `AIKUN_CACHE_HIT_BILLING` | `full` | 命中缓存是否计费:`full` / `free` |
-| `--redis-url` | `AIKUN_REDIS_URL` | (空) | Redis 地址(backend=redis 时必填) |
 | (仅环境变量) | `AIKUN_RESET_ADMIN_PASSWORD` | (空) | 置为新密码重启即重置 admin,用完立即移除(见上文) |
 
 也可将 `AIKUN_*` 变量写入工作目录的 `.env` 文件(参考 [env.example](env.example)),启动时自动加载,效果等同于 shell 环境变量(shell 中已存在的同名变量优先,不会被 `.env` 覆盖)。`.env` 已被 `.gitignore` 排除,不会被提交。
@@ -194,7 +192,7 @@ src/
 ├── protocol/   协议层:OpenAI Chat ⇄ Anthropic Messages ⇄ OpenAI Responses(含流式)
 ├── gateway/    网关管线:准入(白名单/余额/限额)→ 缓存 → 选路 → 发送 → 故障转移 → 记账
 ├── channels/   渠道插件:ChannelAdapter trait + 注册表 + 公共传输层(generic / workbuddy / qoder)
-├── cache/      响应缓存:CacheBackend trait,memory(默认)/ redis(可选特性)
+├── cache/      响应缓存:CacheBackend trait + 进程内 memory 后端
 ├── router/     选路(渠道亲和 + 加权评分)、健康检查、模型测试矩阵
 ├── billing/    价格表与记账(日志 + 扣费同事务)
 └── api/ auth/ db/ models/ frontend/

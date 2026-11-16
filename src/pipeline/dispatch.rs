@@ -168,7 +168,7 @@ pub(super) async fn attempt_loop(
                         let client_body =
                             convert_response(&resp_body, provider_protocol, client_protocol, &model);
                         if let Some(key) = cache_key {
-                            // 同步写入(内存后端为纳秒级;Redis 后端多一次 SET),
+                            // 同步写入(内存后端为纳秒级),
                             // 保证响应返回后紧接着的同一请求必然命中。
                             let entry = crate::cache::CacheEntry {
                                 body: client_body.clone(),
