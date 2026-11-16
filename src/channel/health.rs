@@ -255,13 +255,7 @@ async fn run_health_check_round(
                     // 默认协议列为空时退回 provider_type(azure/custom 等讲 OpenAI)。
                     let protocol = crate::protocol::Protocol::parse(protocol)
                         .unwrap_or_else(|| crate::protocol::Protocol::for_provider_type(protocol));
-                    let base_url = if protocol == crate::protocol::Protocol::Anthropic {
-                        if anthropic_url.is_empty() { openai_url } else { anthropic_url }
-                    } else if openai_url.is_empty() {
-                        anthropic_url
-                    } else {
-                        openai_url
-                    };
+                    let base_url = crate::models::pick_base_url(protocol, openai_url, anthropic_url);
                     let (status, latency) = match tokio::time::timeout(
                         std::time::Duration::from_secs(probe_timeout),
                         check_provider_health(

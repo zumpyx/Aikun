@@ -153,17 +153,18 @@ pub fn upstream_protocol_for(p: &Provider, client_protocol: Protocol) -> Protoco
 /// 提供不同路由。协议专属地址为空时回退另一个,保证只配了一个地址的
 /// 渠道照常工作。
 pub fn base_url_for<'a>(p: &'a Provider, protocol: Protocol) -> &'a str {
-    if protocol == Protocol::Anthropic {
-        if p.anthropic_base_url.is_empty() {
-            &p.openai_base_url
-        } else {
-            &p.anthropic_base_url
-        }
-    } else if p.openai_base_url.is_empty() {
-        &p.anthropic_base_url
-    } else {
-        &p.openai_base_url
-    }
+    pick_base_url(protocol, &p.openai_base_url, &p.anthropic_base_url)
+}
+
+/// [`base_url_for`] 的拆列版本:健康检查 / 管理端单测等只查了两个地址列、
+/// 没有完整 Provider 的路径共用同一回退口径。
+pub fn pick_base_url<'a>(protocol: Protocol, openai_url: &'a str, anthropic_url: &'a str) -> &'a str {
+    let (primary, fallback) = match protocol {
+        Protocol::Anthropic => (anthropic_url, openai_url),
+        // Responses 走 OpenAI 地址(同一家 OpenAI 兼容上游的 /responses 路由)。
+        Protocol::OpenAi | Protocol::Responses => (openai_url, anthropic_url),
+    };
+    if primary.is_empty() { fallback } else { primary }
 }
 
 /// Parse the channel's supported protocol list, with the legacy

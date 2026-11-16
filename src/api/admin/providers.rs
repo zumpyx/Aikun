@@ -885,13 +885,7 @@ pub async fn test_provider(
     // 默认协议列为空时退回 provider_type(azure/custom 等讲 OpenAI)。
     let protocol = Protocol::parse(&protocol).unwrap_or_else(|| Protocol::for_provider_type(&protocol));
     // 按渠道的默认协议选对应的上游地址;留空的一路回退到另一个。
-    let base_url = if protocol == Protocol::Anthropic {
-        if anthropic_url.is_empty() { &openai_url } else { &anthropic_url }
-    } else if openai_url.is_empty() {
-        &anthropic_url
-    } else {
-        &openai_url
-    };
+    let base_url = crate::models::pick_base_url(protocol, &openai_url, &anthropic_url);
 
     // Step 2: Make health check request (async, no lock held)
     let (status, latency) = check_provider_health(&state.clients, base_url, &api_key, protocol, timeout.clamp(1, 600) as u64, &proxy_url, &channel_kind).await;

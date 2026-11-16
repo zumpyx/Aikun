@@ -58,8 +58,9 @@ fn build_probe_body(model: &str, protocol: Protocol, messages: &[Value], max_tok
         "max_tokens": max_tokens,
         "messages": messages,
     });
-    if protocol != Protocol::Anthropic {
-        body["max_completion_tokens"] = json!(max_tokens);
+    match protocol {
+        Protocol::OpenAi | Protocol::Responses => body["max_completion_tokens"] = json!(max_tokens),
+        Protocol::Anthropic => {}
     }
     if stream {
         body["stream"] = json!(true);
@@ -69,8 +70,8 @@ fn build_probe_body(model: &str, protocol: Protocol, messages: &[Value], max_tok
 
 /// Extract the visible text from a completed (non-stream) upstream body.
 fn extract_text(protocol: Protocol, v: &Value) -> String {
-    if protocol == Protocol::Anthropic {
-        v["content"]
+    match protocol {
+        Protocol::Anthropic => v["content"]
             .as_array()
             .map(|blocks| {
                 blocks
@@ -80,12 +81,12 @@ fn extract_text(protocol: Protocol, v: &Value) -> String {
                     .collect::<Vec<_>>()
                     .join("")
             })
-            .unwrap_or_default()
-    } else {
-        v["choices"][0]["message"]["content"]
+            .unwrap_or_default(),
+        // 探针按 chat 形状发送(含 Responses 渠道,与 0.4 行为一致)。
+        Protocol::OpenAi | Protocol::Responses => v["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or("")
-            .to_string()
+            .to_string(),
     }
 }
 
@@ -95,16 +96,17 @@ fn extract_delta(protocol: Protocol, data: &str) -> String {
         Ok(v) => v,
         Err(_) => return String::new(),
     };
-    if protocol == Protocol::Anthropic {
-        if v["type"].as_str() == Some("content_block_delta") {
-            return v["delta"]["text"].as_str().unwrap_or("").to_string();
+    match protocol {
+        Protocol::Anthropic => {
+            if v["type"].as_str() == Some("content_block_delta") {
+                return v["delta"]["text"].as_str().unwrap_or("").to_string();
+            }
+            String::new()
         }
-        String::new()
-    } else {
-        v["choices"][0]["delta"]["content"]
+        Protocol::OpenAi | Protocol::Responses => v["choices"][0]["delta"]["content"]
             .as_str()
             .unwrap_or("")
-            .to_string()
+            .to_string(),
     }
 }
 

@@ -225,10 +225,9 @@ pub(super) fn stream_response(
             // responses 客户端:error 事件即终止,跳过 converter 收尾——收尾
             // 会产出与错误矛盾的 *.done/response.completed(部分输出被当成
             // 成功完成),codex 等客户端会误判流正常结束。
-            let finish_outs = if client_protocol == Protocol::Responses {
-                vec![]
-            } else {
-                converter.finish()
+            let finish_outs = match client_protocol {
+                Protocol::Responses => vec![],
+                Protocol::OpenAi | Protocol::Anthropic => converter.finish(),
             };
             let has_terminal = finish_outs
                 .iter()
