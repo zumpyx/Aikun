@@ -48,7 +48,7 @@ roadmap 阶段 2(pipeline 显式化)与步骤 3–5 无冲突,可并行推进
   `openapi.yaml` / `api-mapping.md`——spec 如有改动,重跑
   `bash scripts/gen-api.sh` 后 `git diff` 仅生成物随之变化。
 
-## 步骤 2:CI 增加 regenerate 守卫 job
+## 步骤 2:CI 增加 regenerate 守卫 job ✅(2026-11-16)
 
 - **依赖**:步骤 1(脚本与生成 crate 已入库)。
 - **对应**:architecture §五.4 末项、§二 CI 注释;纯 CI 变化,无行为对应阶段。
@@ -63,7 +63,7 @@ roadmap 阶段 2(pipeline 显式化)与步骤 3–5 无冲突,可并行推进
   - 故意改 `openapi.yaml` 一行不重生成 → job 红;恢复后绿;
   - 手改 `crates/aikun-openapi/` 下任一文件 → 重生成覆盖后 diff 非空 → job 红。
 
-## 步骤 3:workspace 完整化(二进制移入 aikun/)
+## 步骤 3:workspace 完整化(二进制移入 aikun/)✅(2026-11-16)
 
 - **依赖**:步骤 1。
 - **对应**:architecture §五.1 后半、§二目录树;roadmap 阶段 1 纪律
@@ -83,7 +83,7 @@ roadmap 阶段 2(pipeline 显式化)与步骤 3–5 无冲突,可并行推进
   - `grep -rn` 仓库脚本/CI/Dockerfile 无指向根 `src/`、根 `tests/` 的残留路径;
   - release 的 docker 路径验证 job(ci.yml 内嵌)绿。
 
-## 步骤 4:crates/aikun-protocol 拆分(纯移动)
+## 步骤 4:crates/aikun-protocol 拆分(纯移动)✅(2026-11-16,含 9.1 契约测试雏形:非流式双向黄金样本 + 官方 spec 快照 f437d0ec)
 
 - **依赖**:步骤 3(最终路径就位后一次移到位,避免二次改路径)。
 - **对应**:architecture §五.2、§四迁移映射第 1 行;roadmap 阶段 1 纪律
@@ -102,7 +102,7 @@ roadmap 阶段 2(pipeline 显式化)与步骤 3–5 无冲突,可并行推进
   - 假协议枚举值插入后编译器仍在全部 match 处报错(沿用阶段 1 验收,
     人工验证一次并记录处数)。
 
-## 步骤 5:crates/aikun-channels 拆分(纯移动)
+## 步骤 5:crates/aikun-channels 拆分(纯移动)✅(2026-11-16,apply_auth 改 auth_headers 纯数据签名以守纯净度)
 
 - **依赖**:步骤 4(channels 依赖 protocol)。
 - **对应**:architecture §五.3、§四迁移映射第 2 行;纯移动。
