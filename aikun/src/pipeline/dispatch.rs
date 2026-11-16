@@ -20,7 +20,7 @@ use crate::channel::selector::{
 };
 use crate::channel::transport::send_request;
 use crate::pipeline::admission::ConcurrencyGuard;
-use crate::protocol::{
+use aikun_protocol::{
     Protocol, convert_error, convert_request, convert_response, extract_usage_any, protocol_error,
     valid_response_shape,
 };

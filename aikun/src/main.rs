@@ -8,7 +8,6 @@ mod crypto;
 mod db;
 mod models;
 mod pipeline;
-mod protocol;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

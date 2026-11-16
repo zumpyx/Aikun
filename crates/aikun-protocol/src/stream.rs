@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 #[allow(unused_imports)]
-use crate::protocol::*;
+use crate::*;
 
 /// An outbound SSE event ready to send to the client.
 pub struct SseOut {
@@ -12,14 +12,14 @@ pub struct SseOut {
 }
 
 impl SseOut {
-    pub(crate) fn json(event: &str, value: Value) -> Self {
+    pub fn json(event: &str, value: Value) -> Self {
         Self {
             event: Some(event.to_string()),
             data: value.to_string(),
         }
     }
 
-    pub(crate) fn data_only(data: String) -> Self {
+    pub fn data_only(data: String) -> Self {
         Self { event: None, data }
     }
 }
@@ -272,7 +272,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     #[allow(unused_imports)]
-    use crate::protocol::test_util::{out_types, sse, sse_typed};
+    use crate::test_util::{out_types, sse, sse_typed};
     // ---- StreamConverter: pass-through ----
 
     #[test]

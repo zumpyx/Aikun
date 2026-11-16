@@ -26,7 +26,7 @@ use crate::channel::selector::{
 use crate::channel::transport::{build_api_url, cached_client};
 use crate::pipeline::admission::{enforce_key_limits, has_positive_balance};
 use crate::pipeline::{apply_model_mapping, read_json_limited};
-use crate::protocol::{Protocol, extract_usage_any, protocol_error};
+use aikun_protocol::{Protocol, extract_usage_any, protocol_error};
 
 /// 允许透传的路径白名单(/v1/ 之后):都是 body 带 model 的 JSON 端点。
 /// 不放行 files/batches 等无 model 的端点——无法按模型选路,且会把渠道

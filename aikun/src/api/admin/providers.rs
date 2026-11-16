@@ -15,7 +15,7 @@ use crate::models::{
     channel_protocols, first_defaultable_protocol, has_defaultable_protocol, row_to_provider,
     valid_default_protocol, valid_protocol_list,
 };
-use crate::protocol::Protocol;
+use aikun_protocol::Protocol;
 
 pub async fn list_providers(State(state): State<AppState>) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {

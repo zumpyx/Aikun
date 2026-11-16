@@ -3,9 +3,9 @@
 use serde_json::{Value, json};
 
 #[allow(unused_imports)]
-use crate::protocol::*;
+use crate::*;
 
-pub(crate) fn openai_finish_to_anthropic(finish: &str) -> &'static str {
+pub fn openai_finish_to_anthropic(finish: &str) -> &'static str {
     match finish {
         "length" => "max_tokens",
         "tool_calls" | "function_call" => "tool_use",
@@ -15,7 +15,7 @@ pub(crate) fn openai_finish_to_anthropic(finish: &str) -> &'static str {
 
 /// OpenAI finish_reason → Responses incomplete_details.reason;
 /// None 表示正常完成(completed)。
-pub(crate) fn openai_finish_to_incomplete_reason(finish: &str) -> Option<&'static str> {
+pub fn openai_finish_to_incomplete_reason(finish: &str) -> Option<&'static str> {
     match finish {
         "length" => Some("max_output_tokens"),
         "content_filter" => Some("content_filter"),
@@ -23,7 +23,7 @@ pub(crate) fn openai_finish_to_incomplete_reason(finish: &str) -> Option<&'stati
     }
 }
 
-pub(crate) fn openai_resp_to_anthropic(resp: &Value) -> Value {
+pub fn openai_resp_to_anthropic(resp: &Value) -> Value {
     // 上游未返回有效 choices（如错误体）时按上游错误处理，不伪造成功响应
     let choice = match resp["choices"].as_array().and_then(|c| c.first()) {
         Some(c) if c["message"].is_object() => c,
@@ -102,7 +102,7 @@ pub(crate) fn openai_resp_to_anthropic(resp: &Value) -> Value {
 }
 
 /// Convert a chat/completions response to a Responses API response object.
-pub(crate) fn openai_resp_to_responses(resp: &Value) -> Value {
+pub fn openai_resp_to_responses(resp: &Value) -> Value {
     let message = &resp["choices"][0]["message"];
     let mut output: Vec<Value> = Vec::new();
 
@@ -172,7 +172,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     #[allow(unused_imports)]
-    use crate::protocol::test_util::{out_types, sse, sse_typed};
+    use crate::test_util::{out_types, sse, sse_typed};
     // ---- convert_response ----
 
     #[test]

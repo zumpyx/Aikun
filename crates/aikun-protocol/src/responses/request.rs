@@ -3,14 +3,14 @@
 use serde_json::{Map, Value, json};
 
 #[allow(unused_imports)]
-use crate::protocol::*;
+use crate::*;
 
 /// Convert an OpenAI Responses API request body to a chat/completions request.
 ///
 /// 映射不上的 responses 专有字段(store/include/reasoning/previous_response_id
 /// /background/truncation 与 web_search 等内置工具)在此丢弃;需要这些特性的
 /// 客户端应走声明了 responses 协议的渠道透传。
-pub(crate) fn responses_req_to_openai(body: &Value) -> Value {
+pub fn responses_req_to_openai(body: &Value) -> Value {
     let mut out = Map::new();
     out.insert("model".into(), body["model"].clone());
 
@@ -94,7 +94,7 @@ pub(crate) fn responses_req_to_openai(body: &Value) -> Value {
 }
 
 /// Append one Responses input item to the chat messages list.
-pub(crate) fn responses_input_item_to_openai(item: &Value, messages: &mut Vec<Value>) {
+pub fn responses_input_item_to_openai(item: &Value, messages: &mut Vec<Value>) {
     // 省略 type 的 {role, content} 是 Responses 的简易消息写法,按 message 处理。
     let item_type = item["type"].as_str().unwrap_or("message");
     match item_type {
@@ -150,7 +150,7 @@ pub(crate) fn responses_input_item_to_openai(item: &Value, messages: &mut Vec<Va
 
 /// Convert Responses message content (string or input/output parts) to chat
 /// content parts.
-pub(crate) fn responses_content_to_openai_parts(content: &Value) -> Vec<Value> {
+pub fn responses_content_to_openai_parts(content: &Value) -> Vec<Value> {
     match content {
         Value::String(s) => {
             if s.is_empty() {
@@ -181,7 +181,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     #[allow(unused_imports)]
-    use crate::protocol::test_util::{out_types, sse, sse_typed};
+    use crate::test_util::{out_types, sse, sse_typed};
     #[test]
     fn request_responses_to_openai_full() {
         let body = json!({

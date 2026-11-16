@@ -15,7 +15,7 @@ use crate::AppState;
 use crate::billing::ledger::{insert_request_log, request_log_sync, spawn_request_log};
 use crate::channel::selector::{spawn_record_failure, spawn_record_result};
 use crate::pipeline::admission::ConcurrencyGuard;
-use crate::protocol::{
+use aikun_protocol::{
     Protocol, SseOut, StreamConverter, parse_sse_events, parse_sse_remaining, stream_error_event,
     stream_terminal_event,
 };

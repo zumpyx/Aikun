@@ -5,23 +5,23 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 #[allow(unused_imports)]
-use crate::protocol::*;
+use crate::*;
 
 // ----------------------------------------------------------------------------
 // Anthropic events → OpenAI chunks
 // ----------------------------------------------------------------------------
 pub struct AnStreamState {
-    pub(crate) msg_id: String,
-    pub(crate) model: String,
-    pub(crate) created: i64,
-    pub(crate) block_to_tc: HashMap<usize, usize>,
-    pub(crate) next_tc: usize,
-    pub(crate) usage: (i32, i32, i32, i32),
-    pub(crate) finished: bool,
+    pub msg_id: String,
+    pub model: String,
+    pub created: i64,
+    pub block_to_tc: HashMap<usize, usize>,
+    pub next_tc: usize,
+    pub usage: (i32, i32, i32, i32),
+    pub finished: bool,
 }
 
 impl AnStreamState {
-    pub(crate) fn new(model: &str) -> Self {
+    pub fn new(model: &str) -> Self {
         Self {
             msg_id: "chatcmpl-unknown".to_string(),
             model: model.to_string(),
@@ -33,12 +33,7 @@ impl AnStreamState {
         }
     }
 
-    pub(crate) fn chunk(
-        &self,
-        delta: Value,
-        finish_reason: Option<&str>,
-        usage: Option<Value>,
-    ) -> SseOut {
+    pub fn chunk(&self, delta: Value, finish_reason: Option<&str>, usage: Option<Value>) -> SseOut {
         let mut obj = json!({
             "id": self.msg_id,
             "object": "chat.completion.chunk",
@@ -52,7 +47,7 @@ impl AnStreamState {
         SseOut::data_only(obj.to_string())
     }
 
-    pub(crate) fn push(&mut self, ev: &SseEvent) -> Vec<SseOut> {
+    pub fn push(&mut self, ev: &SseEvent) -> Vec<SseOut> {
         // 错误事件之后不再产出任何 chunk
         if self.finished {
             return vec![];
@@ -214,7 +209,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     #[allow(unused_imports)]
-    use crate::protocol::test_util::{out_types, sse, sse_typed};
+    use crate::test_util::{out_types, sse, sse_typed};
     #[test]
     fn stream_anthropic_to_openai_keeps_requested_model() {
         // 转换路径:上游 message_start 的真实模型名不覆盖请求模型名。

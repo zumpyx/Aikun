@@ -5,29 +5,29 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 #[allow(unused_imports)]
-use crate::protocol::*;
+use crate::*;
 
 // ----------------------------------------------------------------------------
 // OpenAI chunks → Anthropic events
 // ----------------------------------------------------------------------------
 pub struct OaStreamState {
-    pub(crate) msg_id: String,
-    pub(crate) model: String,
-    pub(crate) started: bool,
-    pub(crate) finished: bool,
-    pub(crate) next_block: usize,
-    pub(crate) text_block: Option<usize>,
+    pub msg_id: String,
+    pub model: String,
+    pub started: bool,
+    pub finished: bool,
+    pub next_block: usize,
+    pub text_block: Option<usize>,
     /// 当前打开的 thinking 块。推理增量通常在正文之前到达,正文或工具
     /// 开始前由 close_open_block 关掉。
-    pub(crate) thinking_block: Option<usize>,
-    pub(crate) tool_blocks: HashMap<u64, usize>,
-    pub(crate) open_tool_block: Option<usize>,
-    pub(crate) stop_reason: Option<&'static str>,
-    pub(crate) usage: (i32, i32, i32, i32),
+    pub thinking_block: Option<usize>,
+    pub tool_blocks: HashMap<u64, usize>,
+    pub open_tool_block: Option<usize>,
+    pub stop_reason: Option<&'static str>,
+    pub usage: (i32, i32, i32, i32),
 }
 
 impl OaStreamState {
-    pub(crate) fn new(model: &str) -> Self {
+    pub fn new(model: &str) -> Self {
         Self {
             msg_id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
             model: model.to_string(),
@@ -43,7 +43,7 @@ impl OaStreamState {
         }
     }
 
-    pub(crate) fn push(&mut self, ev: &SseEvent) -> Vec<SseOut> {
+    pub fn push(&mut self, ev: &SseEvent) -> Vec<SseOut> {
         // 错误帧之后不再产出任何事件(避免"错误后又成功完成")
         if self.finished {
             return vec![];
@@ -185,7 +185,7 @@ impl OaStreamState {
         out
     }
 
-    pub(crate) fn ensure_thinking_block(&mut self, out: &mut Vec<SseOut>) -> usize {
+    pub fn ensure_thinking_block(&mut self, out: &mut Vec<SseOut>) -> usize {
         if let Some(idx) = self.thinking_block {
             return idx;
         }
@@ -204,7 +204,7 @@ impl OaStreamState {
         idx
     }
 
-    pub(crate) fn ensure_text_block(&mut self, out: &mut Vec<SseOut>) -> usize {
+    pub fn ensure_text_block(&mut self, out: &mut Vec<SseOut>) -> usize {
         if let Some(idx) = self.text_block {
             return idx;
         }
@@ -226,7 +226,7 @@ impl OaStreamState {
 
     /// 关闭当前打开的块（文本或 tool_use）。任何新块开启前必须先调用，
     /// 否则违反 Anthropic 的 content_block_start/stop 顺序约束。
-    pub(crate) fn close_open_block(&mut self, out: &mut Vec<SseOut>) {
+    pub fn close_open_block(&mut self, out: &mut Vec<SseOut>) {
         self.close_thinking_block(out);
         self.close_text_block(out);
         if let Some(idx) = self.open_tool_block.take() {
@@ -237,7 +237,7 @@ impl OaStreamState {
         }
     }
 
-    pub(crate) fn close_thinking_block(&mut self, out: &mut Vec<SseOut>) {
+    pub fn close_thinking_block(&mut self, out: &mut Vec<SseOut>) {
         if let Some(idx) = self.thinking_block.take() {
             out.push(SseOut::json(
                 "content_block_stop",
@@ -246,7 +246,7 @@ impl OaStreamState {
         }
     }
 
-    pub(crate) fn close_text_block(&mut self, out: &mut Vec<SseOut>) {
+    pub fn close_text_block(&mut self, out: &mut Vec<SseOut>) {
         if let Some(idx) = self.text_block.take() {
             out.push(SseOut::json(
                 "content_block_stop",
@@ -256,7 +256,7 @@ impl OaStreamState {
     }
 
     /// usage 4 元组 → Anthropic message_delta.usage。
-    pub(crate) fn anthropic_usage(&self) -> Value {
+    pub fn anthropic_usage(&self) -> Value {
         let mut u = json!({
             "input_tokens": self.usage.0,
             "output_tokens": self.usage.1,
@@ -267,7 +267,7 @@ impl OaStreamState {
         u
     }
 
-    pub(crate) fn finalize(&mut self) -> Vec<SseOut> {
+    pub fn finalize(&mut self) -> Vec<SseOut> {
         if self.finished || !self.started {
             return vec![];
         }
@@ -307,34 +307,34 @@ impl OaStreamState {
 // ----------------------------------------------------------------------------
 /// One in-flight function_call output item being assembled from chat
 /// tool_call deltas.
-pub(crate) struct OarToolItem {
-    pub(crate) output_index: usize,
-    pub(crate) item_id: String,
-    pub(crate) call_id: String,
-    pub(crate) name: String,
-    pub(crate) arguments: String,
+pub struct OarToolItem {
+    pub output_index: usize,
+    pub item_id: String,
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
 }
 
 pub struct OarStreamState {
-    pub(crate) resp_id: String,
-    pub(crate) msg_item_id: String,
-    pub(crate) model: String,
-    pub(crate) created: i64,
-    pub(crate) started: bool,
-    pub(crate) finished: bool,
+    pub resp_id: String,
+    pub msg_item_id: String,
+    pub model: String,
+    pub created: i64,
+    pub started: bool,
+    pub finished: bool,
     /// 文本 output item 的 output_index;None 表示尚未开启。
-    pub(crate) text_index: Option<usize>,
-    pub(crate) text: String,
+    pub text_index: Option<usize>,
+    pub text: String,
     /// chat tool_call index → output item。
-    pub(crate) tool_items: HashMap<u64, OarToolItem>,
-    pub(crate) next_output_index: usize,
-    pub(crate) usage: (i32, i32, i32, i32),
+    pub tool_items: HashMap<u64, OarToolItem>,
+    pub next_output_index: usize,
+    pub usage: (i32, i32, i32, i32),
     /// 最终非空 finish_reason:finalize 据此判断 completed 还是 incomplete。
-    pub(crate) finish_reason: Option<String>,
+    pub finish_reason: Option<String>,
 }
 
 impl OarStreamState {
-    pub(crate) fn new(model: &str) -> Self {
+    pub fn new(model: &str) -> Self {
         Self {
             resp_id: format!("resp_{}", uuid::Uuid::new_v4().simple()),
             msg_item_id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
@@ -354,7 +354,7 @@ impl OarStreamState {
     /// usage 4 元组(未缓存输入, 输出, 总计, 缓存)→ Responses usage 对象;
     /// 客户端可见的 input_tokens 含缓存部分,与 extract_usage_any 的
     /// OpenAI 口径互逆。
-    pub(crate) fn responses_usage(&self) -> Value {
+    pub fn responses_usage(&self) -> Value {
         json!({
             "input_tokens": self.usage.0.saturating_add(self.usage.3),
             "input_tokens_details": {"cached_tokens": self.usage.3},
@@ -364,7 +364,7 @@ impl OarStreamState {
         })
     }
 
-    pub(crate) fn push(&mut self, ev: &SseEvent) -> Vec<SseOut> {
+    pub fn push(&mut self, ev: &SseEvent) -> Vec<SseOut> {
         // 错误帧之后不再产出任何事件(避免"错误后又成功完成")
         if self.finished {
             return vec![];
@@ -502,7 +502,7 @@ impl OarStreamState {
     }
 
     /// 首次文本 delta 前开启 message output item 与 output_text content part。
-    pub(crate) fn ensure_text_item(&mut self, out: &mut Vec<SseOut>) {
+    pub fn ensure_text_item(&mut self, out: &mut Vec<SseOut>) {
         if self.text_index.is_some() {
             return;
         }
@@ -536,7 +536,7 @@ impl OarStreamState {
     }
 
     /// 汇总已完成的 output items,用于 response.completed 的完整 response 对象。
-    pub(crate) fn completed_output(&self) -> Vec<Value> {
+    pub fn completed_output(&self) -> Vec<Value> {
         let mut items: Vec<(usize, Value)> = Vec::new();
         if let Some(idx) = self.text_index {
             items.push((
@@ -569,7 +569,7 @@ impl OarStreamState {
         items.into_iter().map(|(_, v)| v).collect()
     }
 
-    pub(crate) fn finalize(&mut self) -> Vec<SseOut> {
+    pub fn finalize(&mut self) -> Vec<SseOut> {
         if self.finished || !self.started {
             return vec![];
         }
@@ -681,7 +681,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     #[allow(unused_imports)]
-    use crate::protocol::test_util::{out_types, sse, sse_typed};
+    use crate::test_util::{out_types, sse, sse_typed};
     // ---- StreamConverter: OpenAI upstream → Anthropic client ----
 
     #[test]

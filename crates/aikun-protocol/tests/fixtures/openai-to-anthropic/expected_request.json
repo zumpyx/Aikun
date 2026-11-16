@@ -1,0 +1,41 @@
+{
+  "max_tokens": 300,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "北京今天天气怎么样?",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o",
+  "stop_sequences": [
+    "\n\n"
+  ],
+  "system": "你是天气助手",
+  "temperature": 0.7,
+  "tool_choice": {
+    "type": "auto"
+  },
+  "tools": [
+    {
+      "description": "查询城市天气",
+      "input_schema": {
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city"
+        ],
+        "type": "object"
+      },
+      "name": "get_weather"
+    }
+  ],
+  "top_p": 0.9
+}

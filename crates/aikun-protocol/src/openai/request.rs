@@ -3,9 +3,9 @@
 use serde_json::{Map, Value, json};
 
 #[allow(unused_imports)]
-use crate::protocol::*;
+use crate::*;
 
-pub(crate) fn openai_content_to_anthropic_blocks(content: &Value) -> Vec<Value> {
+pub fn openai_content_to_anthropic_blocks(content: &Value) -> Vec<Value> {
     match content {
         Value::String(s) => {
             if s.is_empty() {
@@ -35,7 +35,7 @@ pub(crate) fn openai_content_to_anthropic_blocks(content: &Value) -> Vec<Value> 
     }
 }
 
-pub(crate) fn openai_image_to_anthropic(url: &str) -> Value {
+pub fn openai_image_to_anthropic(url: &str) -> Value {
     if let Some(rest) = url.strip_prefix("data:")
         && let Some((meta, data)) = rest.split_once(',')
     {
@@ -48,7 +48,7 @@ pub(crate) fn openai_image_to_anthropic(url: &str) -> Value {
     json!({"type": "image", "source": {"type": "url", "url": url}})
 }
 
-pub(crate) fn openai_req_to_anthropic(body: &Value) -> Value {
+pub fn openai_req_to_anthropic(body: &Value) -> Value {
     let mut out = Map::new();
     out.insert("model".into(), body["model"].clone());
 
@@ -277,7 +277,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     #[allow(unused_imports)]
-    use crate::protocol::test_util::{out_types, sse, sse_typed};
+    use crate::test_util::{out_types, sse, sse_typed};
     #[test]
     fn request_openai_to_anthropic_basic() {
         let body = json!({

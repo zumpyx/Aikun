@@ -15,21 +15,21 @@ pub mod responses;
 pub mod sse;
 pub mod stream;
 #[cfg(test)]
-pub(crate) mod test_util;
+pub mod test_util;
 pub mod usage;
 
-pub(crate) use anthropic::request::*;
-pub(crate) use anthropic::response::*;
-pub(crate) use anthropic::stream::*;
-pub(crate) use error::*;
-pub(crate) use openai::request::*;
-pub(crate) use openai::response::*;
-pub(crate) use openai::stream::*;
-pub(crate) use openai::*;
-pub(crate) use responses::request::*;
-pub(crate) use sse::*;
-pub(crate) use stream::*;
-pub(crate) use usage::*;
+pub use anthropic::request::*;
+pub use anthropic::response::*;
+pub use anthropic::stream::*;
+pub use error::*;
+pub use openai::request::*;
+pub use openai::response::*;
+pub use openai::stream::*;
+pub use openai::*;
+pub use responses::request::*;
+pub use sse::*;
+pub use stream::*;
+pub use usage::*;
 
 use serde_json::{Value, json};
 
@@ -170,7 +170,7 @@ pub fn valid_response_shape(resp: &Value, protocol: Protocol) -> bool {
 mod tests {
     use super::*;
     #[allow(unused_imports)]
-    use crate::protocol::test_util::{out_types, sse, sse_typed};
+    use crate::test_util::{out_types, sse, sse_typed};
 
     #[test]
     fn valid_response_shape_checks_protocol_shape() {

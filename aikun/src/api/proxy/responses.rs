@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::AppState;
 use crate::auth::{AuthContext, Claims};
-use crate::protocol::Protocol;
+use aikun_protocol::Protocol;
 
 /// OpenAI Responses API endpoint.
 /// Channels that declare the "responses" protocol receive the request

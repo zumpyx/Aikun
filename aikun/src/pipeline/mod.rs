@@ -23,7 +23,7 @@ use crate::channel::selector::spawn_record_failure;
 use crate::channel::transport::extract_model;
 use crate::models::Provider;
 use crate::pipeline::admission::{enforce_key_limits, has_positive_balance, model_allowed};
-use crate::protocol::{Protocol, protocol_error};
+use aikun_protocol::{Protocol, protocol_error};
 
 pub mod admission;
 mod dispatch;

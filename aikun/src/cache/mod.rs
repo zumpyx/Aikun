@@ -118,7 +118,7 @@ impl GatewayCache {
     /// 请求可缓存时返回缓存键,否则 None。
     pub fn key_for(
         &self,
-        client_protocol: crate::protocol::Protocol,
+        client_protocol: aikun_protocol::Protocol,
         user_id: &str,
         body: &Value,
         headers: &HeaderMap,
@@ -269,10 +269,10 @@ mod tests {
         let body = json!({"model": "m", "temperature": 0});
         let h = HeaderMap::new();
         let k1 = cache
-            .key_for(crate::protocol::Protocol::OpenAi, "alice", &body, &h)
+            .key_for(aikun_protocol::Protocol::OpenAi, "alice", &body, &h)
             .unwrap();
         let k2 = cache
-            .key_for(crate::protocol::Protocol::OpenAi, "bob", &body, &h)
+            .key_for(aikun_protocol::Protocol::OpenAi, "bob", &body, &h)
             .unwrap();
         assert_ne!(k1, k2, "user scope must isolate users");
         let entry = CacheEntry {

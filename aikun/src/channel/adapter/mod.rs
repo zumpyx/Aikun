@@ -28,7 +28,7 @@ use reqwest::RequestBuilder;
 use serde_json::Value;
 
 use crate::models::Provider;
-use crate::protocol::{Protocol, SseEvent};
+use aikun_protocol::{Protocol, SseEvent};
 
 pub use registry::{adapter_for, registry};
 

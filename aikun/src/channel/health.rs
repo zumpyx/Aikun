@@ -15,7 +15,7 @@ pub async fn check_provider_health(
     clients: &Mutex<HashMap<String, reqwest::Client>>,
     base_url: &str,
     api_key: &str,
-    protocol: crate::protocol::Protocol,
+    protocol: aikun_protocol::Protocol,
     timeout_secs: u64,
     proxy_url: &str,
     channel_kind: &str,
@@ -264,8 +264,8 @@ async fn run_health_check_round(
                 let probe_timeout = (*timeout).clamp(1, 600).min(60) as u64;
                 // 按默认协议选对应的上游地址,留空的一路回退到另一个。
                 // 默认协议列为空时退回 provider_type(azure/custom 等讲 OpenAI)。
-                let protocol = crate::protocol::Protocol::parse(protocol)
-                    .unwrap_or_else(|| crate::protocol::Protocol::for_provider_type(protocol));
+                let protocol = aikun_protocol::Protocol::parse(protocol)
+                    .unwrap_or_else(|| aikun_protocol::Protocol::for_provider_type(protocol));
                 let base_url = crate::models::pick_base_url(protocol, openai_url, anthropic_url);
                 let (status, latency) = match tokio::time::timeout(
                     std::time::Duration::from_secs(probe_timeout),

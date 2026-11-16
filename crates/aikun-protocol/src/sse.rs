@@ -1,7 +1,7 @@
 //! SSE 字节流解析:事件边界(LF / CRLF / CR)、多行 data、event 字段。
 
 #[allow(unused_imports)]
-use crate::protocol::*;
+use crate::*;
 
 /// One parsed SSE event (possibly multiple data: lines joined).
 #[derive(Debug, Clone)]
@@ -32,7 +32,7 @@ pub fn parse_sse_remaining(buf: &mut Vec<u8>) -> Option<SseEvent> {
     parse_sse_block(&raw)
 }
 
-pub(crate) fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
+pub fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
     let mut i = 0;
     while i + 1 < buf.len() {
         if buf[i] == b'\n' && buf[i + 1] == b'\n' {
@@ -55,7 +55,7 @@ pub(crate) fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-pub(crate) fn parse_sse_block(raw: &[u8]) -> Option<SseEvent> {
+pub fn parse_sse_block(raw: &[u8]) -> Option<SseEvent> {
     let text = String::from_utf8_lossy(raw);
     let mut event = None;
     let mut data_lines: Vec<String> = Vec::new();
@@ -81,7 +81,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     #[allow(unused_imports)]
-    use crate::protocol::test_util::{out_types, sse, sse_typed};
+    use crate::test_util::{out_types, sse, sse_typed};
     // ---- SSE parsing ----
 
     #[test]

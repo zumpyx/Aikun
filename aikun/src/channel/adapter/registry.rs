@@ -135,13 +135,13 @@ mod tests {
         fn label(&self) -> &'static str {
             "Demo"
         }
-        fn endpoint_path(&self, _protocol: crate::protocol::Protocol) -> &'static str {
+        fn endpoint_path(&self, _protocol: aikun_protocol::Protocol) -> &'static str {
             "/api/chat"
         }
         fn prepare_request(
             &self,
             _p: &Provider,
-            _protocol: crate::protocol::Protocol,
+            _protocol: aikun_protocol::Protocol,
             body: &mut serde_json::Value,
         ) {
             body["vendor_flag"] = serde_json::json!(true);
@@ -156,15 +156,15 @@ mod tests {
         let mut p = crate::models::provider::tests::bare_provider();
         p.openai_base_url = "https://vendor.example/v1".into();
         assert_eq!(
-            a.chat_url(&p, crate::protocol::Protocol::OpenAi),
+            a.chat_url(&p, aikun_protocol::Protocol::OpenAi),
             "https://vendor.example/v1/api/chat"
         );
         let mut body = serde_json::json!({"model": "m"});
-        a.prepare_request(&p, crate::protocol::Protocol::OpenAi, &mut body);
+        a.prepare_request(&p, aikun_protocol::Protocol::OpenAi, &mut body);
         assert_eq!(body["vendor_flag"], true);
         // 未覆写的钩子沿用默认实现
         assert_eq!(
-            a.models_url("https://vendor.example", crate::protocol::Protocol::OpenAi),
+            a.models_url("https://vendor.example", aikun_protocol::Protocol::OpenAi),
             "https://vendor.example/v1/models"
         );
     }

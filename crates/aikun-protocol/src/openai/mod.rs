@@ -7,14 +7,14 @@ pub mod stream;
 use serde_json::Value;
 
 #[allow(unused_imports)]
-use crate::protocol::*;
+use crate::*;
 
 /// Anthropic / 中转站用的 cache_control 是对象。其它形状不转发。
-pub(crate) fn cache_control_of(v: &Value) -> Option<&Value> {
+pub fn cache_control_of(v: &Value) -> Option<&Value> {
     v.get("cache_control").filter(|c| c.is_object())
 }
 
-pub(crate) fn with_cache_control(mut block: Value, src: &Value) -> Value {
+pub fn with_cache_control(mut block: Value, src: &Value) -> Value {
     if let Some(cc) = cache_control_of(src)
         && let Some(obj) = block.as_object_mut()
     {
@@ -24,7 +24,7 @@ pub(crate) fn with_cache_control(mut block: Value, src: &Value) -> Value {
 }
 
 /// Extract plain text from an OpenAI message content field (string or parts).
-pub(crate) fn openai_content_text(content: &Value) -> String {
+pub fn openai_content_text(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
         Value::Array(parts) => parts

@@ -3,11 +3,11 @@
 use serde_json::Value;
 
 #[allow(unused_imports)]
-use crate::protocol::*;
+use crate::*;
 
 /// 上游 token 计数不可信:负数按 0,超出 i32 范围的值做饱和转换,
 /// 替代裸 `as i32`(后者会回绕成负数,污染计费与统计)。
-pub(crate) fn clamp_token_count(v: Option<i64>) -> i32 {
+pub fn clamp_token_count(v: Option<i64>) -> i32 {
     v.unwrap_or(0).clamp(0, i32::MAX as i64) as i32
 }
 
@@ -71,7 +71,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     #[allow(unused_imports)]
-    use crate::protocol::test_util::{out_types, sse, sse_typed};
+    use crate::test_util::{out_types, sse, sse_typed};
     // ---- extract_usage_any ----
 
     #[test]

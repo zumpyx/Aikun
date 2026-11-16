@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::Protocol;
+use aikun_protocol::Protocol;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Provider {

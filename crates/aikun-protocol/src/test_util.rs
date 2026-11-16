@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::protocol::{SseEvent, SseOut};
+use crate::{SseEvent, SseOut};
 
 pub(crate) fn sse(data: &str) -> SseEvent {
     SseEvent {

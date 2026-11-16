@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::AppState;
 use crate::auth::{AuthContext, Claims};
-use crate::protocol::Protocol;
+use aikun_protocol::Protocol;
 
 /// Anthropic Messages endpoint.
 /// Accepts Anthropic-format requests and routes them through the same proxy

@@ -11,7 +11,7 @@ use crate::auth::{AuthContext, Claims};
 use crate::channel::selector::list_available_models_async;
 use crate::pipeline::admission::model_allowed;
 use crate::pipeline::proxy_completion;
-use crate::protocol::Protocol;
+use aikun_protocol::Protocol;
 
 /// Unified chat completions endpoint (OpenAI-compatible).
 pub async fn chat_completion(

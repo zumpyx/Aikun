@@ -3,9 +3,9 @@
 use serde_json::{Map, Value, json};
 
 #[allow(unused_imports)]
-use crate::protocol::*;
+use crate::*;
 
-pub(crate) fn anthropic_content_to_openai_parts(blocks: &[Value]) -> Vec<Value> {
+pub fn anthropic_content_to_openai_parts(blocks: &[Value]) -> Vec<Value> {
     blocks
         .iter()
         .filter_map(|b| match b["type"].as_str() {
@@ -34,7 +34,7 @@ pub(crate) fn anthropic_content_to_openai_parts(blocks: &[Value]) -> Vec<Value> 
 }
 
 /// 单个纯文本、且没有 cache_control 时折成字符串;有标记就必须留在 part 上。
-pub(crate) fn collapse_openai_content(parts: Vec<Value>) -> Value {
+pub fn collapse_openai_content(parts: Vec<Value>) -> Value {
     if parts.len() == 1
         && parts[0]["type"].as_str() == Some("text")
         && cache_control_of(&parts[0]).is_none()
@@ -45,7 +45,7 @@ pub(crate) fn collapse_openai_content(parts: Vec<Value>) -> Value {
     }
 }
 
-pub(crate) fn anthropic_req_to_openai(body: &Value) -> Value {
+pub fn anthropic_req_to_openai(body: &Value) -> Value {
     let mut out = Map::new();
     out.insert("model".into(), body["model"].clone());
 
@@ -244,7 +244,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     #[allow(unused_imports)]
-    use crate::protocol::test_util::{out_types, sse, sse_typed};
+    use crate::test_util::{out_types, sse, sse_typed};
     #[test]
     fn request_anthropic_to_openai_basic() {
         let body = json!({

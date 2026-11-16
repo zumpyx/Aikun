@@ -6,6 +6,8 @@ description = "A lightweight AI gateway with multi-provider aggregation, failove
 # 二进制 crate:装配与运行时(pipeline/channel/billing/api/db);结构见 docs/architecture-v0.5.md
 
 [dependencies]
+# 协议转换 crate(本仓库)
+aikun-protocol = { path = "../crates/aikun-protocol" }
 # Web framework
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }

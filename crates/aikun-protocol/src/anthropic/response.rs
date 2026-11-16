@@ -3,9 +3,9 @@
 use serde_json::{Map, Value, json};
 
 #[allow(unused_imports)]
-use crate::protocol::*;
+use crate::*;
 
-pub(crate) fn anthropic_stop_to_openai(stop_reason: &str) -> &'static str {
+pub fn anthropic_stop_to_openai(stop_reason: &str) -> &'static str {
     match stop_reason {
         "max_tokens" => "length",
         "tool_use" => "tool_calls",
@@ -15,7 +15,7 @@ pub(crate) fn anthropic_stop_to_openai(stop_reason: &str) -> &'static str {
 
 /// 上游错误类型 → Anthropic 标准错误类型;白名单外的类型统一映射为
 /// api_error,避免把 OpenAI 的 server_error 等非标准类型透传给客户端。
-pub(crate) fn anthropic_error_type(err_type: &str) -> &'static str {
+pub fn anthropic_error_type(err_type: &str) -> &'static str {
     match err_type {
         "invalid_request_error" => "invalid_request_error",
         "authentication_error" => "authentication_error",
@@ -27,7 +27,7 @@ pub(crate) fn anthropic_error_type(err_type: &str) -> &'static str {
     }
 }
 
-pub(crate) fn anthropic_resp_to_openai(resp: &Value, model: &str) -> Value {
+pub fn anthropic_resp_to_openai(resp: &Value, model: &str) -> Value {
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
@@ -99,7 +99,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     #[allow(unused_imports)]
-    use crate::protocol::test_util::{out_types, sse, sse_typed};
+    use crate::test_util::{out_types, sse, sse_typed};
     #[test]
     fn response_anthropic_to_openai_with_tool_use() {
         let resp = json!({

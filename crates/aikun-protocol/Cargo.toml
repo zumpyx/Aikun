@@ -1,0 +1,13 @@
+[package]
+name = "aikun-protocol"
+version = "0.5.0"
+edition = "2024"
+description = "OpenAI / Anthropic / Responses 线协议互转:纯数据变换,无网络、无数据库(refactor-plan 9.1 契约测试的家)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# id 生成(openai/responses 转换产出 msg_/fc_/resp_ 前缀 id)与时间戳;
+# 均为纯计算,无 I/O——crate 纯净度判据见 architecture-v0.5.md §六。
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"

@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use crate::protocol::{Protocol, SseOut, anthropic_error_type};
+use crate::{Protocol, SseOut, anthropic_error_type};
 
 /// Build an error body in the client-facing protocol shape.
 pub fn protocol_error(client_protocol: Protocol, err_type: &str, message: &str) -> Value {
