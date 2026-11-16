@@ -1,10 +1,11 @@
 # Aikun 重构方案与进度(refactor/modular-gateway)
 
 > 状态:roadmap-v0.5 **阶段 0 与阶段 1(结构重组)已完成**;阶段 1 补入的协议契约测试尚未做;阶段 2–4 未开始。
+> 结构迁移(architecture-v0.5 §五)2026-11-16 首批落地:**根包变体 workspace**(根 `Cargo.toml` 声明 `[workspace] members = ["crates/*"]`,二进制仍在根包未移入 `aikun/`)、`openapi.yaml` 全景 spec、`crates/aikun-openapi` 生成 crate(openapi-to-rust 0.24.0)、`scripts/gen-api.sh` 生成管线;CI 门禁改 `--workspace`。protocol / channels 拆分、admin tag 迁移与 CI regenerate 守卫未做——完整清单与验收标准见 `docs/plan-next-steps.md`。
 > 第 9 节最佳实践已写入对应阶段任务,代码尚未实施。
 > 分支 `refactor/modular-gateway`,`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 零告警,`cargo test --locked` 全绿(148 单测 + 42 e2e;基线 v0.4.4 为 130 + 38)。
 >
-> **优先级:`docs/roadmap-v0.5.md`(用户定稿路线图)> 本文。** 两者冲突时以 roadmap 为准;本文只记录落地方式、roadmap 未覆盖的用户需求,以及各条目的进度。
+> **优先级:`docs/roadmap-v0.5.md`(阶段与纪律)> `docs/architecture-v0.5.md`(目标结构)> 本文。** 冲突时按此序裁决;本文只记录落地方式、未覆盖的用户需求,以及各条目的进度。结构类决策(多 crate workspace、admin API spec-first、channels crate)见 architecture-v0.5.md 的决策记录。
 >
 > 来源标注:
 > - **【用户 roadmap】**:`docs/roadmap-v0.5.md`(状态"已定稿,施工中以此为准")
@@ -346,9 +347,15 @@ pub trait ChannelAdapter: Send + Sync + 'static {
 
 ### 9.1 协议契约测试
 
-**决策**:为 OpenAI ↔ Anthropic 的互转建立黄金样本,流式与非流式各一套,比对完整输出,而不是只断言个别字段。样本放在 `tests/fixtures/`。
+**决策**:为 OpenAI ↔ Anthropic 的互转建立黄金样本,流式与非流式各一套,比对完整输出,而不是只断言个别字段。样本放在 `crates/aikun-protocol/tests/fixtures/`(随 workspace 化迁移)。
 
 **理由**:网关最常见的回归是 SSE 事件顺序、`tool_calls` 分片、`usage` 字段丢失,单靠单元测试很难发现。用录制的真实上游响应做样本,阶段 1 已完成的协议拆分和阶段 2 的管线改动才有契约可守。阶段 1 以纯移动为主、现已完成结构重组,本条作为阶段 1 遗留先建目录与非流式样本,流式完整比对放到阶段 2,避免把已结束阶段重新打开成行为改动。
+
+**参照体系(2026-11 补充,三层)**:
+
+- **形状下界——OpenAI 官方 spec 快照**:MIT 许可,快照入库至 `aikun-protocol/tests/fixtures/reference/openai-openapi.yaml`(文件头注明来源 commit 与日期;它本身是 OpenAPI 3.1 的活文档,钉死版本防漂移)。期望输出用 jsonschema crate 对其 `components.schemas` 校验,保证不缺官方字段、类型正确。永远不进生成管线。
+- **形状上界——真实抓包黄金样本**:第三方 OpenAI 兼容上游的扩展字段(`reasoning_content` 等)官方 spec 不含,以录制样本为准,覆盖 SSE 事件顺序与 `tool_calls` 分片。
+- **覆盖对标——LLM-Rosetta**:Python/MIT,四协议 hub-and-spoke 双向转换 + 流式,1364 测试 + 国家实验室生产部署(<https://github.com/Oaklight/llm-rosetta>)。其用例分类作为测试密度基线;Google GenAI 映射可作未来 Gemini 适配器的语义参考。
 
 **验收**:
 
