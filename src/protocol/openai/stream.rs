@@ -255,6 +255,18 @@ impl OaStreamState {
         }
     }
 
+    /// usage 4 元组 → Anthropic message_delta.usage。
+    pub(crate) fn anthropic_usage(&self) -> Value {
+        let mut u = json!({
+            "input_tokens": self.usage.0,
+            "output_tokens": self.usage.1,
+        });
+        if self.usage.3 > 0 {
+            u["cache_read_input_tokens"] = json!(self.usage.3);
+        }
+        u
+    }
+
     pub(crate) fn finalize(&mut self) -> Vec<SseOut> {
         if self.finished || !self.started {
             return vec![];
@@ -277,10 +289,9 @@ impl OaStreamState {
                 // OpenAI 上游的 usage 在结尾 chunk 才到达,message_start 时
                 // input_tokens 只能填 0;finalize 时真实值已捕获,回填给
                 // Anthropic 客户端(其容忍 usage 里的额外字段)。
-                "usage": {
-                    "input_tokens": self.usage.0,
-                    "output_tokens": self.usage.1,
-                },
+                // usage.0 已是未缓存输入;缓存命中单列 cache_read_input_tokens
+                // (bug ① 修复,与非流式口径一致)。
+                "usage": self.anthropic_usage(),
             }),
         ));
         out.push(SseOut::json("message_stop", json!({"type": "message_stop"})));
@@ -688,6 +699,23 @@ mod tests {
 
         // finalize is one-shot
         assert!(c.finish().is_empty());
+    }
+
+    #[test]
+    fn stream_openai_to_anthropic_splits_cached_tokens() {
+        // 回归(bug ①):流式 O→A 收尾的 message_delta.usage 也要拆出缓存维度。
+        let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "m");
+        c.push(&sse(r#"{"id":"c","choices":[{"delta":{"content":"x"}}]}"#));
+        c.push(&sse(r#"{"id":"c","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"prompt_tokens_details":{"cached_tokens":6}}}"#));
+        let outs = c.push(&sse("[DONE]"));
+        let delta: Value = serde_json::from_str(
+            &outs.iter().find(|o| o.event.as_deref() == Some("message_delta")).unwrap().data,
+        )
+        .unwrap();
+        assert_eq!(delta["usage"]["input_tokens"], 4);
+        assert_eq!(delta["usage"]["cache_read_input_tokens"], 6);
+        assert_eq!(delta["usage"]["output_tokens"], 4);
+        assert_eq!(c.usage(), (4, 4, 14, 6));
     }
 
     #[test]

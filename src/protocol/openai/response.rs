@@ -71,8 +71,23 @@ pub(crate) fn openai_resp_to_anthropic(resp: &Value) -> Value {
     }
 
     let stop_reason = openai_finish_to_anthropic(choice["finish_reason"].as_str().unwrap_or("stop"));
+    // OpenAI 的 prompt_tokens 含缓存命中部分;Anthropic 的 input_tokens 不含,
+    // 缓存命中单列 cache_read_input_tokens。与 anthropic_resp_to_openai 的
+    // 合并口径互为镜像(0.4 曾把含缓存的 prompt 整个塞进 input_tokens 并丢掉
+    // 缓存维度,见 CHANGELOG 0.4.5 修复 ①)。
     let prompt = resp["usage"]["prompt_tokens"].as_i64().unwrap_or(0);
+    let cached = resp["usage"]["prompt_tokens_details"]["cached_tokens"]
+        .as_i64()
+        .unwrap_or(0)
+        .clamp(0, prompt.max(0));
     let completion = resp["usage"]["completion_tokens"].as_i64().unwrap_or(0);
+    let mut usage = json!({
+        "input_tokens": prompt - cached,
+        "output_tokens": completion,
+    });
+    if cached > 0 {
+        usage["cache_read_input_tokens"] = json!(cached);
+    }
 
     json!({
         "id": resp["id"].as_str().unwrap_or("msg_unknown"),
@@ -82,10 +97,7 @@ pub(crate) fn openai_resp_to_anthropic(resp: &Value) -> Value {
         "content": blocks,
         "stop_reason": stop_reason,
         "stop_sequence": null,
-        "usage": {
-            "input_tokens": prompt,
-            "output_tokens": completion,
-        }
+        "usage": usage,
     })
 }
 
@@ -173,6 +185,32 @@ mod tests {
         assert_eq!(out["content"], json!([{"type": "text", "text": "hi"}]));
         assert_eq!(out["stop_reason"], "max_tokens"); // length → max_tokens
         assert_eq!(out["usage"], json!({"input_tokens": 3, "output_tokens": 4}));
+    }
+
+    #[test]
+    fn response_openai_to_anthropic_splits_cached_tokens() {
+        // 回归(bug ①):prompt_tokens 含缓存命中,Anthropic 客户端应看到
+        // input_tokens = 未缓存部分,cache_read_input_tokens = 缓存命中。
+        let resp = json!({
+            "id": "chatcmpl-1", "model": "gpt-4",
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14,
+                      "prompt_tokens_details": {"cached_tokens": 6}}
+        });
+        let out = convert_response(&resp, Protocol::OpenAi, Protocol::Anthropic, "gpt-4");
+        assert_eq!(out["usage"]["input_tokens"], 4);
+        assert_eq!(out["usage"]["cache_read_input_tokens"], 6);
+        assert_eq!(out["usage"]["output_tokens"], 4);
+        // 经 Anthropic 形状再提取用量,与直接从 OpenAI 原文提取一致(计费口径不漂移)。
+        assert_eq!(extract_usage_any(&out), extract_usage_any(&resp));
+        // 上游数据不可信:cached > prompt 时饱和,不出现负数。
+        let bad = json!({
+            "choices": [{"message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 9}}
+        });
+        let out = convert_response(&bad, Protocol::OpenAi, Protocol::Anthropic, "m");
+        assert_eq!(out["usage"]["input_tokens"], 0);
+        assert_eq!(out["usage"]["cache_read_input_tokens"], 3);
     }
 
     #[test]
