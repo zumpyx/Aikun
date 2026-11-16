@@ -1,0 +1,29 @@
+[package]
+name = "aikun-store"
+version = "0.5.0"
+edition = "2024"
+description = "仓储层:按能力定义的存储 trait(无 SQL 方言,SurrealDB 第二实现预留缝)+ SQLite 实现(连接池/迁移/行映射/缓存令牌);吸收自二进制 src/db 与 src/models(plan 步骤 8)"
+publish = false
+
+[dependencies]
+# 渠道域类型(Provider 行模型;纯描述 crate,无 I/O)
+aikun-channels = { path = "../aikun-channels" }
+
+# SQLite 实现(仅 impl 侧使用;trait 签名零 rusqlite 类型)
+rusqlite = { version = "0.34", features = ["bundled"] }
+
+# 静态加密(providers.api_key AES-256-GCM)与口令/密钥哈希(sha256/argon2):
+# 均为"落库形态"的存储关注,随 db 层一并吸收
+aes-gcm = "0.10"
+base64 = "0.22"
+sha2 = "0.10"
+argon2 = "0.5"
+rand = "0.9"
+
+# 默认价格快照(JSON)与渠道 models/model_mapping 列解析
+serde_json = "1"
+# 行 ID / 时间
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+# 日志门面
+tracing = "0.1"

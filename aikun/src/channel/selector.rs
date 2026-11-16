@@ -4,28 +4,14 @@ use std::sync::Arc;
 use rand::Rng;
 use rusqlite::{Connection, params};
 
+use crate::channel::registry::{self, ChannelEntry};
+use crate::crypto::KeyCipher;
 use crate::db::DbPool;
-use crate::models::{Provider, row_to_provider};
+use crate::models::Provider;
 
-/// Check whether a provider can serve the requested model. The models list
-/// only matches exactly; model_mapping keys (requested → upstream) match by
-/// prefix, consistent with how the mapping is applied later.
-fn provider_supports_model(p: &Provider, model: &str) -> bool {
-    if let Ok(models) = serde_json::from_str::<Vec<String>>(&p.models)
-        && models.iter().any(|m| m == model)
-    {
-        return true;
-    }
-    if let Ok(mapping) =
-        serde_json::from_str::<std::collections::HashMap<String, String>>(&p.model_mapping)
-        && mapping
-            .keys()
-            .any(|k| !k.is_empty() && model.starts_with(k.as_str()))
-    {
-        return true;
-    }
-    false
-}
+// 模型支持判定(models 精确 + model_mapping 非空 key 前缀)已随快照
+// 预解析移入 registry::ChannelEntry::supports_model(建快照时一次,
+// 选路零重复 JSON parse);口径对拍见 registry.rs 测试。
 
 /// 非有限值防御：持久化数据或计算结果中的 inf/NaN 一律回退安全值，
 /// 避免 random_range(0.0..inf) panic。
@@ -90,14 +76,15 @@ fn weighted_pick(candidates: &[&Provider]) -> Option<Provider> {
     Some(candidates[candidates.len() - 1].clone())
 }
 
-/// 钉住的渠道还能不能接着用:仍在候选里(调用方已过滤模型与启用状态)、
-/// 密钥解得开、没有被本请求排除、也不是 unhealthy。degraded 仍留下——
-/// 提示缓存比略差的健康分更值钱。
-fn affinity_usable(p: &Provider, exclude: &HashSet<String>) -> bool {
-    p.is_active
-        && p.health_status != "unhealthy"
-        && !p.key_decrypt_failed
+/// 钉住的渠道还能不能接着用:仍在候选里(快照只含启用渠道)、密钥解得开、
+/// 没有被本请求排除、也不是 unhealthy。degraded 仍留下——提示缓存比略差
+/// 的健康分更值钱。密钥可解性只对钉住渠道做一次解密判定(旧实现每请求
+/// 逐行解密全部渠道;快照持有密文,选中后解一次)。
+fn pinned_usable(p: &Provider, exclude: &HashSet<String>, cipher: &KeyCipher) -> bool {
+    p.health_status != "unhealthy"
         && !exclude.contains(&p.id)
+        && !(p.api_key.starts_with(crate::crypto::ENC_PREFIX)
+            && cipher.decrypt(&p.api_key).is_none())
 }
 
 fn pinned_provider_id(conn: &Connection, api_key_id: &str, model: &str) -> Option<String> {
@@ -129,6 +116,11 @@ pub fn pin_channel(pool: &DbPool, api_key_id: &str, model: &str, provider_id: &s
 
 /// Select the best provider for a given model, excluding already-tried ones.
 ///
+/// 吃渠道拓扑快照(`channel/registry`),选路路径零全表扫描、零逐行解密、
+/// 零重复 JSON 解析:快照持有启用渠道(密文密钥 + 预解析模型清单),
+/// 命中渠道后解一次密。每请求仅剩两条点查 SQL:快照失效检测的表令牌
+/// (注册表内部)与渠道亲和点查(事实走 DB,roadmap 决策 4)。
+///
 /// 有 API Key 时先看渠道亲和:同一把密钥、同一个模型尽量一直走上次成功
 /// 的渠道(上游提示缓存按渠道分开,中途换渠道等于缓存作废)。钉住的渠道
 /// 不健康、解不开密钥、不再提供该模型,或已经在本请求的排除集里,才退回
@@ -139,129 +131,86 @@ pub fn select_provider(
     exclude: &HashSet<String>,
     api_key_id: Option<&str>,
 ) -> Option<Provider> {
-    let conn = pool.read().lock().ok()?;
-    let providers = find_providers_for_model(&conn, &pool.cipher, model)?;
+    let snap = registry::shared().current(pool);
+    let entries = snap.entries();
+    let cipher = &pool.cipher;
 
     if let Some(key_id) = api_key_id.map(str::trim).filter(|s| !s.is_empty())
-        && let Some(pinned_id) = pinned_provider_id(&conn, key_id, model)
-        && let Some(p) = providers
-            .iter()
-            .find(|p| p.id == pinned_id && affinity_usable(p, exclude))
+        && let Some(pinned_id) = pool
+            .read()
+            .lock()
+            .ok()
+            .and_then(|conn| pinned_provider_id(&conn, key_id, model))
+        // 钉住渠道必须仍支持该模型(旧语义:亲和查找发生在模型过滤后的
+        // 候选集内),且健康可钉、未被本请求排除、密钥解得开。
+        && let Some(e) = entries.iter().find(|e| {
+            e.provider.id == pinned_id
+                && e.supports_model(model)
+                && pinned_usable(&e.provider, exclude, cipher)
+        })
     {
-        return Some(p.clone());
+        return Some(decrypt_provider(&e.provider, cipher));
     }
 
-    let mut candidates: Vec<&Provider> = providers
+    let supports: Vec<&ChannelEntry> = entries.iter().filter(|e| e.supports_model(model)).collect();
+    let mut candidates: Vec<&ChannelEntry> = supports
         .iter()
-        .filter(|p| !exclude.contains(&p.id))
+        .copied()
+        .filter(|e| !exclude.contains(&e.provider.id))
         .collect();
     if candidates.is_empty() {
         // All matching providers were tried — allow retrying any of them.
-        candidates = providers.iter().collect();
+        candidates = supports;
     }
     if candidates.is_empty() {
         return None;
     }
 
-    // Filter to only healthy/active providers
+    // Filter to only healthy providers(快照只含 is_active=1 的渠道)。
     let healthy: Vec<&Provider> = candidates
         .iter()
         .copied()
-        .filter(|p| p.is_active && p.health_status != "unhealthy")
+        .map(|e| &e.provider)
+        .filter(|p| p.health_status != "unhealthy")
         .collect();
 
     if healthy.is_empty() {
         // Fall back to any active provider even if unhealthy — still using
         // weighted scoring instead of always picking the first one.
-        let active: Vec<&Provider> = candidates.iter().copied().filter(|p| p.is_active).collect();
-        return weighted_pick(&active);
+        let active: Vec<&Provider> = candidates.iter().copied().map(|e| &e.provider).collect();
+        return weighted_pick(&active).map(|p| decrypt_provider(&p, cipher));
     }
 
-    weighted_pick(&healthy)
+    // 选中后解一次密;解不开打 key_decrypt_failed 标记,由 attempt_loop
+    // 跳过该渠道——空凭证打到上游会吃 401,触发立即禁用并连锁打挂全部渠道。
+    weighted_pick(&healthy).map(|p| decrypt_provider(&p, cipher))
 }
 
-/// Find all providers that support the given model.
-/// api_key 在出库时解密(密文以 enc:v1: 为前缀,明文原样兼容)。
-fn find_providers_for_model(
-    conn: &Connection,
-    cipher: &crate::crypto::KeyCipher,
-    model: &str,
-) -> Option<Vec<Provider>> {
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT {} FROM providers WHERE is_active = 1",
-            crate::models::PROVIDER_SELECT_COLUMNS
-        ))
-        .ok()?;
-
-    let providers: Vec<Provider> = stmt
-        .query_map([], row_to_provider)
-        .ok()?
-        .filter_map(|r| r.ok())
-        .map(|mut p| {
-            // 区分"密钥本就为空"(免密钥本地上游)与"密文解密失败"(加密
-            // 密钥被换):后者打标记,由 attempt_loop 跳过该渠道——空凭证
-            // 打到上游会吃 401,触发立即禁用并连锁打挂全部渠道。
-            if p.api_key.starts_with(crate::crypto::ENC_PREFIX)
-                && cipher.decrypt(&p.api_key).is_none()
-            {
-                p.key_decrypt_failed = true;
-            }
-            p.api_key = crate::crypto::decrypt_or_plain(cipher, &p.api_key);
-            p
-        })
-        .filter(|p| provider_supports_model(p, model))
-        .collect();
-
-    Some(providers)
+/// 选中渠道后解密密钥:明文原样兼容;enc:v1: 密文解密失败置
+/// `key_decrypt_failed`(与旧 find_providers_for_model 的逐行解密口径
+/// 一致,只是从"每渠道每请求"收敛到"选中渠道一次")。
+fn decrypt_provider(p: &Provider, cipher: &KeyCipher) -> Provider {
+    let mut out = p.clone();
+    if out.api_key.starts_with(crate::crypto::ENC_PREFIX) && cipher.decrypt(&out.api_key).is_none()
+    {
+        out.key_decrypt_failed = true;
+    }
+    out.api_key = crate::crypto::decrypt_or_plain(cipher, &out.api_key);
+    out
 }
 
 /// List all unique models available across all active providers.
 /// 除 models 列表外,model_mapping 的 key(请求侧模型名)也并入——仅靠
-/// 映射路由的模型调得通却看不到,客户端无法发现。
+/// 映射路由的模型调得通却看不到,客户端无法发现。走拓扑快照,与
+/// health 循环的健康态回写同源。
 pub fn list_available_models(pool: &DbPool) -> Vec<String> {
-    let conn = match pool.read().lock() {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
-
-    let mut stmt = match conn.prepare(
-        "SELECT models, model_mapping FROM providers WHERE is_active = 1 AND health_status != 'unhealthy'"
-    ) {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-
-    let mut models: Vec<String> = vec![];
-    if let Ok(rows) = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }) {
-        for row in rows.flatten() {
-            if let Ok(ms) = serde_json::from_str::<Vec<String>>(&row.0) {
-                for m in ms {
-                    if !models.contains(&m) {
-                        models.push(m);
-                    }
-                }
-            }
-            if let Ok(map) =
-                serde_json::from_str::<std::collections::HashMap<String, String>>(&row.1)
-            {
-                for k in map.keys() {
-                    // 空 key 与 provider_supports_model 口径一致:不匹配任何模型
-                    if !k.is_empty() && !models.contains(k) {
-                        models.push(k.clone());
-                    }
-                }
-            }
-        }
-    }
-    models.sort();
-    models
+    registry::shared().current(pool).available_models()
 }
 
 /// Record a successful request: update latency/error-rate EMAs and reset the
 /// consecutive failure counter.
+/// DB 是事实(roadmap 决策 4);拓扑快照用同一公式镜像 EMA,保持选路
+/// 评分的实时性(镜像与 SQL 逐值对拍见测试)。
 pub fn record_request_result(pool: &DbPool, provider_id: &str, latency_ms: f64, success: bool) {
     let conn = match pool.conn.lock() {
         Ok(c) => c,
@@ -283,6 +232,9 @@ pub fn record_request_result(pool: &DbPool, provider_id: &str, latency_ms: f64, 
          WHERE id = ?3",
         params![latency_ms, success as i32, provider_id],
     );
+    registry::shared()
+        .cached()
+        .mirror_request_result(provider_id, latency_ms, success);
 }
 
 /// Record a failed upstream attempt. Auto-disables the provider when:
@@ -333,6 +285,10 @@ pub fn record_failure(
             provider_id
         ],
     );
+    // EMA 事实镜像到拓扑快照(同公式;见 record_request_result 注释)。
+    registry::shared()
+        .cached()
+        .mirror_failure(provider_id, latency_ms, is_upstream_failure);
 
     let reason = if status == 401 || status == 403 {
         Some(format!("上游返回 {} 认证失败,自动禁用", status))
@@ -359,6 +315,9 @@ pub fn record_failure(
             "UPDATE providers SET is_active = 0, disabled_reason = ?1, updated_at = datetime('now') WHERE id = ?2",
             params![reason, provider_id],
         );
+        // 快照同步移除(该 DB 写会更新 updated_at,下次令牌比对也会触发
+        // 重建;镜像让"下一请求"立即看不到该渠道,不等点查)。
+        registry::shared().cached().deactivate(provider_id);
     }
 }
 // ---- 异步包装:热路径(每请求的鉴权/选路/记账)不得在 async executor 上
@@ -465,33 +424,6 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
-    }
-
-    #[test]
-    fn supports_model_exact_list_match() {
-        let p = provider(r#"["gpt-4","claude-3"]"#, "");
-        assert!(provider_supports_model(&p, "gpt-4"));
-        assert!(!provider_supports_model(&p, "gpt-4o"));
-    }
-
-    #[test]
-    fn supports_model_mapping_prefix() {
-        let p = provider("[]", r#"{"claude-": "gpt-4"}"#);
-        assert!(provider_supports_model(&p, "claude-3-opus"));
-        assert!(!provider_supports_model(&p, "gpt-4"));
-    }
-
-    #[test]
-    fn supports_model_empty_mapping_key_matches_nothing() {
-        // An empty mapping key would prefix-match every model; it is skipped.
-        let p = provider("[]", r#"{"": "gpt-4"}"#);
-        assert!(!provider_supports_model(&p, "anything"));
-    }
-
-    #[test]
-    fn supports_model_malformed_json() {
-        let p = provider("not json", "also not json");
-        assert!(!provider_supports_model(&p, "gpt-4"));
     }
 
     #[test]
@@ -743,20 +675,180 @@ mod tests {
     }
 
     #[test]
-    fn affinity_usable_rejects_bad_pin() {
+    fn pinned_usable_rejects_bad_pin() {
+        let cipher = crate::crypto::KeyCipher::from_secret("test-cipher");
         let mut p = provider(r#"["gpt-4"]"#, "");
         let exclude = HashSet::new();
-        assert!(affinity_usable(&p, &exclude));
+        // 明文密钥:可解,健康即可用
+        assert!(pinned_usable(&p, &exclude, &cipher));
         p.health_status = "degraded".into();
-        assert!(affinity_usable(&p, &exclude));
+        assert!(pinned_usable(&p, &exclude, &cipher));
         p.health_status = "unhealthy".into();
-        assert!(!affinity_usable(&p, &exclude));
+        assert!(!pinned_usable(&p, &exclude, &cipher));
+        // 密文解不开(enc 前缀但非本密钥加密)⇒ 钉不可用
         p.health_status = "healthy".into();
-        p.key_decrypt_failed = true;
-        assert!(!affinity_usable(&p, &exclude));
-        p.key_decrypt_failed = false;
+        p.api_key = "enc:v1:bm90LXZhbGlk".into();
+        assert!(!pinned_usable(&p, &exclude, &cipher));
+        p.api_key = "k".into();
         let mut exclude = HashSet::new();
         exclude.insert("p".into());
-        assert!(!affinity_usable(&p, &exclude));
+        assert!(!pinned_usable(&p, &exclude, &cipher));
+    }
+
+    // ---- 快照缓存与 DB 一致(roadmap §四.5 防御测试) ----
+    //
+    // registry 是进程单测共享单例;以下用例用独立 pool + 独立渠道 id,
+    // 交叉重建只会让数据更新鲜,不影响断言。
+
+    fn snap_pool() -> crate::db::DbPool {
+        crate::db::DbPool::new(&crate::config::AppConfig {
+            database_url: ":memory:".into(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// 直写 DB(绕过管理端 API,如测试夹具/运维脚本):下一请求必须看到
+    /// 新渠道(表令牌捕获行数/rowid 变化)。
+    #[test]
+    fn selection_sees_direct_db_insert_next_request() {
+        let pool = snap_pool();
+        // 先选一次:快照为空,选不出渠道(等价旧行为 DB 空表 → None)
+        assert!(select_provider(&pool, "gpt-4", &HashSet::new(), None).is_none());
+
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO providers (id, name, provider_type, openai_base_url, api_key, models)
+                 VALUES ('snap-direct', 'd', 'openai', 'http://x', 'k', '[\"gpt-4\"]')",
+                [],
+            )
+            .unwrap();
+        let picked = select_provider(&pool, "gpt-4", &HashSet::new(), None)
+            .expect("next selection must see the direct insert");
+        assert_eq!(picked.id, "snap-direct");
+        // 密文保持库内形态直到选中;明文 key 原样可用
+        assert_eq!(picked.api_key, "k");
+        assert!(!picked.key_decrypt_failed);
+    }
+
+    /// 失效检测两级防线:表令牌捕获「不改 updated_at 的 unhealthy 跃迁」
+    /// (直写夹具可见);世代计数器捕获令牌盲区(如 weight 原地改值)——
+    /// 管理端写路径全部走世代(roadmap「缓存与 DB 一致」防御)。
+    #[test]
+    fn token_and_epoch_both_invalidate_snapshot_next_request() {
+        let pool = snap_pool();
+        {
+            let conn = pool.conn.lock().unwrap();
+            for id in ["snap-ep-a", "snap-ep-b"] {
+                conn.execute(
+                    "INSERT INTO providers (id, name, provider_type, openai_base_url, api_key, models, weight)
+                     VALUES (?1, ?1, 'openai', 'http://x', 'k', '[\"gpt-4\"]', 1)",
+                    params![id],
+                )
+                .unwrap();
+            }
+            // 钉住 a:选路必中
+            conn.execute(
+                "INSERT INTO channel_affinity (api_key_id, model, provider_id)
+                 VALUES ('snap-key', 'gpt-4', 'snap-ep-a')",
+                [],
+            )
+            .unwrap();
+        }
+        let picked = select_provider(&pool, "gpt-4", &HashSet::new(), Some("snap-key")).unwrap();
+        assert_eq!(picked.id, "snap-ep-a");
+
+        // 令牌盲区演示:weight 原地改值(不动 updated_at/行数/健康态)
+        // 不触发重建——钉住关系不受影响,断言保持稳定
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET weight = 1000 WHERE id = 'snap-ep-b'",
+                [],
+            )
+            .unwrap();
+        let picked = select_provider(&pool, "gpt-4", &HashSet::new(), Some("snap-key")).unwrap();
+        assert_eq!(picked.id, "snap-ep-a");
+
+        // 管理端写路径成功 ⇒ 世代递增 ⇒ 令牌盲区也在下一请求可见
+        aikun_admin::admin_providers::bump_topology_epoch();
+        // (钉住优先于权重,故改看非钉路径:去掉 key,加权应选 b)
+        let picked = select_provider(&pool, "gpt-4", &HashSet::new(), None).unwrap();
+        assert_eq!(picked.id, "snap-ep-b", "epoch 失效后 weight=1000 必须可见");
+
+        // 直写 unhealthy 跃迁(不动 updated_at)⇒ 表令牌捕获 ⇒ 立即可见
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE providers SET health_status = 'unhealthy' WHERE id = 'snap-ep-a'",
+                [],
+            )
+            .unwrap();
+        let picked = select_provider(&pool, "gpt-4", &HashSet::new(), Some("snap-key")).unwrap();
+        assert_ne!(
+            picked.id, "snap-ep-a",
+            "unhealthy 跃迁经表令牌失效,必须放弃这颗钉"
+        );
+    }
+
+    /// EMA 事实:DB 写(SQL 原文)与快照镜像逐值一致;自动禁用后下一
+    /// 请求不再选中该渠道。
+    #[test]
+    fn record_result_mirrors_snapshot_and_matches_db() {
+        let pool = snap_pool();
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO providers (id, name, provider_type, openai_base_url, api_key, models)
+                 VALUES ('snap-ema', 'e', 'openai', 'http://x', 'k', '[\"gpt-4\"]')",
+                [],
+            )
+            .unwrap();
+        assert!(select_provider(&pool, "gpt-4", &HashSet::new(), None).is_some());
+
+        record_request_result(&pool, "snap-ema", 100.0, true);
+        record_request_result(&pool, "snap-ema", 200.0, false);
+        record_failure(&pool, "snap-ema", 50.0, 502, 5, true);
+
+        // 快照里的 EMA 与 DB 行一致(镜像路径或重建路径都必须等于 DB)
+        let snap = registry::shared().current(&pool);
+        let (snap_latency, snap_error) = {
+            let entries = snap.entries();
+            let entry = entries
+                .iter()
+                .find(|e| e.provider.id == "snap-ema")
+                .expect("snapshot must contain the provider");
+            (entry.provider.latency_ms, entry.provider.error_rate)
+        };
+        let conn = pool.read().lock().unwrap();
+        let (db_latency, db_error): (f64, f64) = conn
+            .query_row(
+                "SELECT latency_ms, error_rate FROM providers WHERE id = 'snap-ema'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(snap_latency, db_latency);
+        assert_eq!(snap_error, db_error);
+
+        // 连续失败到阈值 → 自动禁用(DB 写 + 快照移除)→ 下一请求换渠道
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO providers (id, name, provider_type, openai_base_url, api_key, models, weight)
+                 VALUES ('snap-ema-alt', 'alt', 'openai', 'http://x', 'k', '[\"gpt-4\"]', 1)",
+                [],
+            )
+            .unwrap();
+        record_failure(&pool, "snap-ema", 50.0, 502, 2, true);
+        let picked = select_provider(&pool, "gpt-4", &HashSet::new(), None).unwrap();
+        assert_eq!(picked.id, "snap-ema-alt");
     }
 }

@@ -24,7 +24,7 @@ pub async fn check_provider_health(
     let client = cached_client(clients, proxy_url, base_url, timeout_secs);
 
     // URL 与鉴权头由渠道适配器决定(见 aikun_channels)。
-    let adapter = crate::channel::registry().resolve(channel_kind);
+    let adapter = aikun_channels::registry().resolve(channel_kind);
     let url = adapter.models_url(base_url, protocol);
     // 日志脱敏:URL 可能带 userinfo 或 query(如 ?key=...),不落明文。
     let log_url = sanitize_log_url(&url);
@@ -312,14 +312,19 @@ async fn run_health_check_round(
 
         // Only record the ping outcome: latency_ms is the real-request EMA
         // used for routing and must not be overwritten by ping latency.
+        // 健康态同时镜像到拓扑快照(该 UPDATE 不动 updated_at,表令牌不
+        // 捕获;进程内直接同步,选路下一请求立即看到)。
         let now = chrono::Utc::now().to_rfc3339();
+        let snap = crate::channel::registry::shared().cached();
         for (id, status, _latency) in &results {
             if let Err(e) = conn.execute(
                 "UPDATE providers SET health_status = ?1, last_health_check = ?2 WHERE id = ?3",
                 params![status, now, id],
             ) {
                 tracing::error!("Failed to update provider health: {}", e);
+                continue;
             }
+            snap.set_health(id, status);
         }
     }
 }

@@ -53,6 +53,23 @@ use aikun_openapi::openapi::types::*;
 
 use crate::problem;
 
+// ---------- 价格表缓存失效(roadmap 阶段 3) ----------
+//
+// 二进制 billing 的价格表缓存每次取用比对「本世代 + 存储层表令牌」;
+// 价格 CRUD 成功后递增世代,保证「改价后下一笔计费立即用新价」。
+
+static PRICE_TABLE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// 价格写路径成功后调用:令价格表缓存下次取用时重载。
+pub fn bump_price_table_epoch() {
+    PRICE_TABLE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+/// 当前世代(价格表缓存比对用;只增不减)。
+pub fn price_table_epoch() -> u64 {
+    PRICE_TABLE_EPOCH.load(std::sync::atomic::Ordering::Acquire)
+}
+
 // ---------- 过渡期存储端口 ----------
 //
 // aikun-store 就位前(plan 步骤 8)DB/rand/sha2/uuid 由装配层适配器实现本
@@ -497,7 +514,10 @@ impl AdminBillingService {
             body.completion_price.unwrap_or(0.0),
             body.cached_price.flatten(),
         ) {
-            Ok(rec) => AdminCreatePriceResponse::Created(Self::to_api_price(&rec)),
+            Ok(rec) => {
+                bump_price_table_epoch();
+                AdminCreatePriceResponse::Created(Self::to_api_price(&rec))
+            }
             Err(BillingStoreError::Constraint) => AdminCreatePriceResponse::Conflict(problem(
                 409,
                 "duplicate_model",
@@ -520,7 +540,10 @@ impl AdminBillingService {
     /// `DELETE /api/prices/{id}`(旧 200 {message:'deleted'} → **204**)。
     pub async fn admin_delete_price(&self, id: String) -> AdminDeletePriceResponse {
         match self.store.delete_price(&id) {
-            Ok(true) => AdminDeletePriceResponse::NoContent,
+            Ok(true) => {
+                bump_price_table_epoch();
+                AdminDeletePriceResponse::NoContent
+            }
             Ok(false) => {
                 AdminDeletePriceResponse::NotFound(problem(404, "not_found", "price not found"))
             }
@@ -834,7 +857,10 @@ impl AdminBillingService {
             body.completion_price,
             body.cached_price,
         ) {
-            Ok(Some(rec)) => AdminUpdatePriceResponse::Ok(Self::to_api_price(&rec)),
+            Ok(Some(rec)) => {
+                bump_price_table_epoch();
+                AdminUpdatePriceResponse::Ok(Self::to_api_price(&rec))
+            }
             Ok(None) => {
                 AdminUpdatePriceResponse::NotFound(problem(404, "not_found", "price not found"))
             }

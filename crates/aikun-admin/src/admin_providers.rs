@@ -64,6 +64,27 @@ use aikun_openapi::openapi::types::{
 
 use crate::problem;
 
+// ---------- 渠道拓扑缓存失效(roadmap 阶段 3) ----------
+//
+// 二进制的 channel/registry 快照每次取用比对「本世代 + 存储层表令牌」:
+// 表令牌(行数/rowid/updated_at 聚合,见 aikun-store)覆盖行数与触及
+// updated_at 的写;**世代计数器覆盖不改 updated_at 的写**(健康状态
+// UPDATE 只动 health_status/last_health_check)。管理端每次成功的写路径
+// 都递增世代,保证「改渠道后下一请求立即看到新配置」(roadmap §四.5)。
+// 进程内 AtomicU64,单实例部署下与写路径同进程。
+
+static TOPOLOGY_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// 管理端写路径成功后调用:令渠道拓扑快照下次取用时重建。
+pub fn bump_topology_epoch() {
+    TOPOLOGY_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+/// 当前世代(快照缓存比对用;只增不减)。
+pub fn topology_epoch() -> u64 {
+    TOPOLOGY_EPOCH.load(std::sync::atomic::Ordering::Acquire)
+}
+
 // ---------- 过渡期端口 ----------
 
 /// 建行/复制所需的全部配置列(id 由 insert 另传;name 随配置走,复制时
@@ -809,7 +830,10 @@ async fn insert_checked(
     }
     let id = store.new_provider_id();
     match store.insert_provider(&id, &config).await {
-        Ok(()) => Ok(fresh_row_from_config(&id, &config)),
+        Ok(()) => {
+            bump_topology_epoch();
+            Ok(fresh_row_from_config(&id, &config))
+        }
         Err(()) => {
             tracing::error!("create provider: insert failed");
             // 响应枚举无 5xx 变体(spec 缺口,见文件头):fail-closed 400。
@@ -1189,7 +1213,9 @@ impl AdminProvidersService {
         }
 
         match self.store.update_provider(&provider_id, &patch).await {
-            Ok(n) if n > 0 => {}
+            Ok(n) if n > 0 => {
+                bump_topology_epoch();
+            }
             Ok(_) => return not_found(),
             Err(()) => {
                 tracing::error!("update provider {provider_id}: execute failed");
@@ -1217,7 +1243,10 @@ impl AdminProvidersService {
     /// `DELETE /api/providers/{id}`
     pub async fn admin_delete_provider(&self, id: String) -> AdminDeleteProviderResponse {
         match self.store.delete_provider(&id).await {
-            Ok(n) if n > 0 => AdminDeleteProviderResponse::NoContent,
+            Ok(n) if n > 0 => {
+                bump_topology_epoch();
+                AdminDeleteProviderResponse::NoContent
+            }
             Ok(_) => AdminDeleteProviderResponse::NotFound(problem(404, "not_found", "资源不存在")),
             Err(()) => {
                 tracing::error!("delete provider {id}: execute failed");
@@ -1247,9 +1276,12 @@ impl AdminProvidersService {
         config.name = format!("{} (副本)", config.name);
         let new_id = self.store.new_provider_id();
         match self.store.insert_provider(&new_id, &config).await {
-            Ok(()) => AdminDuplicateProviderResponse::Created(to_api_provider(
-                &fresh_row_from_config(&new_id, &config),
-            )),
+            Ok(()) => {
+                bump_topology_epoch();
+                AdminDuplicateProviderResponse::Created(to_api_provider(&fresh_row_from_config(
+                    &new_id, &config,
+                )))
+            }
             Err(()) => {
                 tracing::error!("duplicate provider {id}: insert failed");
                 // 枚举无 5xx(spec 缺口,见文件头):fail-closed 404。
@@ -1302,6 +1334,9 @@ impl AdminProvidersService {
             .await
         {
             tracing::error!("test provider {}: failed to persist health status", row.id);
+        } else {
+            // 健康状态 UPDATE 不动 updated_at,靠世代计数器失效快照。
+            bump_topology_epoch();
         }
         let status = api_test_status(&status_raw);
         AdminTestProviderResponse::Created(ProviderTestResult {

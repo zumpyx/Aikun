@@ -213,23 +213,17 @@ pub async fn proxy_completion(
     }
 
     // 单次尝试的超时取全局与渠道级 timeout_secs 的较大者:渠道允许配到
-    // 600s,整体 deadline 若只按全局值算会把它静默截断。查询失败回退全局值。
+    // 600s,整体 deadline 若只按全局值算会把它静默截断。取值改走渠道拓扑
+    // 快照(roadmap 阶段 3;与旧 SELECT MAX(timeout_secs) WHERE is_active=1
+    // 同值),探测/取值仍在 blocking 线程。
     let max_channel_timeout = {
         let pool = state.pool.clone();
         tokio::task::spawn_blocking(move || {
-            pool.read().lock().ok().and_then(|conn| {
-                conn.query_row(
-                    "SELECT MAX(timeout_secs) FROM providers WHERE is_active = 1",
-                    [],
-                    |row| row.get::<_, Option<i64>>(0),
-                )
-                .ok()
-                .flatten()
-            })
+            crate::channel::registry::shared()
+                .current(&pool)
+                .max_timeout_secs()
         })
         .await
-        .ok()
-        .flatten()
         .unwrap_or(0)
     };
     let per_attempt_secs = state

@@ -9,7 +9,12 @@
 //! (元)两侧边界。单请求费用常远小于 1 分,按分取整会让大量请求免费,
 //! 故取微元;整数累加/扣减无浮点误差。转换只走 yuan_to_micro/micro_to_yuan。
 
+use std::sync::{Arc, OnceLock, RwLock};
+
 use rusqlite::Connection;
+
+use crate::db::DbPool;
+use aikun_store::{CacheToken, CacheTokens, PriceBook};
 
 /// 元(f64)→ 微元(i64),四舍五入。仅用于 API/费率边界入库。
 pub fn yuan_to_micro(yuan: f64) -> i64 {
@@ -110,75 +115,96 @@ pub fn compute_cost(
     yuan_to_micro(yuan)
 }
 
-/// 内置默认价格快照(src/billing/default_prices.json):
-/// 源自 LiteLLM 的 model_prices_and_context_window.json(官方刊例价),
-/// 筛选主流 chat 模型,单位为 USD / 1M tokens。属售价基准,非渠道成本价。
-const DEFAULT_PRICES_JSON: &str = include_str!("default_prices.json");
+// 内置默认价格播种已移入仓储层(`aikun_store::pricing`,随 db 层吸收,
+// plan 步骤 8):db 层不再反向调用 billing,层次倒挂消除。
 
-/// 快照换算汇率(USD → CNY)。价格表以元计费,seed 时一次性折算;
-/// 汇率漂移不会回溯,管理员可在价格表页面手工改价。
-const USD_TO_CNY_RATE: f64 = 7.2;
+// ---------- 价格表缓存(roadmap 阶段 3) ----------
+//
+// 全量规则进程内缓存:计费热路径每请求一次内存匹配(替代原来的精确 +
+// 通配两次 SQL)。失效检测与渠道拓扑快照同构:管理端价格写世代
+// (aikun-admin 写路径成功后递增)+ 存储层表令牌(行数/rowid/updated_at
+// 聚合,捕获夹具/脚本直写)。重载失败回退 find_price 直查(旧路径)。
 
-/// 兜底价(元/1M tokens):LiteLLM 快照未收录的模型按此计费,
-/// 以 * 通配条目入库,优先级最低,可在「计费」页修改或删除
-/// (删除后无匹配模型回到按 0 元记账)。
-const FALLBACK_PRICE: (f64, f64) = (3.0, 7.0);
+struct PriceTable {
+    state: RwLock<PriceState>,
+}
 
-/// 仅在价格表为空时导入内置默认价格(用户已有任何条目即跳过,
-/// 不覆盖手工维护的数据,也不会复活被删除的内置条目)。
-pub fn seed_default_prices(conn: &Connection) -> Result<usize, rusqlite::Error> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM model_prices", [], |row| row.get(0))?;
-    if count > 0 {
-        return Ok(0);
-    }
-    let prices: Vec<(String, f64, f64, Option<f64>)> = match serde_json::from_str::<
-        std::collections::BTreeMap<String, (f64, f64, Option<f64>)>,
-    >(DEFAULT_PRICES_JSON)
-    {
-        Ok(map) => map
-            .into_iter()
-            .map(|(model, (p, c, k))| {
-                (
-                    model,
-                    // 保留 4 位小数:低价模型折算后仍有有效精度
-                    (p * USD_TO_CNY_RATE * 1e4).round() / 1e4,
-                    (c * USD_TO_CNY_RATE * 1e4).round() / 1e4,
-                    // 缓存读价可空:快照缺省(null)存 NULL,按输入价计费
-                    k.map(|v| (v * USD_TO_CNY_RATE * 1e4).round() / 1e4),
-                )
-            })
-            .collect(),
+struct PriceState {
+    /// 缓存属主(池实例序号):不同库(单测的多个 :memory: 池)即使表
+    /// 令牌字符串相同也不共享命中。
+    owner: u64,
+    epoch: u64,
+    token: Option<CacheToken>,
+    rules: Arc<Vec<aikun_store::PriceRule>>,
+}
+
+static PRICE_TABLE: OnceLock<PriceTable> = OnceLock::new();
+
+fn price_table() -> &'static PriceTable {
+    PRICE_TABLE.get_or_init(|| PriceTable {
+        state: RwLock::new(PriceState {
+            owner: 0,
+            epoch: 0,
+            token: None,
+            rules: Arc::new(Vec::new()),
+        }),
+    })
+}
+
+/// 测试钩子:清空价格缓存。
+#[cfg(test)]
+pub(crate) fn reset_price_table_for_test() {
+    let mut st = price_table()
+        .state
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    st.owner = 0;
+    st.epoch = 0;
+    st.token = None;
+    st.rules = Arc::new(Vec::new());
+}
+
+/// 查模型价格(计费热路径):先比对 (池, 世代, 表令牌),一致走内存匹配;
+/// 变化则回源重载全量规则。表令牌点查持读锁,调用方须在 blocking 线程
+/// 上下文(与 find_price 同)。重载失败回退 find_price 直查。
+pub fn find_price_cached(pool: &DbPool, model: &str) -> Option<(f64, f64, Option<f64>)> {
+    let table = price_table();
+    let epoch = aikun_admin::admin_billing::price_table_epoch();
+    let token = match pool.price_table_token() {
+        Ok(t) => Some(t),
         Err(e) => {
-            // 快照文件随二进制编译内嵌,解析失败是构建期问题,不该在运行期发生
-            tracing::error!(
-                "seed_default_prices: embedded price snapshot is invalid: {}",
-                e
-            );
-            return Ok(0);
+            tracing::warn!("price table token probe failed: {}", e);
+            None
         }
     };
-    let n = prices.len();
-    let mut stmt = conn.prepare(
-        "INSERT INTO model_prices (id, model, prompt_price, completion_price, cached_price) VALUES (?1, ?2, ?3, ?4, ?5)",
-    )?;
-    for (model, prompt, completion, cached) in prices {
-        stmt.execute(rusqlite::params![
-            uuid::Uuid::new_v4().to_string(),
-            model,
-            prompt,
-            completion,
-            cached
-        ])?;
+    {
+        let st = table.state.read().unwrap_or_else(|e| e.into_inner());
+        if st.owner == pool.id && st.epoch == epoch && st.token == token && token.is_some() {
+            return aikun_store::pricing::find_in_rules(&st.rules, model);
+        }
     }
-    // 兜底价直接以元入库(不经汇率换算);cached_price 存 NULL,缓存按输入价 3 元计
-    stmt.execute(rusqlite::params![
-        uuid::Uuid::new_v4().to_string(),
-        "*",
-        FALLBACK_PRICE.0,
-        FALLBACK_PRICE.1,
-        Option::<f64>::None
-    ])?;
-    Ok(n + 1)
+    match pool.price_rules() {
+        Ok(rules) => {
+            let mut st = table.state.write().unwrap_or_else(|e| e.into_inner());
+            st.owner = pool.id;
+            st.epoch = epoch;
+            st.token = token;
+            let match_result = aikun_store::pricing::find_in_rules(&rules, model);
+            st.rules = Arc::new(rules);
+            match_result
+        }
+        Err(e) => {
+            // 回源失败:回退旧路径(直查),不缓存失败态。
+            tracing::warn!(
+                "price table reload failed, falling back to direct query: {}",
+                e
+            );
+            pool.read()
+                .lock()
+                .ok()
+                .and_then(|conn| find_price(&conn, model))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -270,56 +296,104 @@ mod tests {
         }
     }
 
+    // ---- 价格表缓存 ----
+
+    fn cache_pool() -> crate::db::DbPool {
+        let pool = crate::db::DbPool::new(&crate::config::AppConfig {
+            database_url: ":memory:".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        // 池初始化播种的默认价格清空,保证用例独立(夹具口径)
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM model_prices", [])
+            .unwrap();
+        pool
+    }
+
+    /// 缓存匹配与 SQL 直查(find_price)逐值一致;夹具直写 INSERT 经表
+    /// 令牌失效,下一笔计费立即可见。
     #[test]
-    fn seed_imports_defaults_only_into_empty_table() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE model_prices (
-                id TEXT PRIMARY KEY, model TEXT NOT NULL UNIQUE,
-                prompt_price REAL NOT NULL DEFAULT 0,
-                completion_price REAL NOT NULL DEFAULT 0,
-                cached_price REAL
-            );",
-        )
-        .unwrap();
-        // 空表:全量导入
-        let n = seed_default_prices(&conn).unwrap();
-        assert!(
-            n > 100,
-            "expected a substantial default price set, got {}",
-            n
-        );
-        let gpt4o: (f64, f64, Option<f64>) = conn
-            .query_row(
-                "SELECT prompt_price, completion_price, cached_price FROM model_prices WHERE model = 'gpt-4o'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    fn cached_matching_matches_sql_and_invalidates_on_direct_write() {
+        reset_price_table_for_test();
+        let pool = cache_pool();
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO model_prices (id, model, prompt_price, completion_price, cached_price) VALUES
+                    ('1', 'gpt-4', 10.0, 30.0, NULL),
+                    ('2', 'gpt-*', 1.0, 2.0, 0.5),
+                    ('3', 'gpt-4o-*', 3.0, 6.0, NULL),
+                    ('4', '*', 3.0, 7.0, NULL);",
             )
             .unwrap();
-        // gpt-4o 刊例价 $2.5/$10 × 7.2 = 18/72 元;缓存读价 $1.25 × 7.2 = 9 元
-        assert_eq!(gpt4o, (18.0, 72.0, Some(9.0)));
-        // 兜底条目:* → 3/7 元,cached_price 为 NULL,未知模型按此计费
+
+        // 先取 SQL 期望值并释放连接(:memory: 下读写是同一把连接锁,
+        // 缓存路径内部还要取读者连接,不能并持)
+        let expected: Vec<_> = {
+            let conn = pool.read().lock().unwrap();
+            ["gpt-4", "gpt-4o-mini", "gpt-3.5-turbo", "llama-3", "gp", ""]
+                .iter()
+                .map(|m| find_price(&conn, m))
+                .collect()
+        };
+        for (m, want) in ["gpt-4", "gpt-4o-mini", "gpt-3.5-turbo", "llama-3", "gp", ""]
+            .iter()
+            .zip(expected)
+        {
+            assert_eq!(
+                &find_price_cached(&pool, m),
+                &want,
+                "cache/SQL mismatch for {m:?}"
+            );
+        }
+
+        // 直写新价(夹具/脚本路径):表令牌捕获 ⇒ 立即可见
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO model_prices (id, model, prompt_price, completion_price)
+                 VALUES ('5', 'new-model', 8.0, 9.0)",
+                [],
+            )
+            .unwrap();
         assert_eq!(
-            find_price(&conn, "some-unknown-model"),
-            Some((3.0, 7.0, None))
+            find_price_cached(&pool, "new-model"),
+            Some((8.0, 9.0, None))
         );
-        // 非空表:跳过,不覆盖手工数据
-        conn.execute("DELETE FROM model_prices WHERE model != 'gpt-4o'", [])
-            .unwrap();
-        conn.execute(
-            "UPDATE model_prices SET prompt_price = 1.0 WHERE model = 'gpt-4o'",
-            [],
-        )
-        .unwrap();
-        assert_eq!(seed_default_prices(&conn).unwrap(), 0);
-        let kept: f64 = conn
-            .query_row(
-                "SELECT prompt_price FROM model_prices WHERE model = 'gpt-4o'",
-                [],
-                |row| row.get(0),
+    }
+
+    /// 管理端价格写世代:UPDATE 不改行数、updated_at 同秒也可能不变,
+    /// 世代计数器兜底(与渠道拓扑同构)。
+    #[test]
+    fn price_epoch_bump_invalidates_cache() {
+        reset_price_table_for_test();
+        let pool = cache_pool();
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO model_prices (id, model, prompt_price, completion_price) VALUES
+                    ('p1', 'm1', 1.0, 2.0);",
             )
             .unwrap();
-        assert_eq!(kept, 1.0);
+        assert_eq!(find_price_cached(&pool, "m1"), Some((1.0, 2.0, None)));
+
+        // 同秒内改价且 updated_at 撞值:令牌可能不变,世代必须兜底
+        pool.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE model_prices SET prompt_price = 5.0 WHERE model = 'm1'",
+                [],
+            )
+            .unwrap();
+        aikun_admin::admin_billing::bump_price_table_epoch();
+        assert_eq!(find_price_cached(&pool, "m1"), Some((5.0, 2.0, None)));
     }
 }
 pub mod ledger;

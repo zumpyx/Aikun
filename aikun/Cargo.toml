@@ -12,6 +12,9 @@ aikun-channels = { path = "../crates/aikun-channels" }
 # 管理面 API(Auth/User/Admin tag):生成脚手架 + 业务实现;装配见 main.rs
 aikun-openapi = { path = "../crates/aikun-openapi" }
 aikun-admin = { path = "../crates/aikun-admin" }
+# 仓储层(能力 trait + SQLite 实现):连接池/schema/行映射/静态加密/
+# 口令哈希/默认价格播种,plan 步骤 8 起 src/db 与 src/models 逐步吸收
+aikun-store = { path = "../crates/aikun-store" }
 # Web framework
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }

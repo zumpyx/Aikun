@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use tracing::warn;
 
+use aikun_store::KeyUsageSnapshot;
+
 use crate::AppState;
 
 /// 模型白名单判定:精确匹配,或以 `*` 结尾的前缀匹配(如 "claude-*")。
@@ -43,9 +45,11 @@ impl Drop for ConcurrencyGuard {
 /// Per-API-key 限流/日额度/并发检查。返回 Err(message) 表示应以 429 拒绝;
 /// Ok(guard) 携带并发槽位(未配置并发上限时为 None),调用方须把 guard
 /// 持有到请求完全结束。
-/// 限额配置与当日已用 token 在 blocking 线程一次取回;RPM 用内存滑动窗口
-/// (key 为 api_keys.id)。查询失败时放行——key 刚通过认证,行必然存在,
-/// 瞬时的锁/IO 失败不应打断流量。
+/// 限额配置与当日已用 token 在 blocking 线程一次取回(仓储层
+/// `KeyUsage` 能力:日用量读 api_key_usage_daily 计数器点查,与记账同
+/// 事务维护——roadmap 阶段 3,替代 request_logs SUM 子查询);RPM 用内存
+/// 滑动窗口(key 为 api_keys.id)。查询失败时放行——key 刚通过认证,
+/// 行必然存在,瞬时的锁/IO 失败不应打断流量。
 pub(crate) async fn enforce_key_limits(
     state: &AppState,
     key_id: &str,
@@ -53,32 +57,15 @@ pub(crate) async fn enforce_key_limits(
     let pool = state.pool.clone();
     let key = key_id.to_string();
     let limits = tokio::task::spawn_blocking(move || {
-        let conn = pool.read().lock().ok()?;
-        conn.query_row(
-            // created_at 时间格式混存(RFC3339 带 T 与旧空格格式),
-            // 按日期前缀比较才能同时命中两种格式的当天行。
-            "SELECT rate_limit_rpm, quota_daily_tokens, max_concurrent,
-                    (SELECT COALESCE(SUM(total_tokens), 0) FROM request_logs
-                     WHERE api_key_id = ?1
-                       AND substr(created_at, 1, 10) = date('now'))
-             FROM api_keys WHERE id = ?1",
-            rusqlite::params![key],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            },
-        )
-        .ok()
+        use aikun_store::KeyUsage as _;
+        pool.key_limits_and_usage(&key, chrono::Utc::now().date_naive())
+            .ok()
     })
     .await
     .ok()
     .flatten();
 
-    let Some((rpm, daily_quota, max_concurrent, used_today)) = limits else {
+    let Some(snapshot) = limits else {
         // fail-open 必须留信号:DB 故障(锁竞争/IO)会持续走这个分支,
         // 没有日志的话 RPM/日额度/并发三项限额静默失效而无人察觉。
         warn!(
@@ -87,6 +74,12 @@ pub(crate) async fn enforce_key_limits(
         );
         return Ok(None);
     };
+    let KeyUsageSnapshot {
+        rate_limit_rpm: rpm,
+        quota_daily_tokens: daily_quota,
+        max_concurrent,
+        tokens_spent: used_today,
+    } = snapshot;
 
     if daily_quota > 0 && used_today >= daily_quota {
         return Err(format!(

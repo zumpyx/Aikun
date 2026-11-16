@@ -192,6 +192,35 @@ fn insert_request_log_ext(
     error_message: Option<String>,
     billable: bool,
 ) {
+    // 计费:有用量即按价格表折算费用(整数微元)。上游 token 已真实消耗,
+    // 客户端中途断连(499)或流中途错误(502)时已捕获的 usage 照扣;
+    // 429/400/上游错误路径 total_tokens 本就为 0,不受影响。
+    // 价格查询走进程内价格缓存(roadmap 阶段 3,CRUD 失效;原为每次
+    // 精确+通配两条 SQL)——折算先于写锁,避免 :memory:(读写同一连接)
+    // 下锁内再取读者连接的自锁。价格本就不在事务内,口径不变。
+    let cost = if billable && total_tokens > 0 {
+        match crate::billing::find_price_cached(pool, model) {
+            Some(prices) => crate::billing::compute_cost(
+                prompt_tokens,
+                cached_tokens,
+                completion_tokens,
+                prices,
+            ),
+            None => {
+                // 有用量但无价格配置:静默免费必须可见。
+                warn!(
+                    "No price configured for model '{}' — {} tokens billed at 0",
+                    model, total_tokens
+                );
+                0
+            }
+        }
+    } else {
+        0
+    };
+    // 日额度计数器的日期口径:与旧 SUM 子查询的 date('now')(UTC)一致。
+    let usage_day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
     let mut conn = match pool.conn.lock() {
         Ok(conn) => conn,
         Err(e) => {
@@ -201,32 +230,10 @@ fn insert_request_log_ext(
         }
     };
     {
-        // 计费:有用量即按价格表折算费用(整数微元)。上游 token 已真实消耗,
-        // 客户端中途断连(499)或流中途错误(502)时已捕获的 usage 照扣;
-        // 429/400/上游错误路径 total_tokens 本就为 0,不受影响。
-        // 价格查询、日志插入、余额扣减包在同一个显式事务里——任何一步
-        // 失败整体回滚,不会留下"记了日志没扣费"或"扣了费没日志"的中间态。
+        // 日志插入、余额扣减、日用量计数器 UPSERT 包在同一个显式事务里
+        // ——任何一步失败整体回滚,不会留下"记了日志没扣费"或"扣了费没
+        // 日志"的中间态(计数器可随时从明细重建,refactor-plan 9.3)。
         let result = (|| -> Result<(), rusqlite::Error> {
-            let cost = if billable && total_tokens > 0 {
-                match crate::billing::find_price(&conn, model) {
-                    Some(prices) => crate::billing::compute_cost(
-                        prompt_tokens,
-                        cached_tokens,
-                        completion_tokens,
-                        prices,
-                    ),
-                    None => {
-                        // 有用量但无价格配置:静默免费必须可见。
-                        warn!(
-                            "No price configured for model '{}' — {} tokens billed at 0",
-                            model, total_tokens
-                        );
-                        0
-                    }
-                }
-            } else {
-                0
-            };
             let tx = conn.transaction()?;
             // 渠道/API key 可能在长请求(尤其流式)进行中被硬删除:dangling
             // 引用会让 INSERT 触发 FK 约束、整个记账事务回滚——日志与扣费全丢。
@@ -276,6 +283,18 @@ fn insert_request_log_ext(
                     chrono::Utc::now().to_rfc3339(),
                 ],
             )?;
+            // 日用量计数器与记账同事务累加(roadmap 阶段 3):替代准入检查
+            // 对 request_logs 的 SUM 子查询。api_key_id 为 NULL(JWT/被降级)
+            // 不计,与旧 SUM 的过滤口径一致。
+            if let Some(key_id) = &api_key_id {
+                tx.execute(
+                    "INSERT INTO api_key_usage_daily (api_key_id, date, tokens_spent)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(api_key_id, date) DO UPDATE SET
+                        tokens_spent = tokens_spent + excluded.tokens_spent",
+                    params![key_id, usage_day, total_tokens],
+                )?;
+            }
             // 余额不足在请求入口已预检拦截(402);此处允许单请求扣成负数
             // (用量先发生、费用后结算,不做预留金),整数微元扣减无浮点误差。
             if cost > 0 {
