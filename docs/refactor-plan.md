@@ -1,8 +1,8 @@
 # Aikun 重构方案与进度(refactor/modular-gateway)
 
-> 状态:roadmap-v0.5 **阶段 0(除 CI 门禁)与阶段 1(结构重组)已完成**;阶段 1 补入的协议契约测试尚未做;阶段 2–4 未开始。
+> 状态:roadmap-v0.5 **阶段 0 与阶段 1(结构重组)已完成**;阶段 1 补入的协议契约测试尚未做;阶段 2–4 未开始。
 > 第 9 节最佳实践已写入对应阶段任务,代码尚未实施。
-> 分支 `refactor/modular-gateway`,`cargo build` 零告警,`cargo test --locked` 全绿(148 单测 + 42 e2e;基线 v0.4.4 为 130 + 38)。
+> 分支 `refactor/modular-gateway`,`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 零告警,`cargo test --locked` 全绿(148 单测 + 42 e2e;基线 v0.4.4 为 130 + 38)。
 >
 > **优先级:`docs/roadmap-v0.5.md`(用户定稿路线图)> 本文。** 两者冲突时以 roadmap 为准;本文只记录落地方式、roadmap 未覆盖的用户需求,以及各条目的进度。
 >
@@ -38,7 +38,7 @@
 | P1-5 | 热路径全表扫描(选路 / 价格 / 日额度 SUM) | 3 | ⏳ 未开始 |
 | P1-6 | 3 个潜伏 bug | 0 | ✅ 已修,各有回归测试 |
 | P2-7 | 测试哑铃形、缺登录 e2e | 0 / 1 / 2 | 🟡 登录链路 e2e 已补;协议契约测试(第 9.1 节)为阶段 1 遗留、流式部分在阶段 2;handler 单测留到阶段 2 |
-| P2-8 | CI 无 fmt / clippy、无 CHANGELOG、providers.js 弹窗重复 | 0 / 4 | 🟡 CHANGELOG 已建;fmt / clippy 门禁未上(见 7.1);前端去重在阶段 4 |
+| P2-8 | CI 无 fmt / clippy、无 CHANGELOG、providers.js 弹窗重复 | 0 / 4 | 🟢 CHANGELOG 已建;fmt / clippy 门禁已上(见 7.1);前端去重在阶段 4 |
 | P2-9 | 无 request_id / metrics | 2 / 4 | ⏳ 未开始;可观测性打点提前到阶段 2,`/metrics` 仍在阶段 4 从 span 汇总(第 9.6 节) |
 
 ### 0.2 冲突与裁决
@@ -226,7 +226,7 @@ pub trait ChannelAdapter: Send + Sync + 'static {
 
 | 条目 | 状态 | 落地 |
 |---|---|---|
-| CI 加 `cargo fmt --check` + `clippy -D warnings` | ⏳ **未做** | 构建机没有 rustfmt / clippy 组件,无法验证存量告警为零;直接加门禁会让 CI 变红。下一步应在装有完整工具链的环境里先清零告警,再改 `.github/workflows/ci.yml` |
+| CI 加 `cargo fmt --check` + `clippy -D warnings` | ✅ | 存量已在完整工具链清零(rustfmt 全库格式化 51 文件;clippy 自动修复 32 条 collapsible_if / map_or / lifetime 告警,`--fix` 后复跑 fmt 归一),CI 新增独立 `lint` job(标准 runner + stable 工具链,不占用 zigbuild 容器);回归 148 单测 + 42 e2e 全绿 |
 | 修复 ① O→A usage 口径 | ✅ | `protocol/openai/response.rs`、`openai/stream.rs`(`OaStreamState::anthropic_usage`);回归测试 `response_openai_to_anthropic_splits_cached_tokens`、`stream_openai_to_anthropic_splits_cached_tokens` |
 | 修复 ② wallet_stats 读 usage_daily | ✅ | `api/logs.rs::wallet_daily` 按日合并两表(purge 在同一事务里移动明细,不会重复计数);回归测试 `wallet_daily_survives_log_purge`。注意:模型分布仍只统计未清理的明细(usage_daily 没有模型维度) |
 | 修复 ③ 日志清理分批 DELETE | ✅ | `channel/health.rs`:每批 5000 行,批间释放写锁,截止时间只算一次;回归测试 `purge_in_small_batches_matches_single_pass` |
@@ -319,7 +319,7 @@ pub trait ChannelAdapter: Send + Sync + 'static {
 | 新列影响降级 | 只加列、不加 CHECK、不升 schema 版本 |
 | 缓存串号或计费流失 | 默认关闭、按用户隔离、命中照常计费、准入先于缓存 |
 | 适配器被当成插件系统扩张 | 文档与代码注释写明是编译期静态注册;不提供动态加载 |
-| fmt / clippy 未验证 | 阶段 0 门禁待在完整工具链上补做(7.1) |
+| fmt / clippy 未验证 | 已清零并上门禁(7.1);lint job 与 test job 分离,zigbuild 容器无需补组件 |
 | 依赖 MSRV | `chore` 提交把 `idna_adapter` / `time` / `simple_asn1` 锁到兼容 rustc 1.85 的版本;CI 工具链 ≥ 1.88 时可以在合并后执行 `cargo update -p idna_adapter -p time -p simple_asn1` 恢复 |
 | 流式故障转移拼出双上游内容 | 阶段 2 把「未向客户端发出任何字节」作为可重试硬边界(第 9.4 节),单测锁住 |
 | 日计数器与明细不一致 | 阶段 3 用量记录以 `request_id` 幂等写入,计数器可从明细重建(第 9.3 节) |

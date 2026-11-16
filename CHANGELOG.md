@@ -48,6 +48,8 @@
 
 - e2e:登录链路(`/api/login` → `/api/me`、错误密码、改密踢下线、禁用账户)。
 - 回归测试:上述 ①②③ 各一。
+- rustfmt 全库格式化(51 文件)与 clippy 告警清零(32 条,自动修复);
+  CI 新增独立 `lint` job:`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`。
 - 依赖钉版以支持 rustc 1.85(`idna_adapter 1.2.0`、`time 0.3.41`、`simple_asn1 0.6.3`)。
 
 ### 文档

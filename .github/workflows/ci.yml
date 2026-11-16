@@ -10,6 +10,26 @@ permissions:
   contents: read
 
 jobs:
+  # lint 与 test 分开:zigbuild 容器没有 rustfmt/clippy 组件,
+  # 标准 runner + stable 工具链自带;fmt 不编译,clippy 走 rustls+bundled sqlite 无系统依赖。
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
   test:
     runs-on: ubuntu-latest
     # 与 release.yml 同一工具链容器,避免环境差异
