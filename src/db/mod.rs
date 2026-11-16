@@ -22,7 +22,11 @@ pub fn create_connection(config: &AppConfig) -> Result<Connection, rusqlite::Err
         .strip_prefix("sqlite://")
         .unwrap_or(&config.database_url);
     let db_path = without_scheme.split('?').next().unwrap_or("aikun.db");
-    let db_path = if db_path.is_empty() { "aikun.db" } else { db_path };
+    let db_path = if db_path.is_empty() {
+        "aikun.db"
+    } else {
+        db_path
+    };
     let conn = Connection::open(db_path)?;
     // 版本闸门:库的 schema 版本比本程序新(降级运行)时拒绝启动。
     let db_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -58,7 +62,11 @@ fn open_reader(config: &AppConfig) -> Result<Connection, rusqlite::Error> {
         .strip_prefix("sqlite://")
         .unwrap_or(&config.database_url);
     let db_path = without_scheme.split('?').next().unwrap_or("aikun.db");
-    let db_path = if db_path.is_empty() { "aikun.db" } else { db_path };
+    let db_path = if db_path.is_empty() {
+        "aikun.db"
+    } else {
+        db_path
+    };
     let conn = Connection::open(db_path)?;
     conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")?;
     Ok(conn)
@@ -143,7 +151,10 @@ fn migrate_encrypt_provider_keys(
         )?;
     }
     if n > 0 {
-        tracing::info!("Migrated {} plaintext provider api_keys to AES-256-GCM ciphertext", n);
+        tracing::info!(
+            "Migrated {} plaintext provider api_keys to AES-256-GCM ciphertext",
+            n
+        );
     }
     Ok(())
 }
@@ -156,8 +167,8 @@ fn migrate_provider_key_hashes(
     cipher: &KeyCipher,
 ) -> Result<(), rusqlite::Error> {
     let rows: Vec<(String, String)> = {
-        let mut stmt =
-            conn.prepare("SELECT id, api_key FROM providers WHERE key_hash = '' AND api_key != ''")?;
+        let mut stmt = conn
+            .prepare("SELECT id, api_key FROM providers WHERE key_hash = '' AND api_key != ''")?;
         stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .filter_map(|r| r.ok())
             .collect()
@@ -411,23 +422,63 @@ fn rename_base_url_column(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_column(conn, "providers", "proxy_url", "TEXT NOT NULL DEFAULT ''")?;
-    ensure_column(conn, "providers", "model_mapping", "TEXT NOT NULL DEFAULT ''")?;
-    ensure_column(conn, "providers", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0")?;
-    ensure_column(conn, "providers", "disabled_reason", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(
+        conn,
+        "providers",
+        "model_mapping",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "providers",
+        "consecutive_failures",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "providers",
+        "disabled_reason",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     ensure_column(conn, "providers", "protocols", "TEXT NOT NULL DEFAULT ''")?;
-    ensure_column(conn, "providers", "default_protocol", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(
+        conn,
+        "providers",
+        "default_protocol",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     // 渠道备注:同一供应商多个帐号时用于区分。
     ensure_column(conn, "providers", "note", "TEXT NOT NULL DEFAULT ''")?;
     // 渠道官网地址,仅用于后台展示。
     ensure_column(conn, "providers", "website_url", "TEXT NOT NULL DEFAULT ''")?;
     // 渠道适配器类型:只加列、不升 SCHEMA_VERSION——旧二进制按显式列名查询,
     // 会忽略这一列(其渠道全部按 generic 行为工作,与重构前一致)。
-    ensure_column(conn, "providers", "channel_kind", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(
+        conn,
+        "providers",
+        "channel_kind",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     // API key 限流/额度:每分钟请求数与每日 token 额度,0 表示不限制。
-    ensure_column(conn, "api_keys", "rate_limit_rpm", "INTEGER NOT NULL DEFAULT 0")?;
-    ensure_column(conn, "api_keys", "quota_daily_tokens", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        conn,
+        "api_keys",
+        "rate_limit_rpm",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "api_keys",
+        "quota_daily_tokens",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     // API key 并发限制:同时在途请求数上限,0 表示不限制。
-    ensure_column(conn, "api_keys", "max_concurrent", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        conn,
+        "api_keys",
+        "max_concurrent",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     // 计费:用户余额(整数微元,允许为负——扣费不拦截,拦截在请求入口预检)。
     // 存量 REAL 库由 migrate_currency_micro 重建转换,此处只兜底"列缺失"。
     ensure_column(conn, "users", "balance", "INTEGER NOT NULL DEFAULT 0")?;
@@ -451,7 +502,12 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // 拆分后行为与之前一致(两种协议仍打同一个上游地址)。
     if user_version < 2 {
         rename_base_url_column(conn)?;
-        ensure_column(conn, "providers", "anthropic_base_url", "TEXT NOT NULL DEFAULT ''")?;
+        ensure_column(
+            conn,
+            "providers",
+            "anthropic_base_url",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
         conn.execute(
             "UPDATE providers SET anthropic_base_url = openai_base_url WHERE anthropic_base_url = ''",
             [],
@@ -470,7 +526,12 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
     // request_logs 的后加列无条件补齐:FK 已修但缺列的中间态数据库
     // 不会触发下面的表重建,缺列会导致日志插入静默失败。
-    ensure_column(conn, "request_logs", "request_type", "TEXT NOT NULL DEFAULT 'chat'")?;
+    ensure_column(
+        conn,
+        "request_logs",
+        "request_type",
+        "TEXT NOT NULL DEFAULT 'chat'",
+    )?;
     migrate_api_key_hashes(conn)?;
     // The UNIQUE constraint on api_keys.key already covers this lookup index.
     conn.execute_batch("DROP INDEX IF EXISTS idx_api_keys_key")?;
@@ -488,7 +549,12 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     ensure_column(conn, "request_logs", "cost", "INTEGER NOT NULL DEFAULT 0")?;
     // 缓存 token 单独计价:request_logs 记缓存用量,model_prices 记缓存价
     // (可空,NULL 按输入价计)。
-    ensure_column(conn, "request_logs", "cached_tokens", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        conn,
+        "request_logs",
+        "cached_tokens",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(conn, "model_prices", "cached_price", "REAL")?;
     // 渠道 key 的 sha256,用于跨批次重复检测(密文随机 nonce 无法比对);
     // 存量行的回填在 migrate_provider_key_hashes(需要 cipher,在 DbPool::new)。
@@ -596,7 +662,10 @@ fn migrate_currency_micro(conn: &Connection) -> Result<(), rusqlite::Error> {
             let is_float = declared_type(table, col)?
                 .map(|ty| {
                     let ty = ty.to_ascii_uppercase();
-                    matches!(ty.as_str(), "REAL" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT")
+                    matches!(
+                        ty.as_str(),
+                        "REAL" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT"
+                    )
                 })
                 .unwrap_or(false);
             if is_float {
@@ -612,7 +681,11 @@ fn migrate_currency_micro(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     tracing::info!(
         "Migrating currency columns to integer micro-yuan: {}",
-        rebuild.iter().map(|(t, _)| *t).collect::<Vec<_>>().join(", ")
+        rebuild
+            .iter()
+            .map(|(t, _)| *t)
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     conn.execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;")?;
     let result = (|| -> Result<(), rusqlite::Error> {
@@ -632,7 +705,9 @@ fn migrate_currency_micro(conn: &Connection) -> Result<(), rusqlite::Error> {
                         balance         INTEGER NOT NULL DEFAULT 0,
                         created_at      TEXT NOT NULL DEFAULT (datetime('now')),
                         updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
-                    );", mig),
+                    );",
+                    mig
+                ),
                 "request_logs" => format!(
                     "CREATE TABLE {} (
                         id              TEXT PRIMARY KEY,
@@ -651,7 +726,9 @@ fn migrate_currency_micro(conn: &Connection) -> Result<(), rusqlite::Error> {
                         error_message   TEXT,
                         cost            INTEGER NOT NULL DEFAULT 0,
                         created_at      TEXT NOT NULL DEFAULT (datetime('now'))
-                    );", mig),
+                    );",
+                    mig
+                ),
                 "billing_transactions" => format!(
                     "CREATE TABLE {} (
                         id              TEXT PRIMARY KEY,
@@ -662,7 +739,9 @@ fn migrate_currency_micro(conn: &Connection) -> Result<(), rusqlite::Error> {
                             CHECK(kind IN ('recharge', 'adjust')),
                         note            TEXT NOT NULL DEFAULT '',
                         created_at      TEXT NOT NULL DEFAULT (datetime('now'))
-                    );", mig),
+                    );",
+                    mig
+                ),
                 "usage_daily" => format!(
                     "CREATE TABLE {} (
                         user_id     TEXT NOT NULL,
@@ -671,7 +750,9 @@ fn migrate_currency_micro(conn: &Connection) -> Result<(), rusqlite::Error> {
                         tokens      INTEGER NOT NULL DEFAULT 0,
                         cost        INTEGER NOT NULL DEFAULT 0,
                         PRIMARY KEY (user_id, date)
-                    );", mig),
+                    );",
+                    mig
+                ),
                 // 重建队列只来自 MONEY_COLS,出现其他表是编程错误;
                 // 绝不能静默套用错误的 DDL(交集复制会丢列)。
                 other => unreachable!("unexpected table in currency migration: {}", other),
@@ -720,7 +801,6 @@ fn migrate_currency_micro(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-
 /// Existing databases created before the FK fix have request_logs foreign keys
 /// without ON DELETE SET NULL, which makes deleting a provider/api_key/user
 /// that has any logs fail with a constraint error. SQLite cannot alter FK
@@ -736,12 +816,10 @@ fn migrate_request_logs_fk(conn: &Connection) -> Result<(), rusqlite::Error> {
             .collect::<Vec<_>>();
         // Table missing (nothing to migrate) → skip; otherwise rebuild unless
         // all three FKs already have ON DELETE SET NULL.
-        let all_set_null = ["user_id", "api_key_id", "provider_id"]
-            .iter()
-            .all(|col| {
-                rows.iter()
-                    .any(|(from, on_delete)| from == col && on_delete == "SET NULL")
-            });
+        let all_set_null = ["user_id", "api_key_id", "provider_id"].iter().all(|col| {
+            rows.iter()
+                .any(|(from, on_delete)| from == col && on_delete == "SET NULL")
+        });
         !rows.is_empty() && !all_set_null
     };
     if !needs_rebuild {
@@ -855,7 +933,10 @@ fn seed_default_admin(conn: &Connection) -> Result<(), rusqlite::Error> {
             Ok(h) => h,
             Err(e) => {
                 // Never seed an admin with an unusable placeholder hash.
-                tracing::error!("Failed to hash default admin password, skipping seed: {}", e);
+                tracing::error!(
+                    "Failed to hash default admin password, skipping seed: {}",
+                    e
+                );
                 return Ok(());
             }
         };
@@ -865,7 +946,10 @@ fn seed_default_admin(conn: &Connection) -> Result<(), rusqlite::Error> {
             params![id, "admin", password_hash, "Admin", "admin"],
         )?;
         tracing::warn!("============================================================");
-        tracing::warn!("Default admin created — username: admin  password: {}", password);
+        tracing::warn!(
+            "Default admin created — username: admin  password: {}",
+            password
+        );
         tracing::warn!("This password is shown only once. Log in and change it now.");
         tracing::warn!("============================================================");
     }
@@ -928,14 +1012,18 @@ mod tests {
 
         migrate_provider_key_hashes(&conn, &pool.cipher).unwrap();
         let hash: String = conn
-            .query_row("SELECT key_hash FROM providers WHERE id = 'p1'", [], |r| r.get(0))
+            .query_row("SELECT key_hash FROM providers WHERE id = 'p1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(hash, crate::auth::hash_api_key("plain-key-1"));
 
         // 幂等:再跑一次不报错、结果不变
         migrate_provider_key_hashes(&conn, &pool.cipher).unwrap();
         let hash2: String = conn
-            .query_row("SELECT key_hash FROM providers WHERE id = 'p1'", [], |r| r.get(0))
+            .query_row("SELECT key_hash FROM providers WHERE id = 'p1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(hash, hash2);
     }
@@ -973,16 +1061,23 @@ mod tests {
 
         migrate_currency_micro(&conn).unwrap();
 
-        let q = |sql: &str| -> i64 {
-            conn.query_row(sql, [], |r| r.get(0)).unwrap()
-        };
+        let q = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
         assert_eq!(q("SELECT balance FROM users WHERE id = 'u1'"), 100_500_000);
         assert_eq!(q("SELECT balance FROM users WHERE id = 'u2'"), -250_000);
         assert_eq!(q("SELECT cost FROM request_logs WHERE id = 'l1'"), 140);
         assert_eq!(q("SELECT cost FROM request_logs WHERE id = 'l2'"), 0);
-        assert_eq!(q("SELECT amount FROM billing_transactions WHERE id = 't1'"), 100_000_000);
-        assert_eq!(q("SELECT balance_after FROM billing_transactions WHERE id = 't1'"), 100_500_000);
-        assert_eq!(q("SELECT cost FROM usage_daily WHERE user_id = 'u1'"), 30_000);
+        assert_eq!(
+            q("SELECT amount FROM billing_transactions WHERE id = 't1'"),
+            100_000_000
+        );
+        assert_eq!(
+            q("SELECT balance_after FROM billing_transactions WHERE id = 't1'"),
+            100_500_000
+        );
+        assert_eq!(
+            q("SELECT cost FROM usage_daily WHERE user_id = 'u1'"),
+            30_000
+        );
 
         // 声明类型已变为 INTEGER(否则读 i64 会命中残留的 REAL 值)
         let ty = |table: &str| -> String {
@@ -993,7 +1088,12 @@ mod tests {
             )
             .unwrap()
         };
-        for t in ["users", "request_logs", "billing_transactions", "usage_daily"] {
+        for t in [
+            "users",
+            "request_logs",
+            "billing_transactions",
+            "usage_daily",
+        ] {
             assert_eq!(ty(t), "INTEGER", "{} not rebuilt", t);
         }
 
@@ -1044,8 +1144,11 @@ mod tests {
         let pool = memory_pool();
         let conn = pool.conn.lock().unwrap();
         // 用户名不是 admin 的 admin 角色用户也应被命中。
-        conn.execute("UPDATE users SET username = 'root' WHERE username = 'admin'", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE users SET username = 'root' WHERE username = 'admin'",
+            [],
+        )
+        .unwrap();
 
         assert!(reset_admin_password(&conn, "root-hash").unwrap());
         let hash: String = conn
@@ -1067,14 +1170,17 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute("DELETE FROM users WHERE role = 'admin'", []).unwrap();
+        conn.execute("DELETE FROM users WHERE role = 'admin'", [])
+            .unwrap();
 
         // 没有任何 admin 用户:返回 false,普通用户不受影响。
         assert!(!reset_admin_password(&conn, "x").unwrap());
         let hash: String = conn
-            .query_row("SELECT password_hash FROM users WHERE id = 'u1'", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT password_hash FROM users WHERE id = 'u1'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(hash, "h");
     }

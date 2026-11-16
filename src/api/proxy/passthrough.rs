@@ -9,34 +9,29 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, warn};
 
-use crate::billing::ledger::{request_log_sync, spawn_request_log};
-use crate::pipeline::admission::{enforce_key_limits, has_positive_balance};
-use crate::pipeline::{apply_model_mapping, read_json_limited};
+use crate::AppState;
 use crate::auth::{AuthContext, Claims};
-use crate::channel::transport::{build_api_url, cached_client};
-use crate::protocol::{extract_usage_any, protocol_error, Protocol};
+use crate::billing::ledger::{request_log_sync, spawn_request_log};
 use crate::channel::selector::{
     select_provider_async, spawn_pin_channel, spawn_record_failure, spawn_record_result,
 };
-use crate::AppState;
+use crate::channel::transport::{build_api_url, cached_client};
+use crate::pipeline::admission::{enforce_key_limits, has_positive_balance};
+use crate::pipeline::{apply_model_mapping, read_json_limited};
+use crate::protocol::{Protocol, extract_usage_any, protocol_error};
 
 /// 允许透传的路径白名单(/v1/ 之后):都是 body 带 model 的 JSON 端点。
 /// 不放行 files/batches 等无 model 的端点——无法按模型选路,且会把渠道
 /// 凭证暴露给上游的账号级接口。multipart 端点(audio/*)同样不在此列。
-const ALLOWED_PATHS: &[&str] = &[
-    "embeddings",
-    "moderations",
-    "images/generations",
-    "rerank",
-];
+const ALLOWED_PATHS: &[&str] = &["embeddings", "moderations", "images/generations", "rerank"];
 
 /// POST /v1/{*path} 的兜底 handler(显式路由优先于通配,chat/messages/
 /// responses/models 不走这里)。客户端协议按 OpenAI 处理。
@@ -80,8 +75,19 @@ pub async fn passthrough(
         });
         if !model_allowed {
             spawn_request_log(
-                &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-                model.clone(), &path, 0, 0, 0, 0, 0, 403, false,
+                &state.pool,
+                claims.sub.clone(),
+                auth_ctx.api_key_id.clone(),
+                None,
+                model.clone(),
+                &path,
+                0,
+                0,
+                0,
+                0,
+                0,
+                403,
+                false,
                 Some(format!("model '{}' not allowed for this API key", model)),
             );
             return (
@@ -100,8 +106,20 @@ pub async fn passthrough(
     if !has_positive_balance(&state, &claims.sub).await {
         let msg = "Insufficient balance: please top up before making more requests".to_string();
         spawn_request_log(
-            &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-            model.clone(), &path, 0, 0, 0, 0, 0, 402, false, Some(msg.clone()),
+            &state.pool,
+            claims.sub.clone(),
+            auth_ctx.api_key_id.clone(),
+            None,
+            model.clone(),
+            &path,
+            0,
+            0,
+            0,
+            0,
+            0,
+            402,
+            false,
+            Some(msg.clone()),
         );
         return (
             StatusCode::PAYMENT_REQUIRED,
@@ -116,8 +134,20 @@ pub async fn passthrough(
         match enforce_key_limits(&state, key_id).await {
             Err(msg) => {
                 spawn_request_log(
-                    &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-                    model.clone(), &path, 0, 0, 0, 0, 0, 429, false, Some(msg.clone()),
+                    &state.pool,
+                    claims.sub.clone(),
+                    auth_ctx.api_key_id.clone(),
+                    None,
+                    model.clone(),
+                    &path,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    429,
+                    false,
+                    Some(msg.clone()),
                 );
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
@@ -152,7 +182,9 @@ pub async fn passthrough(
         };
         tried.insert(provider.id.clone());
 
-        let attempts = per_provider_attempts.entry(provider.id.clone()).or_insert(0);
+        let attempts = per_provider_attempts
+            .entry(provider.id.clone())
+            .or_insert(0);
         *attempts += 1;
         if *attempts > provider.max_retries.max(0) as u32 + 1 {
             continue;
@@ -165,7 +197,11 @@ pub async fn passthrough(
                 provider.name
             );
             spawn_record_failure(
-                state.pool.clone(), provider.id.clone(), 0.0, 0, threshold,
+                state.pool.clone(),
+                provider.id.clone(),
+                0.0,
+                0,
+                threshold,
                 failure_counted.insert(provider.id.clone()),
             );
             continue;
@@ -203,7 +239,11 @@ pub async fn passthrough(
             req
         } else {
             // 鉴权头由渠道适配器决定(透传只走 openai 协议)。
-            crate::channel::adapter_for(&provider).apply_auth(req, &provider.api_key, Protocol::OpenAi)
+            crate::channel::adapter_for(&provider).apply_auth(
+                req,
+                &provider.api_key,
+                Protocol::OpenAi,
+            )
         };
 
         debug!(
@@ -220,13 +260,27 @@ pub async fn passthrough(
                     provider.name, path, e
                 );
                 spawn_record_failure(
-                    state.pool.clone(), provider.id.clone(), latency, 0, threshold,
+                    state.pool.clone(),
+                    provider.id.clone(),
+                    latency,
+                    0,
+                    threshold,
                     failure_counted.insert(provider.id.clone()),
                 );
                 spawn_request_log(
-                    &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(),
-                    Some(provider.id.clone()), model.clone(), &path,
-                    0, 0, 0, 0, latency as i32, 502, false,
+                    &state.pool,
+                    claims.sub.clone(),
+                    auth_ctx.api_key_id.clone(),
+                    Some(provider.id.clone()),
+                    model.clone(),
+                    &path,
+                    0,
+                    0,
+                    0,
+                    0,
+                    latency as i32,
+                    502,
+                    false,
                     Some("upstream transport error".to_string()),
                 );
                 last_error = Some((
@@ -253,9 +307,20 @@ pub async fn passthrough(
                     // 计费级:响应返回前日志与扣费已落库(await)。
                     let (p, c, t, k) = extract_usage_any(&resp_body);
                     request_log_sync(
-                        &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(),
-                        Some(provider.id.clone()), model.clone(), &path,
-                        p, c, t, k, latency as i32, 200, true, None,
+                        &state.pool,
+                        claims.sub.clone(),
+                        auth_ctx.api_key_id.clone(),
+                        Some(provider.id.clone()),
+                        model.clone(),
+                        &path,
+                        p,
+                        c,
+                        t,
+                        k,
+                        latency as i32,
+                        200,
+                        true,
+                        None,
                     )
                     .await;
                     debug!(
@@ -271,13 +336,28 @@ pub async fn passthrough(
                         provider.name, msg
                     );
                     spawn_record_failure(
-                        state.pool.clone(), provider.id.clone(), latency, 0, threshold,
+                        state.pool.clone(),
+                        provider.id.clone(),
+                        latency,
+                        0,
+                        threshold,
                         failure_counted.insert(provider.id.clone()),
                     );
                     spawn_request_log(
-                        &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(),
-                        Some(provider.id.clone()), model.clone(), &path,
-                        0, 0, 0, 0, latency as i32, 502, false, Some(msg.clone()),
+                        &state.pool,
+                        claims.sub.clone(),
+                        auth_ctx.api_key_id.clone(),
+                        Some(provider.id.clone()),
+                        model.clone(),
+                        &path,
+                        0,
+                        0,
+                        0,
+                        0,
+                        latency as i32,
+                        502,
+                        false,
+                        Some(msg.clone()),
                     );
                     last_error = Some((
                         json!({"error": {"message": msg, "type": "upstream_error"}}),
@@ -301,7 +381,11 @@ pub async fn passthrough(
             path, model, provider.name, status, msg
         );
         spawn_record_failure(
-            state.pool.clone(), provider.id.clone(), latency, status, threshold,
+            state.pool.clone(),
+            provider.id.clone(),
+            latency,
+            status,
+            threshold,
             failure_counted.insert(provider.id.clone()),
         );
         // 401/403 的上游消息可能回显渠道凭证,日志只存通用文案(口径同 chat)。
@@ -311,9 +395,20 @@ pub async fn passthrough(
             msg.clone()
         };
         spawn_request_log(
-            &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(),
-            Some(provider.id.clone()), model.clone(), &path,
-            0, 0, 0, 0, latency as i32, status as i32, false, Some(log_msg),
+            &state.pool,
+            claims.sub.clone(),
+            auth_ctx.api_key_id.clone(),
+            Some(provider.id.clone()),
+            model.clone(),
+            &path,
+            0,
+            0,
+            0,
+            0,
+            latency as i32,
+            status as i32,
+            false,
+            Some(log_msg),
         );
 
         // 可重试:限流、服务端错误、超时、渠道凭证失效(401/403)。
@@ -333,7 +428,11 @@ pub async fn passthrough(
             if status == 401 || status == 403 {
                 (
                     StatusCode::BAD_GATEWAY,
-                    Json(protocol_error(Protocol::OpenAi, "upstream_error", "All upstream providers failed")),
+                    Json(protocol_error(
+                        Protocol::OpenAi,
+                        "upstream_error",
+                        "All upstream providers failed",
+                    )),
                 )
                     .into_response()
             } else {
@@ -343,8 +442,19 @@ pub async fn passthrough(
         }
         None => {
             spawn_request_log(
-                &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-                model.clone(), &path, 0, 0, 0, 0, 0, 503, false,
+                &state.pool,
+                claims.sub.clone(),
+                auth_ctx.api_key_id.clone(),
+                None,
+                model.clone(),
+                &path,
+                0,
+                0,
+                0,
+                0,
+                0,
+                503,
+                false,
                 Some(format!("no available provider for model '{}'", model)),
             );
             (

@@ -5,22 +5,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use axum::response::{
-        sse::{Event, Sse},
-        IntoResponse, Response,
-    };
+    IntoResponse, Response,
+    sse::{Event, Sse},
+};
 use futures_util::StreamExt;
 use tracing::{debug, warn};
 
+use crate::AppState;
 use crate::billing::ledger::{insert_request_log, request_log_sync, spawn_request_log};
+use crate::channel::selector::{spawn_record_failure, spawn_record_result};
 use crate::pipeline::admission::ConcurrencyGuard;
 use crate::protocol::{
-    parse_sse_events, parse_sse_remaining, stream_error_event, stream_terminal_event, Protocol,
-    SseOut, StreamConverter,
+    Protocol, SseOut, StreamConverter, parse_sse_events, parse_sse_remaining, stream_error_event,
+    stream_terminal_event,
 };
-use crate::channel::selector::{
-    spawn_record_failure, spawn_record_result,
-};
-use crate::AppState;
 
 /// Guard that accounts for streams aborted before completion (typically the
 /// client disconnecting mid-stream). It lives inside the stream generator:
@@ -62,8 +60,19 @@ impl Drop for StreamAbortGuard {
         let request_type = self.request_type.clone();
         let write = move || {
             insert_request_log(
-                &pool, &user_id, api_key_id.as_deref(), Some(&provider_id),
-                &model, &request_type, p, c, t, k, latency, 499, false,
+                &pool,
+                &user_id,
+                api_key_id.as_deref(),
+                Some(&provider_id),
+                &model,
+                &request_type,
+                p,
+                c,
+                t,
+                k,
+                latency,
+                499,
+                false,
                 Some("client disconnected".to_string()),
             );
         };
@@ -235,11 +244,10 @@ pub(super) fn stream_response(
             for out in finish_outs {
                 yield Ok(to_axum_event(out));
             }
-            if !has_terminal {
-                if let Some(term) = stream_terminal_event(client_protocol) {
+            if !has_terminal
+                && let Some(term) = stream_terminal_event(client_protocol) {
                     yield Ok(to_axum_event(term));
                 }
-            }
             return;
         }
 
@@ -321,4 +329,3 @@ fn to_axum_event(out: SseOut) -> Event {
         None => ev,
     }
 }
-

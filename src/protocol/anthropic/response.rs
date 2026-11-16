@@ -1,7 +1,6 @@
 //! Anthropic 响应 → OpenAI(枢纽),以及 Anthropic 错误类型映射。
 
-
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 #[allow(unused_imports)]
 use crate::protocol::*;
@@ -56,7 +55,9 @@ pub(crate) fn anthropic_resp_to_openai(resp: &Value, model: &str) -> Value {
     // 要含 cache_read/cache_creation(total 同步),cache_read 同时写入
     // prompt_tokens_details.cached_tokens 供下游拆分缓存计费。
     let input = resp["usage"]["input_tokens"].as_i64().unwrap_or(0);
-    let cache_read = resp["usage"]["cache_read_input_tokens"].as_i64().unwrap_or(0);
+    let cache_read = resp["usage"]["cache_read_input_tokens"]
+        .as_i64()
+        .unwrap_or(0);
     let cache_creation = resp["usage"]["cache_creation_input_tokens"]
         .as_i64()
         .unwrap_or(0);
@@ -92,7 +93,6 @@ pub(crate) fn anthropic_resp_to_openai(resp: &Value, model: &str) -> Value {
         }
     })
 }
-
 
 #[cfg(test)]
 mod tests {

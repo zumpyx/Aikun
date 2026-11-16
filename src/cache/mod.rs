@@ -95,7 +95,12 @@ impl GatewayCache {
     }
 
     /// 测试/嵌入用:直接指定后端与策略。
-    pub fn new(backend: Arc<dyn CacheBackend>, mode: CacheMode, scope: CacheScope, ttl: Duration) -> Self {
+    pub fn new(
+        backend: Arc<dyn CacheBackend>,
+        mode: CacheMode,
+        scope: CacheScope,
+        ttl: Duration,
+    ) -> Self {
         Self {
             backend,
             mode,
@@ -134,7 +139,9 @@ impl GatewayCache {
 
     /// 写入缓存;超过单条大小上限的响应不缓存(防止大响应撑爆内存)。
     pub async fn put(&self, key: &str, entry: CacheEntry) {
-        let size = serde_json::to_vec(&entry.body).map(|v| v.len()).unwrap_or(usize::MAX);
+        let size = serde_json::to_vec(&entry.body)
+            .map(|v| v.len())
+            .unwrap_or(usize::MAX);
         if size > self.max_entry_bytes {
             tracing::debug!("响应 {} 字节超过缓存单条上限,不缓存", size);
             return;
@@ -221,7 +228,10 @@ mod tests {
         let a = json!({"model": "m", "messages": [], "temperature": 0});
         let b = json!({"model": "m2", "messages": [], "temperature": 0});
         assert_ne!(cache_key("u1", "openai", &a), cache_key("u2", "openai", &a));
-        assert_ne!(cache_key("u", "openai", &a), cache_key("u", "anthropic", &a));
+        assert_ne!(
+            cache_key("u", "openai", &a),
+            cache_key("u", "anthropic", &a)
+        );
         assert_ne!(cache_key("u", "openai", &a), cache_key("u", "openai", &b));
     }
 
@@ -241,7 +251,11 @@ mod tests {
         assert!(should_cache(CacheMode::Always, &warm, &none));
         assert!(!should_cache(CacheMode::Always, &streamed, &none));
         assert!(!should_cache(CacheMode::Always, &warm, &hdr("no-cache")));
-        assert!(!should_cache(CacheMode::Always, &warm, &hdr("max-age=0, No-Store")));
+        assert!(!should_cache(
+            CacheMode::Always,
+            &warm,
+            &hdr("max-age=0, No-Store")
+        ));
     }
 
     #[tokio::test]
@@ -254,10 +268,17 @@ mod tests {
         );
         let body = json!({"model": "m", "temperature": 0});
         let h = HeaderMap::new();
-        let k1 = cache.key_for(crate::protocol::Protocol::OpenAi, "alice", &body, &h).unwrap();
-        let k2 = cache.key_for(crate::protocol::Protocol::OpenAi, "bob", &body, &h).unwrap();
+        let k1 = cache
+            .key_for(crate::protocol::Protocol::OpenAi, "alice", &body, &h)
+            .unwrap();
+        let k2 = cache
+            .key_for(crate::protocol::Protocol::OpenAi, "bob", &body, &h)
+            .unwrap();
         assert_ne!(k1, k2, "user scope must isolate users");
-        let entry = CacheEntry { body: json!({"ok": true}), usage: (1, 2, 3, 0) };
+        let entry = CacheEntry {
+            body: json!({"ok": true}),
+            usage: (1, 2, 3, 0),
+        };
         cache.put(&k1, entry.clone()).await;
         assert_eq!(cache.get(&k1).await, Some(entry));
         assert_eq!(cache.get(&k2).await, None);
@@ -272,7 +293,10 @@ mod tests {
             Duration::from_secs(60),
         );
         cache.max_entry_bytes = 8;
-        let entry = CacheEntry { body: json!({"text": "this is longer than eight bytes"}), usage: (0, 0, 0, 0) };
+        let entry = CacheEntry {
+            body: json!({"text": "this is longer than eight bytes"}),
+            usage: (0, 0, 0, 0),
+        };
         cache.put("k", entry).await;
         assert_eq!(cache.get("k").await, None);
     }

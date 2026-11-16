@@ -1,7 +1,6 @@
 //! OpenAI 请求 → 其他协议(OpenAI → Anthropic)。
 
-
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 #[allow(unused_imports)]
 use crate::protocol::*;
@@ -37,14 +36,14 @@ pub(crate) fn openai_content_to_anthropic_blocks(content: &Value) -> Vec<Value> 
 }
 
 pub(crate) fn openai_image_to_anthropic(url: &str) -> Value {
-    if let Some(rest) = url.strip_prefix("data:") {
-        if let Some((meta, data)) = rest.split_once(',') {
-            let media_type = meta.trim_end_matches(";base64");
-            return json!({
-                "type": "image",
-                "source": {"type": "base64", "media_type": media_type, "data": data}
-            });
-        }
+    if let Some(rest) = url.strip_prefix("data:")
+        && let Some((meta, data)) = rest.split_once(',')
+    {
+        let media_type = meta.trim_end_matches(";base64");
+        return json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": data}
+        });
     }
     json!({"type": "image", "source": {"type": "url", "url": url}})
 }
@@ -118,13 +117,11 @@ pub(crate) fn openai_req_to_anthropic(body: &Value) -> Value {
                 out.insert("tool_choice".into(), m);
             }
         }
-        Value::Object(_) => {
-            if body["tool_choice"]["type"].as_str() == Some("function") {
-                out.insert(
-                    "tool_choice".into(),
-                    json!({"type": "tool", "name": body["tool_choice"]["function"]["name"]}),
-                );
-            }
+        Value::Object(_) if body["tool_choice"]["type"].as_str() == Some("function") => {
+            out.insert(
+                "tool_choice".into(),
+                json!({"type": "tool", "name": body["tool_choice"]["function"]["name"]}),
+            );
         }
         _ => {}
     }
@@ -147,13 +144,12 @@ pub(crate) fn openai_req_to_anthropic(body: &Value) -> Value {
         }
         // Anthropic requires strictly alternating roles: merge consecutive
         // same-role messages by concatenating content blocks.
-        if let Some(last) = messages.last_mut() {
-            if last["role"].as_str() == Some(role) {
-                if let Some(arr) = last["content"].as_array_mut() {
-                    arr.extend(blocks);
-                    return;
-                }
-            }
+        if let Some(last) = messages.last_mut()
+            && last["role"].as_str() == Some(role)
+            && let Some(arr) = last["content"].as_array_mut()
+        {
+            arr.extend(blocks);
+            return;
         }
         messages.push(json!({"role": role, "content": blocks}));
     };
@@ -201,17 +197,17 @@ pub(crate) fn openai_req_to_anthropic(body: &Value) -> Value {
                 }
                 "assistant" => {
                     let mut blocks = Vec::new();
-                    if let Some(reasoning) = msg["reasoning_content"].as_str() {
-                        if !reasoning.is_empty() {
-                            let mut thinking = json!({"type": "thinking", "thinking": reasoning});
-                            if let Some(sig) = msg["reasoning_signature"]
-                                .as_str()
-                                .filter(|s| !s.is_empty())
-                            {
-                                thinking["signature"] = json!(sig);
-                            }
-                            blocks.push(thinking);
+                    if let Some(reasoning) = msg["reasoning_content"].as_str()
+                        && !reasoning.is_empty()
+                    {
+                        let mut thinking = json!({"type": "thinking", "thinking": reasoning});
+                        if let Some(sig) = msg["reasoning_signature"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                        {
+                            thinking["signature"] = json!(sig);
                         }
+                        blocks.push(thinking);
                     }
                     blocks.extend(openai_content_to_anthropic_blocks(&msg["content"]));
                     if let Some(tcs) = msg["tool_calls"].as_array() {
@@ -276,7 +272,6 @@ pub(crate) fn openai_req_to_anthropic(body: &Value) -> Value {
     Value::Object(out)
 }
 
-
 #[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
@@ -296,7 +291,10 @@ mod tests {
         assert_eq!(out["model"], "claude-3");
         assert_eq!(out["max_tokens"], 4096); // default
         assert_eq!(out["system"], "be nice");
-        assert_eq!(out["messages"], json!([{"role": "user", "content": [{"type": "text", "text": "hello"}]}]));
+        assert_eq!(
+            out["messages"],
+            json!([{"role": "user", "content": [{"type": "text", "text": "hello"}]}])
+        );
         assert!(!out.as_object().unwrap().contains_key("stream"));
     }
 
@@ -354,7 +352,10 @@ mod tests {
         let out = convert_request(&body, Protocol::OpenAi, Protocol::Anthropic);
         assert_eq!(out["thinking"], json!({"type": "enabled"}));
         assert_eq!(out["system"][0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(out["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            out["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
         assert_eq!(out["messages"][1]["content"][0]["type"], "thinking");
         assert_eq!(out["messages"][1]["content"][0]["thinking"], "because");
         assert_eq!(out["messages"][1]["content"][0]["signature"], "sig");

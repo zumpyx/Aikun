@@ -3,8 +3,8 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    seed_api_key, seed_api_key_with_limits, seed_provider, wait_until, MockUpstream, ProviderSeed,
-    TestApp,
+    MockUpstream, ProviderSeed, TestApp, seed_api_key, seed_api_key_with_limits, seed_provider,
+    wait_until,
 };
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -49,10 +49,11 @@ async fn openai_chat_success_end_to_end() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["choices"][0]["message"]["content"], "OK");
 
-    assert!(mock
-        .requests()
-        .iter()
-        .any(|r| r.path == "/v1/chat/completions"));
+    assert!(
+        mock.requests()
+            .iter()
+            .any(|r| r.path == "/v1/chat/completions")
+    );
 
     wait_until("request log recorded", WAIT, || {
         let (n, tokens): (i64, i64) = app
@@ -144,7 +145,11 @@ async fn failover_to_second_channel_after_upstream_500() {
     );
 
     let resp = chat_completions(&app).await;
-    assert_eq!(resp.status(), 200, "failover must deliver the good upstream");
+    assert_eq!(
+        resp.status(),
+        200,
+        "failover must deliver the good upstream"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["choices"][0]["message"]["content"], "OK");
 
@@ -159,7 +164,11 @@ async fn failover_to_second_channel_after_upstream_500() {
         1,
         "failing channel must be tried exactly once (no retry on 5xx)"
     );
-    assert_eq!(count_chat(&good_mock), 1, "good channel must serve the retry");
+    assert_eq!(
+        count_chat(&good_mock),
+        1,
+        "good channel must serve the retry"
+    );
 
     wait_until("failed attempt logged", WAIT, || {
         let n: i64 = app
@@ -193,7 +202,8 @@ async fn envelope_200_counts_as_failure_not_success() {
     let status = resp.status();
     let text = resp.text().await.unwrap();
     assert_eq!(
-        status, 502,
+        status,
+        502,
         "envelope error must not surface as success; body={text}; upstream_requests={:?}",
         mock.requests()
     );
@@ -233,7 +243,10 @@ async fn empty_sse_stream_is_failure() {
     assert_eq!(resp.status(), 200, "stream already committed to 200");
     let text = resp.text().await.unwrap();
     assert!(text.contains("[DONE]"), "stream must terminate: {text}");
-    assert!(text.contains("error"), "stream must report the failure: {text}");
+    assert!(
+        text.contains("error"),
+        "stream must report the failure: {text}"
+    );
 
     wait_until("stream failure logged", WAIT, || {
         let (logged, failures): (i64, i64) = app
@@ -359,7 +372,9 @@ async fn provider_keys_encrypted_at_rest_and_still_usable() {
     app.restart().await;
     let stored: String = app
         .db()
-        .query_row("SELECT api_key FROM providers WHERE id = 'p1'", [], |r| r.get(0))
+        .query_row("SELECT api_key FROM providers WHERE id = 'p1'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert!(
         stored.starts_with("enc:v1:"),
@@ -387,7 +402,10 @@ async fn successful_request_deducts_user_balance() {
     // 余额 100 元(库内口径:整数微元,100 元 = 100_000_000);
     // gpt-4 价格:输入 10 元/1M、输出 30 元/1M
     app.db()
-        .execute("UPDATE users SET balance = 100_000_000 WHERE id = 'u-e2e'", [])
+        .execute(
+            "UPDATE users SET balance = 100_000_000 WHERE id = 'u-e2e'",
+            [],
+        )
         .unwrap();
     app.db()
         .execute(
@@ -483,7 +501,10 @@ async fn no_price_match_leaves_balance_unchanged() {
     seed_api_key(&app.db());
     seed_openai_provider(&app, &mock, "p1");
     app.db()
-        .execute("UPDATE users SET balance = 100_000_000 WHERE id = 'u-e2e'", [])
+        .execute(
+            "UPDATE users SET balance = 100_000_000 WHERE id = 'u-e2e'",
+            [],
+        )
         .unwrap();
 
     let resp = chat_completions(&app).await;
@@ -573,7 +594,9 @@ async fn admin_prices_crud_and_wildcard_billing() {
         .client()
         .post(format!("{}/api/admin/prices", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"model": "other-*", "prompt_price": 1.0, "completion_price": 1.0}))
+        .json(
+            &serde_json::json!({"model": "other-*", "prompt_price": 1.0, "completion_price": 1.0}),
+        )
         .send()
         .await
         .unwrap();
@@ -601,7 +624,15 @@ async fn admin_prices_crud_and_wildcard_billing() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.json::<serde_json::Value>().await.unwrap().as_array().unwrap().len(), 2);
+    assert_eq!(
+        resp.json::<serde_json::Value>()
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     let resp = app
         .client()
         .delete(format!("{}/api/admin/prices/{}", app.base, other_id))
@@ -621,7 +652,10 @@ async fn admin_prices_crud_and_wildcard_billing() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.json::<serde_json::Value>().await.unwrap()["prompt_price"], 5.0);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["prompt_price"],
+        5.0
+    );
 
     // cached_price 双层语义:显式 null 清回 NULL(缓存按输入价),缺省不改动
     let resp = app
@@ -633,7 +667,10 @@ async fn admin_prices_crud_and_wildcard_billing() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.json::<serde_json::Value>().await.unwrap()["cached_price"], 1.5);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["cached_price"],
+        1.5
+    );
     let resp = app
         .client()
         .patch(format!("{}/api/admin/prices/{}", app.base, id))
@@ -644,7 +681,11 @@ async fn admin_prices_crud_and_wildcard_billing() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.json::<serde_json::Value>().await.unwrap();
-    assert!(body["cached_price"].is_null(), "显式 null 应清空缓存价: {}", body);
+    assert!(
+        body["cached_price"].is_null(),
+        "显式 null 应清空缓存价: {}",
+        body
+    );
     // 缺省字段不影响已有值(prompt_price 仍是 5.0)
     assert_eq!(body["prompt_price"], 5.0);
 
@@ -685,7 +726,10 @@ async fn wallet_returns_own_balance_and_daily_costs() {
     seed_api_key(&app.db());
     seed_openai_provider(&app, &mock, "p1");
     app.db()
-        .execute("UPDATE users SET balance = 100_000_000 WHERE id = 'u-e2e'", [])
+        .execute(
+            "UPDATE users SET balance = 100_000_000 WHERE id = 'u-e2e'",
+            [],
+        )
         .unwrap();
     app.db()
         .execute(
@@ -778,7 +822,10 @@ async fn admin_adjust_balance_records_transaction() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.json::<serde_json::Value>().await.unwrap()["balance"], 70.0);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["balance"],
+        70.0
+    );
 
     // 流水有两条,最新的在前
     let resp = app
@@ -847,7 +894,10 @@ async fn batch_create_providers() {
     assert_eq!(body["created"], 3);
     assert_eq!(body["failed"].as_array().unwrap().len(), 0);
     let providers = body["providers"].as_array().unwrap();
-    let names: Vec<&str> = providers.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = providers
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
     assert_eq!(names, ["batch-01", "batch-02", "batch-03"]);
 
     // 落库核对:协议字段与加密 key(enc:v1: 前缀,逐 key 密文不同)
@@ -860,7 +910,8 @@ async fn batch_create_providers() {
         .filter_map(|r| r.ok())
         .collect();
     assert_eq!(rows.len(), 3);
-    let ciphers: std::collections::HashSet<&str> = rows.iter().map(|(_, k, _)| k.as_str()).collect();
+    let ciphers: std::collections::HashSet<&str> =
+        rows.iter().map(|(_, k, _)| k.as_str()).collect();
     for (_, key, proto) in &rows {
         assert_eq!(proto, "openai");
         assert!(key.starts_with("enc:v1:"), "key must be encrypted at rest");
@@ -951,7 +1002,9 @@ async fn duplicate_provider_key_rejected() {
     // 编辑渠道换成已占用的 key → 409
     let dup_id: String = app
         .db()
-        .query_row("SELECT id FROM providers WHERE name = 'dup'", [], |r| r.get(0))
+        .query_row("SELECT id FROM providers WHERE name = 'dup'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     let resp = app
         .client()
@@ -973,11 +1026,18 @@ async fn api_key_concurrent_limit_enforced() {
     seed_api_key(&app.db());
     seed_openai_provider(&app, &mock, "p1");
     app.db()
-        .execute("UPDATE api_keys SET max_concurrent = 1 WHERE id = 'k-e2e'", [])
+        .execute(
+            "UPDATE api_keys SET max_concurrent = 1 WHERE id = 'k-e2e'",
+            [],
+        )
         .unwrap();
 
     // 慢上游(1.5s):第一个请求在途期间第二个并发请求 → 429 rate_limit_error
-    mock.push_delayed_json(std::time::Duration::from_millis(1500), 200, common::openai_completion("slow"));
+    mock.push_delayed_json(
+        std::time::Duration::from_millis(1500),
+        200,
+        common::openai_completion("slow"),
+    );
     // 注意:reqwest future 是惰性的,必须 spawn 才会真正发出第一个请求
     let first = tokio::spawn({
         let client = app.client();
@@ -1036,9 +1096,11 @@ async fn redemption_code_full_flow() {
         .map(|c| c.as_str().unwrap().to_string())
         .collect();
     assert_eq!(codes.len(), 3);
-    assert!(codes.iter().all(|c| {
-        c.len() == 22 && c.starts_with("AK-") && c.matches('-').count() == 4
-    }));
+    assert!(
+        codes
+            .iter()
+            .all(|c| { c.len() == 22 && c.starts_with("AK-") && c.matches('-').count() == 4 })
+    );
     let resp = app
         .client()
         .post(format!("{}/api/admin/redemption-codes", app.base))
@@ -1117,18 +1179,27 @@ async fn redemption_code_full_flow() {
         let masked = c["code_masked"].as_str().unwrap();
         masked.len() == 22 && masked.starts_with("AK-****-****-****-")
     }));
-    assert!(arr.iter().all(|c| c.get("code_hash").is_none() && c.get("code").is_none()));
+    assert!(
+        arr.iter()
+            .all(|c| c.get("code_hash").is_none() && c.get("code").is_none())
+    );
     let used = arr.iter().find(|c| c["status"] == "used").unwrap();
     assert_eq!(used["used_by"], "e2e");
     // 过期未用:status 仍为 unused,expired 计算字段为 true
-    let expired_unused = arr.iter().find(|c| c["status"] == "unused" && !c["expires_at"].is_null()).unwrap();
+    let expired_unused = arr
+        .iter()
+        .find(|c| c["status"] == "unused" && !c["expires_at"].is_null())
+        .unwrap();
     assert_eq!(expired_unused["expired"], true);
     assert!(arr.iter().filter(|c| c["expired"] == true).count() == 1);
 
     // expired 筛选:只返回过期未用的那 1 张
     let resp = app
         .client()
-        .get(format!("{}/api/admin/redemption-codes?batch=b1&status=expired", app.base))
+        .get(format!(
+            "{}/api/admin/redemption-codes?batch=b1&status=expired",
+            app.base
+        ))
         .bearer_auth(&jwt)
         .send()
         .await
@@ -1141,7 +1212,10 @@ async fn redemption_code_full_flow() {
     // 分页:limit=2 应得两页
     let resp = app
         .client()
-        .get(format!("{}/api/admin/redemption-codes?batch=b1&limit=2&offset=2", app.base))
+        .get(format!(
+            "{}/api/admin/redemption-codes?batch=b1&limit=2&offset=2",
+            app.base
+        ))
         .bearer_auth(&jwt)
         .send()
         .await
@@ -1161,7 +1235,10 @@ async fn redemption_code_full_flow() {
         .to_string();
     let resp = app
         .client()
-        .post(format!("{}/api/admin/redemption-codes/{}/disable", app.base, unused_id))
+        .post(format!(
+            "{}/api/admin/redemption-codes/{}/disable",
+            app.base, unused_id
+        ))
         .bearer_auth(&jwt)
         .send()
         .await
@@ -1169,7 +1246,10 @@ async fn redemption_code_full_flow() {
     assert_eq!(resp.status(), 200);
     let resp = app
         .client()
-        .post(format!("{}/api/admin/redemption-codes/{}/disable", app.base, unused_id))
+        .post(format!(
+            "{}/api/admin/redemption-codes/{}/disable",
+            app.base, unused_id
+        ))
         .bearer_auth(&jwt)
         .send()
         .await
@@ -1297,9 +1377,11 @@ async fn admin_manages_other_users_api_keys() {
     assert_eq!(resp.status(), 200);
     let active: i64 = app
         .db()
-        .query_row("SELECT is_active FROM api_keys WHERE id = 'k-bob'", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT is_active FROM api_keys WHERE id = 'k-bob'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(active, 0);
 
@@ -1333,9 +1415,11 @@ async fn admin_manages_other_users_api_keys() {
     assert_eq!(resp.status(), 200);
     let n: i64 = app
         .db()
-        .query_row("SELECT COUNT(*) FROM api_keys WHERE id = 'k-bob'", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM api_keys WHERE id = 'k-bob'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(n, 0);
 }
@@ -1469,7 +1553,10 @@ async fn responses_passthrough_non_stream() {
     let v: serde_json::Value = serde_json::from_str(&up.body).unwrap();
     assert_eq!(v["store"], false);
     assert!(v.get("stream_options").is_none());
-    assert!(v.get("messages").is_none(), "pass-through must not convert: {v}");
+    assert!(
+        v.get("messages").is_none(),
+        "pass-through must not convert: {v}"
+    );
 
     // input_tokens=10 含 6 缓存:记账拆分为 4 未缓存 + 6 缓存
     assert_eq!(wait_billing(&app).await, (4, 4, 14, 6));
@@ -1556,8 +1643,14 @@ async fn responses_converted_to_openai_non_stream() {
     let v: serde_json::Value = serde_json::from_str(&up.body).unwrap();
     assert_eq!(v["model"], "mapped-gpt-4");
     let msgs = v["messages"].as_array().unwrap();
-    assert_eq!(msgs[0], serde_json::json!({"role": "system", "content": "be terse"}));
-    assert_eq!(msgs[1], serde_json::json!({"role": "user", "content": "hi"}));
+    assert_eq!(
+        msgs[0],
+        serde_json::json!({"role": "system", "content": "be terse"})
+    );
+    assert_eq!(
+        msgs[1],
+        serde_json::json!({"role": "user", "content": "hi"})
+    );
     assert_eq!(msgs[2]["tool_calls"][0]["id"], "c1");
     assert_eq!(msgs[3]["role"], "tool");
 
@@ -1604,7 +1697,10 @@ async fn responses_converted_to_openai_stream() {
         .find(|r| r.path == "/v1/chat/completions")
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(&up.body).unwrap();
-    assert_eq!(v["stream_options"], serde_json::json!({"include_usage": true}));
+    assert_eq!(
+        v["stream_options"],
+        serde_json::json!({"include_usage": true})
+    );
 
     assert_eq!(wait_billing(&app).await, (4, 4, 14, 6));
 }
@@ -1738,7 +1834,11 @@ async fn responses_failover_to_second_channel() {
     seed_responses_provider_full(&app, &good_mock, "p-good", 10, 10.0, "unknown", 1.0);
 
     let resp = post_responses(&app, serde_json::json!({"model": "gpt-4", "input": "hi"})).await;
-    assert_eq!(resp.status(), 200, "failover must deliver the good upstream");
+    assert_eq!(
+        resp.status(),
+        200,
+        "failover must deliver the good upstream"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["output"][0]["content"][0]["text"], "failover ok");
 
@@ -1800,7 +1900,9 @@ async fn admin_provider_responses_protocol_validation() {
     });
     let create = |body: serde_json::Value| {
         let mut b = base.clone();
-        b.as_object_mut().unwrap().extend(body.as_object().unwrap().clone());
+        b.as_object_mut()
+            .unwrap()
+            .extend(body.as_object().unwrap().clone());
         app.client()
             .post(format!("{}/api/admin/providers", app.base))
             .bearer_auth(&admin)
@@ -1809,7 +1911,9 @@ async fn admin_provider_responses_protocol_validation() {
 
     // responses 不能单独成渠道(默认协议/上游地址语义依附 openai|anthropic)
     let r = create(serde_json::json!({"protocols": ["responses"]}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 400);
     let v: serde_json::Value = r.json().await.unwrap();
     assert_eq!(v["error"], "invalid_protocols");
@@ -1819,21 +1923,22 @@ async fn admin_provider_responses_protocol_validation() {
         "protocols": ["openai", "responses"],
         "default_protocol": "responses"
     }))
-    .send().await.unwrap();
+    .send()
+    .await
+    .unwrap();
     assert_eq!(r.status(), 400);
     let v: serde_json::Value = r.json().await.unwrap();
     assert_eq!(v["error"], "invalid_default_protocol");
 
     // 合法组合:省略默认时落到第一个可作默认的协议(openai 而非 responses)
     let r = create(serde_json::json!({"protocols": ["responses", "openai"]}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 201);
     let v: serde_json::Value = r.json().await.unwrap();
     assert_eq!(v["default_protocol"], "openai");
-    assert_eq!(
-        v["protocols"],
-        serde_json::json!(["responses", "openai"])
-    );
+    assert_eq!(v["protocols"], serde_json::json!(["responses", "openai"]));
 
     // 勾选 responses 但缺 openai 地址 → 400(responses 复用 openai 地址)
     let r = create(serde_json::json!({
@@ -1841,7 +1946,9 @@ async fn admin_provider_responses_protocol_validation() {
         "anthropic_base_url": "http://127.0.0.1:1",
         "openai_base_url": ""
     }))
-    .send().await.unwrap();
+    .send()
+    .await
+    .unwrap();
     assert_eq!(r.status(), 400);
     let v: serde_json::Value = r.json().await.unwrap();
     assert_eq!(v["error"], "invalid_base_url");
@@ -1903,7 +2010,10 @@ async fn passthrough_embeddings_end_to_end() {
 
     // 转发核对:路径、凭证改写、模型映射已应用、其余字段原样
     let reqs = mock.requests();
-    let fwd = reqs.iter().find(|r| r.path.ends_with("/embeddings")).unwrap();
+    let fwd = reqs
+        .iter()
+        .find(|r| r.path.ends_with("/embeddings"))
+        .unwrap();
     assert_eq!(fwd.authorization.as_deref(), Some("Bearer upstream-key"));
     let fwd_body: serde_json::Value = serde_json::from_str(&fwd.body).unwrap();
     assert_eq!(fwd_body["model"], "upstream-emb-001");
@@ -1922,7 +2032,9 @@ async fn passthrough_embeddings_end_to_end() {
     assert_eq!(cost, 10_000);
     let balance: i64 = app
         .db()
-        .query_row("SELECT balance FROM users WHERE id = 'u-e2e'", [], |r| r.get(0))
+        .query_row("SELECT balance FROM users WHERE id = 'u-e2e'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(balance, 1_000_000 - 10_000);
 
@@ -1994,14 +2106,34 @@ async fn passthrough_failover_and_credential_masking() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body, emb_resp);
     // 两个渠道各被打一次(500 后故障转移)
-    assert_eq!(mock1.requests().iter().filter(|r| r.path.ends_with("/embeddings")).count(), 1);
-    assert_eq!(mock2.requests().iter().filter(|r| r.path.ends_with("/embeddings")).count(), 1);
+    assert_eq!(
+        mock1
+            .requests()
+            .iter()
+            .filter(|r| r.path.ends_with("/embeddings"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        mock2
+            .requests()
+            .iter()
+            .filter(|r| r.path.ends_with("/embeddings"))
+            .count(),
+        1
+    );
 
     // 全部渠道 401 → 客户端收 502 upstream_error(渠道凭证失败不外泄)。
     // 循环内候选耗尽会重选同一渠道,多推几个 401 防脚本耗尽回默认 200。
     for _ in 0..4 {
-        mock1.push_json(401, serde_json::json!({"error": {"message": "invalid key sk-secret"}}));
-        mock2.push_json(401, serde_json::json!({"error": {"message": "invalid key sk-secret"}}));
+        mock1.push_json(
+            401,
+            serde_json::json!({"error": {"message": "invalid key sk-secret"}}),
+        );
+        mock2.push_json(
+            401,
+            serde_json::json!({"error": {"message": "invalid key sk-secret"}}),
+        );
     }
     let resp = app
         .auth(app.client().post(format!("{}/v1/embeddings", app.base)))
@@ -2012,7 +2144,12 @@ async fn passthrough_failover_and_credential_masking() {
     assert_eq!(resp.status(), 502);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["type"], "upstream_error");
-    assert!(!body["error"]["message"].as_str().unwrap().contains("sk-secret"));
+    assert!(
+        !body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sk-secret")
+    );
 }
 
 fn chat_count(mock: &MockUpstream) -> usize {
@@ -2069,7 +2206,11 @@ async fn channel_affinity_sticks_then_repins_after_failure() {
     let resp = chat_completions(&app).await;
     assert_eq!(resp.status(), 200);
     assert_eq!(chat_count(&low), 1, "pinned channel must serve the request");
-    assert_eq!(chat_count(&high), 0, "a healthy higher-weight channel must not steal a live pin");
+    assert_eq!(
+        chat_count(&high),
+        0,
+        "a healthy higher-weight channel must not steal a live pin"
+    );
 
     low.push_json(500, serde_json::json!({"error": "down"}));
     let resp = chat_completions(&app).await;
@@ -2092,7 +2233,11 @@ async fn channel_affinity_sticks_then_repins_after_failure() {
 
     let resp = chat_completions(&app).await;
     assert_eq!(resp.status(), 200);
-    assert_eq!(chat_count(&low), 2, "the failed channel must stay unused after repin");
+    assert_eq!(
+        chat_count(&low),
+        2,
+        "the failed channel must stay unused after repin"
+    );
     assert_eq!(chat_count(&high), 2);
 }
 
@@ -2140,13 +2285,22 @@ async fn public_prices_expand_wildcard_for_logged_in_users() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let rows: Vec<serde_json::Value> = resp.json().await.unwrap();
-    let gpt = rows.iter().find(|r| r["model"] == "gpt-4").expect("gpt-4 offered");
+    let gpt = rows
+        .iter()
+        .find(|r| r["model"] == "gpt-4")
+        .expect("gpt-4 offered");
     assert_eq!(gpt["prompt_price"], 1.0);
     assert_eq!(gpt["completion_price"], 2.0);
     assert!(gpt["cached_price"].is_null());
-    let bare = rows.iter().find(|r| r["model"] == "unpriced-model").unwrap();
+    let bare = rows
+        .iter()
+        .find(|r| r["model"] == "unpriced-model")
+        .unwrap();
     assert!(bare["prompt_price"].is_null());
-    assert!(rows.iter().all(|r| r["model"] != "gpt-*" && r["model"] != "other-*"));
+    assert!(
+        rows.iter()
+            .all(|r| r["model"] != "gpt-*" && r["model"] != "other-*")
+    );
 }
 
 #[tokio::test]
@@ -2234,7 +2388,10 @@ async fn channel_kinds_listed_validated_and_routed() {
         .unwrap();
     let list = kinds.as_array().unwrap();
     assert_eq!(list[0]["kind"], "generic");
-    assert!(list.iter().any(|k| k["kind"] == "qoder" && k["experimental"] == true));
+    assert!(
+        list.iter()
+            .any(|k| k["kind"] == "qoder" && k["experimental"] == true)
+    );
     assert!(list.iter().any(|k| k["kind"] == "workbuddy"));
 
     let payload = |kind: &str| {
@@ -2273,13 +2430,20 @@ async fn channel_kinds_listed_validated_and_routed() {
     assert_eq!(created["channel_kind"], "workbuddy");
     let id = created["id"].as_str().unwrap().to_string();
     app.db()
-        .execute("UPDATE providers SET health_status = 'healthy' WHERE id = ?1", [&id])
+        .execute(
+            "UPDATE providers SET health_status = 'healthy' WHERE id = ?1",
+            [&id],
+        )
         .unwrap();
 
     // 经适配器路由的请求照常成功
     let resp = chat_completions(&app).await;
     assert_eq!(resp.status(), 200);
-    assert!(mock.requests().iter().any(|r| r.path == "/v1/chat/completions"));
+    assert!(
+        mock.requests()
+            .iter()
+            .any(|r| r.path == "/v1/chat/completions")
+    );
 
     // PATCH 改类型同样受注册表校验
     let resp = app
@@ -2302,14 +2466,22 @@ async fn channel_kinds_listed_validated_and_routed() {
     assert!(resp.status().is_success());
     let kind: String = app
         .db()
-        .query_row("SELECT channel_kind FROM providers WHERE id = ?1", [&id], |r| r.get(0))
+        .query_row(
+            "SELECT channel_kind FROM providers WHERE id = ?1",
+            [&id],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(kind, "qoder");
 }
 
 // ---------- 响应缓存 ----------
 
-async fn chat_with(app: &TestApp, temperature: f64, extra_header: Option<(&str, &str)>) -> reqwest::Response {
+async fn chat_with(
+    app: &TestApp,
+    temperature: f64,
+    extra_header: Option<(&str, &str)>,
+) -> reqwest::Response {
     let mut req = app
         .client()
         .post(format!("{}/v1/chat/completions", app.base))
@@ -2325,7 +2497,10 @@ async fn chat_with(app: &TestApp, temperature: f64, extra_header: Option<(&str, 
 }
 
 fn upstream_chat_calls(mock: &MockUpstream) -> usize {
-    mock.requests().iter().filter(|r| r.path == "/v1/chat/completions").count()
+    mock.requests()
+        .iter()
+        .filter(|r| r.path == "/v1/chat/completions")
+        .count()
 }
 
 #[tokio::test]
@@ -2360,7 +2535,11 @@ async fn deterministic_cache_hit_skips_upstream_and_still_logs() {
     assert_eq!(second.headers()["x-aikun-cache"], "HIT");
     let hit_body: serde_json::Value = second.json().await.unwrap();
     assert_eq!(hit_body, first_body);
-    assert_eq!(upstream_chat_calls(&mock), 1, "cache hit must not reach upstream");
+    assert_eq!(
+        upstream_chat_calls(&mock),
+        1,
+        "cache hit must not reach upstream"
+    );
 
     // temperature != 0 不缓存;Cache-Control: no-cache 跳过缓存
     let warm = chat_with(&app, 0.7, None).await;
@@ -2383,7 +2562,6 @@ async fn deterministic_cache_hit_skips_upstream_and_still_logs() {
     .await;
 }
 
-
 /// 登录链路(roadmap-v0.5 阶段 0):/api/login → /api/me;错误密码 401;
 /// 管理员改密后 token_version 递增,旧会话立即失效,新密码可重新登录;
 /// 禁用账户登录 403。
@@ -2397,14 +2575,18 @@ async fn login_me_and_password_change_revokes_sessions() {
     let created = client
         .post(format!("{}/api/admin/users", app.base))
         .bearer_auth(&admin)
-        .json(&serde_json::json!({"username": "alice", "password": "old-password-1", "role": "user"}))
+        .json(
+            &serde_json::json!({"username": "alice", "password": "old-password-1", "role": "user"}),
+        )
         .send()
         .await
         .unwrap();
     assert_eq!(created.status(), 201, "{:?}", created.text().await);
     let user_id = app
         .db()
-        .query_row("SELECT id FROM users WHERE username = 'alice'", [], |r| r.get::<_, String>(0))
+        .query_row("SELECT id FROM users WHERE username = 'alice'", [], |r| {
+            r.get::<_, String>(0)
+        })
         .unwrap();
 
     let login = |password: &'static str| {
@@ -2435,7 +2617,10 @@ async fn login_me_and_password_change_revokes_sessions() {
     let body: serde_json::Value = ok.json().await.unwrap();
     let old_token = body["token"].as_str().unwrap().to_string();
     assert_eq!(body["user"]["username"], "alice");
-    assert!(body["user"].get("password_hash").is_none(), "不得回传密码哈希");
+    assert!(
+        body["user"].get("password_hash").is_none(),
+        "不得回传密码哈希"
+    );
     let r = me(old_token.clone()).await;
     assert_eq!(r.status(), 200);
     let me_body: serde_json::Value = r.json().await.unwrap();
@@ -2456,7 +2641,10 @@ async fn login_me_and_password_change_revokes_sessions() {
     assert_eq!(login("old-password-1").await.status(), 401);
     let ok = login("new-password-2").await;
     assert_eq!(ok.status(), 200);
-    let new_token = ok.json::<serde_json::Value>().await.unwrap()["token"].as_str().unwrap().to_string();
+    let new_token = ok.json::<serde_json::Value>().await.unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(me(new_token.clone()).await.status(), 200);
 
     // 禁用账户:密码正确也 403;已签发的 token 同样失效
@@ -2472,6 +2660,10 @@ async fn login_me_and_password_change_revokes_sessions() {
     assert_eq!(me(new_token).await.status(), 401);
 
     // 未带凭证访问受保护接口 → 401
-    let anon = client.get(format!("{}/api/me", app.base)).send().await.unwrap();
+    let anon = client
+        .get(format!("{}/api/me", app.base))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(anon.status(), 401);
 }

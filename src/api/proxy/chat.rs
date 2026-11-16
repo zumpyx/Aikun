@@ -1,17 +1,17 @@
 use axum::{
+    Json,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
+use crate::AppState;
 use crate::auth::{AuthContext, Claims};
+use crate::channel::selector::list_available_models_async;
 use crate::pipeline::admission::model_allowed;
 use crate::pipeline::proxy_completion;
 use crate::protocol::Protocol;
-use crate::channel::selector::list_available_models_async;
-use crate::AppState;
 
 /// Unified chat completions endpoint (OpenAI-compatible).
 pub async fn chat_completion(
@@ -38,16 +38,21 @@ pub async fn list_models(
     let data: Vec<Value> = models
         .into_iter()
         .filter(|id| model_allowed(&auth_ctx.allowed_models, id))
-        .map(|id| json!({
-            "id": id,
-            "object": "model",
-            "created": chrono::Utc::now().timestamp(),
-            "owned_by": "aikun"
-        }))
+        .map(|id| {
+            json!({
+                "id": id,
+                "object": "model",
+                "created": chrono::Utc::now().timestamp(),
+                "owned_by": "aikun"
+            })
+        })
         .collect();
 
-    (StatusCode::OK, Json(json!({
-        "object": "list",
-        "data": data
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "object": "list",
+            "data": data
+        })),
+    )
 }

@@ -22,16 +22,16 @@ pub(crate) use anthropic::request::*;
 pub(crate) use anthropic::response::*;
 pub(crate) use anthropic::stream::*;
 pub(crate) use error::*;
-pub(crate) use openai::*;
 pub(crate) use openai::request::*;
 pub(crate) use openai::response::*;
 pub(crate) use openai::stream::*;
+pub(crate) use openai::*;
 pub(crate) use responses::request::*;
 pub(crate) use sse::*;
 pub(crate) use stream::*;
 pub(crate) use usage::*;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// 网关支持的三种线协议。所有协议分支都用穷举 `match`,新增协议时编译器
 /// 会指出每一处需要补齐的转换(roadmap-v0.5 决策 2)。
@@ -172,7 +172,6 @@ mod tests {
     #[allow(unused_imports)]
     use crate::protocol::test_util::{out_types, sse, sse_typed};
 
-
     #[test]
     fn valid_response_shape_checks_protocol_shape() {
         let openai_ok = json!({"choices": [{"message": {"role": "assistant", "content": "hi"}}]});
@@ -202,7 +201,10 @@ mod tests {
 
     #[test]
     fn protocol_mapping() {
-        assert_eq!(Protocol::for_provider_type("anthropic"), Protocol::Anthropic);
+        assert_eq!(
+            Protocol::for_provider_type("anthropic"),
+            Protocol::Anthropic
+        );
         assert_eq!(Protocol::for_provider_type("openai"), Protocol::OpenAi);
         assert_eq!(Protocol::for_provider_type("azure"), Protocol::OpenAi);
         assert_eq!(Protocol::for_provider_type("custom"), Protocol::OpenAi);
@@ -214,8 +216,14 @@ mod tests {
     #[test]
     fn request_same_protocol_passthrough() {
         let body = json!({"model": "gpt-4", "messages": []});
-        assert_eq!(convert_request(&body, Protocol::OpenAi, Protocol::OpenAi), body);
-        assert_eq!(convert_request(&body, Protocol::Anthropic, Protocol::Anthropic), body);
+        assert_eq!(
+            convert_request(&body, Protocol::OpenAi, Protocol::OpenAi),
+            body
+        );
+        assert_eq!(
+            convert_request(&body, Protocol::Anthropic, Protocol::Anthropic),
+            body
+        );
     }
 
     #[test]
@@ -225,7 +233,9 @@ mod tests {
         assert_eq!(out["stream_options"], json!({"include_usage": true}));
         // Non-streaming requests stay untouched.
         let plain = json!({"model": "gpt-4", "messages": []});
-        assert!(convert_request(&plain, Protocol::OpenAi, Protocol::OpenAi)["stream_options"].is_null());
+        assert!(
+            convert_request(&plain, Protocol::OpenAi, Protocol::OpenAi)["stream_options"].is_null()
+        );
         // Other stream_options keys are kept, but include_usage is always
         // forced on — an explicit client-side `false` must not disable
         // usage reporting (that would let streams go unbilled).
@@ -234,7 +244,8 @@ mod tests {
             convert_request(&preset, Protocol::OpenAi, Protocol::OpenAi)["stream_options"],
             json!({"x": 1, "include_usage": true})
         );
-        let disabled = json!({"model": "gpt-4", "stream": true, "stream_options": {"include_usage": false}});
+        let disabled =
+            json!({"model": "gpt-4", "stream": true, "stream_options": {"include_usage": false}});
         assert_eq!(
             convert_request(&disabled, Protocol::OpenAi, Protocol::OpenAi)["stream_options"],
             json!({"include_usage": true})
@@ -244,7 +255,10 @@ mod tests {
     #[test]
     fn response_same_protocol_passthrough() {
         let resp = json!({"anything": true});
-        assert_eq!(convert_response(&resp, Protocol::OpenAi, Protocol::OpenAi, "m"), resp);
+        assert_eq!(
+            convert_response(&resp, Protocol::OpenAi, Protocol::OpenAi, "m"),
+            resp
+        );
     }
 
     #[test]
@@ -270,7 +284,12 @@ mod tests {
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 1, "output_tokens": 2}
         });
-        let out = convert_response(&upstream_an, Protocol::Anthropic, Protocol::OpenAi, "claude-alias");
+        let out = convert_response(
+            &upstream_an,
+            Protocol::Anthropic,
+            Protocol::OpenAi,
+            "claude-alias",
+        );
         assert_eq!(out["model"], "claude-alias");
     }
 
@@ -279,7 +298,10 @@ mod tests {
     #[test]
     fn request_responses_passthrough_untouched() {
         let body = json!({"model": "gpt-5", "stream": true, "input": "hi", "store": false});
-        assert_eq!(convert_request(&body, Protocol::Responses, Protocol::Responses), body);
+        assert_eq!(
+            convert_request(&body, Protocol::Responses, Protocol::Responses),
+            body
+        );
     }
 
     #[test]

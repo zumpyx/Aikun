@@ -34,7 +34,11 @@ pub fn find_price(conn: &Connection, model: &str) -> Option<(f64, f64, Option<f6
         Ok(v) => Some(v),
         Err(rusqlite::Error::QueryReturnedNoRows) => None,
         Err(e) => {
-            tracing::warn!("find_price: exact price query failed for model '{}': {}", model, e);
+            tracing::warn!(
+                "find_price: exact price query failed for model '{}': {}",
+                model,
+                e
+            );
             return None;
         }
     };
@@ -143,7 +147,10 @@ pub fn seed_default_prices(conn: &Connection) -> Result<usize, rusqlite::Error> 
             .collect(),
         Err(e) => {
             // 快照文件随二进制编译内嵌,解析失败是构建期问题,不该在运行期发生
-            tracing::error!("seed_default_prices: embedded price snapshot is invalid: {}", e);
+            tracing::error!(
+                "seed_default_prices: embedded price snapshot is invalid: {}",
+                e
+            );
             return Ok(0);
         }
     };
@@ -152,7 +159,13 @@ pub fn seed_default_prices(conn: &Connection) -> Result<usize, rusqlite::Error> 
         "INSERT INTO model_prices (id, model, prompt_price, completion_price, cached_price) VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
     for (model, prompt, completion, cached) in prices {
-        stmt.execute(rusqlite::params![uuid::Uuid::new_v4().to_string(), model, prompt, completion, cached])?;
+        stmt.execute(rusqlite::params![
+            uuid::Uuid::new_v4().to_string(),
+            model,
+            prompt,
+            completion,
+            cached
+        ])?;
     }
     // 兜底价直接以元入库(不经汇率换算);cached_price 存 NULL,缓存按输入价 3 元计
     stmt.execute(rusqlite::params![
@@ -200,7 +213,10 @@ mod tests {
         let conn = setup();
         // gpt-4o-mini 同时命中 gpt-* 与 gpt-4o-*,取更长前缀
         assert_eq!(find_price(&conn, "gpt-4o-mini"), Some((3.0, 6.0, None)));
-        assert_eq!(find_price(&conn, "gpt-3.5-turbo"), Some((1.0, 2.0, Some(0.5))));
+        assert_eq!(
+            find_price(&conn, "gpt-3.5-turbo"),
+            Some((1.0, 2.0, Some(0.5)))
+        );
         assert_eq!(find_price(&conn, "claude-opus-4"), Some((15.0, 75.0, None)));
     }
 
@@ -218,7 +234,10 @@ mod tests {
         // 未知模型命中兜底价
         assert_eq!(find_price(&conn, "llama-3"), Some((3.0, 7.0, None)));
         // 有更具体的通配/精确条目时兜底不生效
-        assert_eq!(find_price(&conn, "gpt-3.5-turbo"), Some((1.0, 2.0, Some(0.5))));
+        assert_eq!(
+            find_price(&conn, "gpt-3.5-turbo"),
+            Some((1.0, 2.0, Some(0.5)))
+        );
         assert_eq!(find_price(&conn, "gpt-4"), Some((10.0, 30.0, None)));
     }
 
@@ -262,7 +281,11 @@ mod tests {
         .unwrap();
         // 空表:全量导入
         let n = seed_default_prices(&conn).unwrap();
-        assert!(n > 100, "expected a substantial default price set, got {}", n);
+        assert!(
+            n > 100,
+            "expected a substantial default price set, got {}",
+            n
+        );
         let gpt4o: (f64, f64, Option<f64>) = conn
             .query_row(
                 "SELECT prompt_price, completion_price, cached_price FROM model_prices WHERE model = 'gpt-4o'",
@@ -273,17 +296,25 @@ mod tests {
         // gpt-4o 刊例价 $2.5/$10 × 7.2 = 18/72 元;缓存读价 $1.25 × 7.2 = 9 元
         assert_eq!(gpt4o, (18.0, 72.0, Some(9.0)));
         // 兜底条目:* → 3/7 元,cached_price 为 NULL,未知模型按此计费
-        assert_eq!(find_price(&conn, "some-unknown-model"), Some((3.0, 7.0, None)));
+        assert_eq!(
+            find_price(&conn, "some-unknown-model"),
+            Some((3.0, 7.0, None))
+        );
         // 非空表:跳过,不覆盖手工数据
         conn.execute("DELETE FROM model_prices WHERE model != 'gpt-4o'", [])
             .unwrap();
-        conn.execute("UPDATE model_prices SET prompt_price = 1.0 WHERE model = 'gpt-4o'", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE model_prices SET prompt_price = 1.0 WHERE model = 'gpt-4o'",
+            [],
+        )
+        .unwrap();
         assert_eq!(seed_default_prices(&conn).unwrap(), 0);
         let kept: f64 = conn
-            .query_row("SELECT prompt_price FROM model_prices WHERE model = 'gpt-4o'", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT prompt_price FROM model_prices WHERE model = 'gpt-4o'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(kept, 1.0);
     }

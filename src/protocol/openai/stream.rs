@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[allow(unused_imports)]
 use crate::protocol::*;
@@ -108,32 +108,32 @@ impl OaStreamState {
             for choice in choices {
                 let delta = &choice["delta"];
 
-                if let Some(text) = delta["reasoning_content"].as_str() {
-                    if !text.is_empty() {
-                        let idx = self.ensure_thinking_block(&mut out);
-                        out.push(SseOut::json(
-                            "content_block_delta",
-                            json!({
-                                "type": "content_block_delta",
-                                "index": idx,
-                                "delta": {"type": "thinking_delta", "thinking": text},
-                            }),
-                        ));
-                    }
+                if let Some(text) = delta["reasoning_content"].as_str()
+                    && !text.is_empty()
+                {
+                    let idx = self.ensure_thinking_block(&mut out);
+                    out.push(SseOut::json(
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": idx,
+                            "delta": {"type": "thinking_delta", "thinking": text},
+                        }),
+                    ));
                 }
 
-                if let Some(text) = delta["content"].as_str() {
-                    if !text.is_empty() {
-                        let idx = self.ensure_text_block(&mut out);
-                        out.push(SseOut::json(
-                            "content_block_delta",
-                            json!({
-                                "type": "content_block_delta",
-                                "index": idx,
-                                "delta": {"type": "text_delta", "text": text},
-                            }),
-                        ));
-                    }
+                if let Some(text) = delta["content"].as_str()
+                    && !text.is_empty()
+                {
+                    let idx = self.ensure_text_block(&mut out);
+                    out.push(SseOut::json(
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": idx,
+                            "delta": {"type": "text_delta", "text": text},
+                        }),
+                    ));
                 }
 
                 if let Some(tcs) = delta["tool_calls"].as_array() {
@@ -161,17 +161,17 @@ impl OaStreamState {
                             ));
                         }
                         let block_idx = self.tool_blocks[&tc_index];
-                        if let Some(args) = tc["function"]["arguments"].as_str() {
-                            if !args.is_empty() {
-                                out.push(SseOut::json(
-                                    "content_block_delta",
-                                    json!({
-                                        "type": "content_block_delta",
-                                        "index": block_idx,
-                                        "delta": {"type": "input_json_delta", "partial_json": args},
-                                    }),
-                                ));
-                            }
+                        if let Some(args) = tc["function"]["arguments"].as_str()
+                            && !args.is_empty()
+                        {
+                            out.push(SseOut::json(
+                                "content_block_delta",
+                                json!({
+                                    "type": "content_block_delta",
+                                    "index": block_idx,
+                                    "delta": {"type": "input_json_delta", "partial_json": args},
+                                }),
+                            ));
                         }
                     }
                 }
@@ -294,7 +294,10 @@ impl OaStreamState {
                 "usage": self.anthropic_usage(),
             }),
         ));
-        out.push(SseOut::json("message_stop", json!({"type": "message_stop"})));
+        out.push(SseOut::json(
+            "message_stop",
+            json!({"type": "message_stop"}),
+        ));
         out
     }
 }
@@ -454,10 +457,7 @@ impl OarStreamState {
                                 output_index,
                                 item_id: format!("fc_{}", uuid::Uuid::new_v4().simple()),
                                 call_id: tc["id"].as_str().unwrap_or("").to_string(),
-                                name: tc["function"]["name"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string(),
+                                name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
                                 arguments: String::new(),
                             };
                             out.push(SseOut::json(
@@ -477,7 +477,10 @@ impl OarStreamState {
                             ));
                             self.tool_items.insert(tc_index, item);
                         }
-                        if let Some(args) = tc["function"]["arguments"].as_str().filter(|a| !a.is_empty()) {
+                        if let Some(args) = tc["function"]["arguments"]
+                            .as_str()
+                            .filter(|a| !a.is_empty())
+                        {
                             let item = self.tool_items.get_mut(&tc_index).unwrap();
                             item.arguments.push_str(args);
                             out.push(SseOut::json(
@@ -646,7 +649,11 @@ impl OarStreamState {
             .as_deref()
             .and_then(openai_finish_to_incomplete_reason);
         let (done_event, status, incomplete_details) = match incomplete {
-            Some(reason) => ("response.incomplete", "incomplete", json!({"reason": reason})),
+            Some(reason) => (
+                "response.incomplete",
+                "incomplete",
+                json!({"reason": reason}),
+            ),
             None => ("response.completed", "completed", Value::Null),
         };
         out.push(SseOut::json(
@@ -669,7 +676,6 @@ impl OarStreamState {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
@@ -683,16 +689,28 @@ mod tests {
         let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "claude-x");
 
         let outs = c.push(&sse(r#"{"id":"chatcmpl-1","choices":[{"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}"#));
-        assert_eq!(out_types(&outs), vec!["message_start", "content_block_start", "content_block_delta"]);
+        assert_eq!(
+            out_types(&outs),
+            vec![
+                "message_start",
+                "content_block_start",
+                "content_block_delta"
+            ]
+        );
 
-        let outs = c.push(&sse(r#"{"id":"chatcmpl-1","choices":[{"delta":{"content":"lo"}}]}"#));
+        let outs = c.push(&sse(
+            r#"{"id":"chatcmpl-1","choices":[{"delta":{"content":"lo"}}]}"#,
+        ));
         assert_eq!(out_types(&outs), vec!["content_block_delta"]);
 
         c.push(&sse(r#"{"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#));
         assert_eq!(c.usage(), (5, 2, 7, 0));
 
         let outs = c.push(&sse("[DONE]"));
-        assert_eq!(out_types(&outs), vec!["content_block_stop", "message_delta", "message_stop"]);
+        assert_eq!(
+            out_types(&outs),
+            vec!["content_block_stop", "message_delta", "message_stop"]
+        );
         let delta: Value = serde_json::from_str(&outs[1].data).unwrap();
         assert_eq!(delta["delta"]["stop_reason"], "end_turn");
         assert_eq!(delta["usage"]["output_tokens"], 2);
@@ -709,7 +727,11 @@ mod tests {
         c.push(&sse(r#"{"id":"c","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"prompt_tokens_details":{"cached_tokens":6}}}"#));
         let outs = c.push(&sse("[DONE]"));
         let delta: Value = serde_json::from_str(
-            &outs.iter().find(|o| o.event.as_deref() == Some("message_delta")).unwrap().data,
+            &outs
+                .iter()
+                .find(|o| o.event.as_deref() == Some("message_delta"))
+                .unwrap()
+                .data,
         )
         .unwrap();
         assert_eq!(delta["usage"]["input_tokens"], 4);
@@ -722,7 +744,9 @@ mod tests {
     fn stream_openai_to_anthropic_finish_reason_mapping() {
         let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "m");
         c.push(&sse(r#"{"choices":[{"delta":{"content":"x"}}]}"#));
-        c.push(&sse(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#));
+        c.push(&sse(
+            r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+        ));
         let outs = c.push(&sse("[DONE]"));
         let delta: Value = serde_json::from_str(&outs[1].data).unwrap();
         assert_eq!(delta["delta"]["stop_reason"], "max_tokens");
@@ -734,13 +758,24 @@ mod tests {
 
         // 文本块 → tool_use 块 → 第二个 tool_use 块 → 流结束
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"hi"}}]}"#));
-        assert_eq!(out_types(&outs), vec!["message_start", "content_block_start", "content_block_delta"]);
+        assert_eq!(
+            out_types(&outs),
+            vec![
+                "message_start",
+                "content_block_start",
+                "content_block_delta"
+            ]
+        );
 
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t1","function":{"name":"f1","arguments":"{"}}]}}]}"#));
         // 文本块先 stop，再开启 tool_use 块
         assert_eq!(
             out_types(&outs),
-            vec!["content_block_stop", "content_block_start", "content_block_delta"]
+            vec![
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta"
+            ]
         );
         let stop: Value = serde_json::from_str(&outs[0].data).unwrap();
         assert_eq!(stop["index"], 0);
@@ -751,7 +786,11 @@ mod tests {
         // 前一个 tool_use 块先 stop，再开启第二个
         assert_eq!(
             out_types(&outs),
-            vec!["content_block_stop", "content_block_start", "content_block_delta"]
+            vec![
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta"
+            ]
         );
         let stop: Value = serde_json::from_str(&outs[0].data).unwrap();
         assert_eq!(stop["index"], 1);
@@ -760,7 +799,10 @@ mod tests {
 
         // finalize 复用同一关闭逻辑：只停当前打开的第 2 块
         let outs = c.push(&sse("[DONE]"));
-        assert_eq!(out_types(&outs), vec!["content_block_stop", "message_delta", "message_stop"]);
+        assert_eq!(
+            out_types(&outs),
+            vec!["content_block_stop", "message_delta", "message_stop"]
+        );
         let stop: Value = serde_json::from_str(&outs[0].data).unwrap();
         assert_eq!(stop["index"], 2);
     }
@@ -773,7 +815,11 @@ mod tests {
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"tail"}}]}"#));
         assert_eq!(
             out_types(&outs),
-            vec!["content_block_stop", "content_block_start", "content_block_delta"]
+            vec![
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta"
+            ]
         );
         let stop: Value = serde_json::from_str(&outs[0].data).unwrap();
         assert_eq!(stop["index"], 0);
@@ -789,7 +835,11 @@ mod tests {
         ));
         assert_eq!(
             out_types(&outs),
-            vec!["message_start", "content_block_start", "content_block_delta"]
+            vec![
+                "message_start",
+                "content_block_start",
+                "content_block_delta"
+            ]
         );
         let start: Value = serde_json::from_str(&outs[1].data).unwrap();
         assert_eq!(start["content_block"]["type"], "thinking");
@@ -799,7 +849,11 @@ mod tests {
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"ans"}}]}"#));
         assert_eq!(
             out_types(&outs),
-            vec!["content_block_stop", "content_block_start", "content_block_delta"]
+            vec![
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta"
+            ]
         );
         let start: Value = serde_json::from_str(&outs[1].data).unwrap();
         assert_eq!(start["content_block"]["type"], "text");
@@ -810,13 +864,22 @@ mod tests {
     fn stream_openai_to_responses_text_flow() {
         let mut c = StreamConverter::new(Protocol::Responses, Protocol::OpenAi, "gpt-5");
 
-        let outs = c.push(&sse(r#"{"id":"chatcmpl-1","choices":[{"delta":{"role":"assistant","content":""}}]}"#));
-        assert_eq!(out_types(&outs), vec!["response.created", "response.in_progress"]);
+        let outs = c.push(&sse(
+            r#"{"id":"chatcmpl-1","choices":[{"delta":{"role":"assistant","content":""}}]}"#,
+        ));
+        assert_eq!(
+            out_types(&outs),
+            vec!["response.created", "response.in_progress"]
+        );
 
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"Hel"}}]}"#));
         assert_eq!(
             out_types(&outs),
-            vec!["response.output_item.added", "response.content_part.added", "response.output_text.delta"]
+            vec![
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta"
+            ]
         );
         let delta: Value = serde_json::from_str(&outs[2].data).unwrap();
         assert_eq!(delta["delta"], "Hel");
@@ -831,14 +894,25 @@ mod tests {
         let outs = c.push(&sse("[DONE]"));
         assert_eq!(
             out_types(&outs),
-            vec!["response.output_text.done", "response.content_part.done", "response.output_item.done", "response.completed"]
+            vec![
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.completed"
+            ]
         );
         let completed: Value = serde_json::from_str(&outs[3].data).unwrap();
         assert_eq!(completed["response"]["status"], "completed");
         assert_eq!(completed["response"]["model"], "gpt-5");
-        assert_eq!(completed["response"]["output"][0]["content"][0]["text"], "Hello");
+        assert_eq!(
+            completed["response"]["output"][0]["content"][0]["text"],
+            "Hello"
+        );
         assert_eq!(completed["response"]["usage"]["input_tokens"], 10);
-        assert_eq!(completed["response"]["usage"]["input_tokens_details"]["cached_tokens"], 6);
+        assert_eq!(
+            completed["response"]["usage"]["input_tokens_details"]["cached_tokens"],
+            6
+        );
         assert_eq!(c.usage(), (4, 4, 14, 6));
     }
 
@@ -849,21 +923,30 @@ mod tests {
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"f","arguments":"{\"a\":"}}]}}]}"#));
         assert_eq!(
             out_types(&outs),
-            vec!["response.output_item.added", "response.function_call_arguments.delta"]
+            vec![
+                "response.output_item.added",
+                "response.function_call_arguments.delta"
+            ]
         );
         let added: Value = serde_json::from_str(&outs[0].data).unwrap();
         assert_eq!(added["item"]["type"], "function_call");
         assert_eq!(added["item"]["call_id"], "c1");
         assert_eq!(added["output_index"], 0);
 
-        let outs = c.push(&sse(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}"#));
+        let outs = c.push(&sse(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}"#,
+        ));
         let delta: Value = serde_json::from_str(&outs[0].data).unwrap();
         assert_eq!(delta["delta"], "1}");
 
         let outs = c.push(&sse("[DONE]"));
         assert_eq!(
             out_types(&outs),
-            vec!["response.function_call_arguments.done", "response.output_item.done", "response.completed"]
+            vec![
+                "response.function_call_arguments.done",
+                "response.output_item.done",
+                "response.completed"
+            ]
         );
         let completed: Value = serde_json::from_str(&outs[2].data).unwrap();
         assert_eq!(completed["response"]["output"][0]["type"], "function_call");
@@ -878,7 +961,12 @@ mod tests {
         let outs = c.finish();
         assert_eq!(
             out_types(&outs),
-            vec!["response.output_text.done", "response.content_part.done", "response.output_item.done", "response.completed"]
+            vec![
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.completed"
+            ]
         );
     }
 
@@ -888,7 +976,9 @@ mod tests {
     fn stream_openai_error_chunk_to_anthropic_error_event() {
         // 中转上游 HTTP 200 + SSE 流内错误帧:不得先 message_start 再正常收尾
         let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "m");
-        let outs = c.push(&sse(r#"{"error":{"message":"boom","type":"server_error"}}"#));
+        let outs = c.push(&sse(
+            r#"{"error":{"message":"boom","type":"server_error"}}"#,
+        ));
         assert_eq!(out_types(&outs), vec!["error"]);
         assert_eq!(outs[0].event.as_deref(), Some("error"));
         let v: Value = serde_json::from_str(&outs[0].data).unwrap();
@@ -898,7 +988,10 @@ mod tests {
         assert_eq!(v["error"]["message"], "boom");
 
         // 后续正常帧被忽略;[DONE]/finish 不再产出 message_stop
-        assert!(c.push(&sse(r#"{"choices":[{"delta":{"content":"x"}}]}"#)).is_empty());
+        assert!(
+            c.push(&sse(r#"{"choices":[{"delta":{"content":"x"}}]}"#))
+                .is_empty()
+        );
         assert!(c.push(&sse("[DONE]")).is_empty());
         assert!(c.finish().is_empty());
     }
@@ -907,9 +1000,13 @@ mod tests {
     fn stream_openai_error_chunk_mid_stream_to_anthropic() {
         // 流中途出错:已 message_start,错误事件后不再 message_delta/message_stop
         let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "m");
-        let outs = c.push(&sse(r#"{"id":"c1","choices":[{"delta":{"content":"Hel"}}]}"#));
+        let outs = c.push(&sse(
+            r#"{"id":"c1","choices":[{"delta":{"content":"Hel"}}]}"#,
+        ));
         assert!(out_types(&outs).contains(&"message_start".to_string()));
-        let outs = c.push(&sse(r#"{"error":{"message":"mid boom","type":"server_error"}}"#));
+        let outs = c.push(&sse(
+            r#"{"error":{"message":"mid boom","type":"server_error"}}"#,
+        ));
         assert_eq!(out_types(&outs), vec!["error"]);
         assert!(c.push(&sse("[DONE]")).is_empty());
     }
@@ -917,7 +1014,9 @@ mod tests {
     #[test]
     fn stream_openai_error_chunk_to_responses_error_event() {
         let mut c = StreamConverter::new(Protocol::Responses, Protocol::OpenAi, "m");
-        let outs = c.push(&sse(r#"{"error":{"message":"boom","type":"server_error"}}"#));
+        let outs = c.push(&sse(
+            r#"{"error":{"message":"boom","type":"server_error"}}"#,
+        ));
         // 无 response.created/in_progress
         assert_eq!(out_types(&outs), vec!["error"]);
         let v: Value = serde_json::from_str(&outs[0].data).unwrap();
@@ -934,11 +1033,16 @@ mod tests {
     fn stream_openai_to_responses_incomplete_on_length() {
         let mut c = StreamConverter::new(Protocol::Responses, Protocol::OpenAi, "m");
         c.push(&sse(r#"{"choices":[{"delta":{"content":"partial"}}]}"#));
-        c.push(&sse(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#));
+        c.push(&sse(
+            r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+        ));
         let outs = c.push(&sse("[DONE]"));
         let last: Value = serde_json::from_str(&outs.last().unwrap().data).unwrap();
         assert_eq!(last["type"], "response.incomplete");
-        assert_eq!(outs.last().unwrap().event.as_deref(), Some("response.incomplete"));
+        assert_eq!(
+            outs.last().unwrap().event.as_deref(),
+            Some("response.incomplete")
+        );
         assert_eq!(last["response"]["status"], "incomplete");
         assert_eq!(
             last["response"]["incomplete_details"]["reason"],

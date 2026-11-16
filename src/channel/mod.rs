@@ -11,4 +11,4 @@ pub mod model_test;
 pub mod selector;
 pub mod transport;
 
-pub use adapter::{adapter_for, registry, ChannelAdapter};
+pub use adapter::{ChannelAdapter, adapter_for, registry};

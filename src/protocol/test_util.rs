@@ -5,11 +5,17 @@ use serde_json::Value;
 use crate::protocol::{SseEvent, SseOut};
 
 pub(crate) fn sse(data: &str) -> SseEvent {
-    SseEvent { event: None, data: data.to_string() }
+    SseEvent {
+        event: None,
+        data: data.to_string(),
+    }
 }
 
 pub(crate) fn sse_typed(event: &str, data: &str) -> SseEvent {
-    SseEvent { event: Some(event.to_string()), data: data.to_string() }
+    SseEvent {
+        event: Some(event.to_string()),
+        data: data.to_string(),
+    }
 }
 
 pub(crate) fn out_types(outs: &[SseOut]) -> Vec<String> {

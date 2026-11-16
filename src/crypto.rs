@@ -32,7 +32,12 @@ impl KeyCipher {
     /// 部署入口:优先独立的 AIKUN_ENCRYPTION_KEY;未设置时回退为
     /// SHA-256(jwt_secret) 派生,与既有部署的密文保持兼容。
     pub fn from_config(config: &crate::config::AppConfig) -> Self {
-        Self::from_secret(config.encryption_key.as_deref().unwrap_or(&config.jwt_secret))
+        Self::from_secret(
+            config
+                .encryption_key
+                .as_deref()
+                .unwrap_or(&config.jwt_secret),
+        )
     }
 
     pub fn encrypt(&self, plaintext: &str) -> String {
@@ -113,7 +118,10 @@ mod tests {
     fn corrupted_ciphertext_fails_closed() {
         let c = KeyCipher::from_secret("s");
         assert_eq!(c.decrypt("enc:v1:not-valid-base64!!"), None);
-        assert_eq!(c.decrypt(&format!("{}{}", ENC_PREFIX, B64.encode([1u8, 2, 3]))), None);
+        assert_eq!(
+            c.decrypt(&format!("{}{}", ENC_PREFIX, B64.encode([1u8, 2, 3]))),
+            None
+        );
     }
 
     #[test]

@@ -1,15 +1,15 @@
+use crate::AppState;
+use crate::auth::Claims;
+use crate::models::{RequestLog, RequestLogResponse};
 use axum::{
+    Json,
     extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::json;
-use crate::auth::Claims;
-use crate::AppState;
-use crate::models::{RequestLog, RequestLogResponse};
 
 #[derive(Debug, Deserialize)]
 pub struct LogQuery {
@@ -37,10 +37,13 @@ fn build_log_filters(
         Some("0") => Some(0),
         Some("1") => Some(1),
         Some(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_success",
-                "message": "success 仅接受 0 或 1"
-            }))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_success",
+                    "message": "success 仅接受 0 或 1"
+                })),
+            ));
         }
     };
 
@@ -51,29 +54,28 @@ fn build_log_filters(
         conditions.push("l.user_id = ?");
         params.push(Box::new(caller_uid.to_string()));
     }
-    if let Some(ref model) = query.model {
-        if !model.is_empty() {
-            conditions.push("l.model = ?");
-            params.push(Box::new(model.clone()));
-        }
+    if let Some(ref model) = query.model
+        && !model.is_empty()
+    {
+        conditions.push("l.model = ?");
+        params.push(Box::new(model.clone()));
     }
     if let Some(s) = success_filter {
         conditions.push("l.success = ?");
         params.push(Box::new(s));
     }
-    if is_admin {
-        if let Some(ref uid) = query.user_id {
-            if !uid.is_empty() {
-                conditions.push("l.user_id = ?");
-                params.push(Box::new(uid.clone()));
-            }
-        }
+    if is_admin
+        && let Some(ref uid) = query.user_id
+        && !uid.is_empty()
+    {
+        conditions.push("l.user_id = ?");
+        params.push(Box::new(uid.clone()));
     }
-    if let Some(ref since) = query.since {
-        if !since.is_empty() {
-            conditions.push("l.created_at >= ?");
-            params.push(Box::new(since.clone()));
-        }
+    if let Some(ref since) = query.since
+        && !since.is_empty()
+    {
+        conditions.push("l.created_at >= ?");
+        params.push(Box::new(since.clone()));
     }
 
     let where_clause = if conditions.is_empty() {
@@ -92,7 +94,12 @@ pub async fn list_logs(
 ) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
 
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
@@ -128,10 +135,13 @@ pub async fn list_logs(
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to prepare log query: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": "query_failed",
-                "message": "Internal server error"
-            })));
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "query_failed",
+                    "message": "Internal server error"
+                })),
+            );
         }
     };
 
@@ -160,24 +170,29 @@ pub async fn list_logs(
             row.get::<_, Option<String>>(17)?,
         ))
     }) {
-        Ok(rows) => rows.filter_map(|r| match r {
-            Ok((log, username, provider_name)) => {
-                let mut resp = RequestLogResponse::from(log);
-                resp.username = username;
-                resp.provider_name = provider_name;
-                Some(resp)
-            }
-            Err(e) => {
-                tracing::warn!("Skipping malformed request log row: {}", e);
-                None
-            }
-        }).collect(),
+        Ok(rows) => rows
+            .filter_map(|r| match r {
+                Ok((log, username, provider_name)) => {
+                    let mut resp = RequestLogResponse::from(log);
+                    resp.username = username;
+                    resp.provider_name = provider_name;
+                    Some(resp)
+                }
+                Err(e) => {
+                    tracing::warn!("Skipping malformed request log row: {}", e);
+                    None
+                }
+            })
+            .collect(),
         Err(e) => {
             tracing::error!("Failed to query logs: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": "query_failed",
-                "message": "Internal server error"
-            })));
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "query_failed",
+                    "message": "Internal server error"
+                })),
+            );
         }
     };
 
@@ -194,7 +209,13 @@ pub async fn log_stats(
 ) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            )
+                .into_response();
+        }
     };
 
     let is_admin = claims.role == "admin";
@@ -226,21 +247,29 @@ pub async fn log_stats(
 
     match result {
         Ok((total_requests, total_tokens, avg_latency, success_rate, total_cost)) => {
-            (StatusCode::OK, Json(json!({
-                "total_requests": total_requests,
-                "total_tokens": total_tokens,
-                "avg_latency_ms": avg_latency.round() as i64,
-                "success_rate": (success_rate * 100.0).round() / 100.0,
-                // 微元合计 → 元(微元口径在 f64 下精确)
-                "total_cost": crate::billing::micro_to_yuan(total_cost)
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "total_requests": total_requests,
+                    "total_tokens": total_tokens,
+                    "avg_latency_ms": avg_latency.round() as i64,
+                    "success_rate": (success_rate * 100.0).round() / 100.0,
+                    // 微元合计 → 元(微元口径在 f64 下精确)
+                    "total_cost": crate::billing::micro_to_yuan(total_cost)
+                })),
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::error!("Failed to query log stats: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": "query_failed",
-                "message": "Internal server error"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "query_failed",
+                    "message": "Internal server error"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -248,12 +277,16 @@ pub async fn log_stats(
 /// Admin-only usage aggregation for the dashboard: today / last-7d / last-30d
 /// totals, a 30-day daily series (missing days zero-filled), and the top
 /// models by request count over the same 30 days.
-pub async fn usage_stats(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn usage_stats(State(state): State<AppState>) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            )
+                .into_response();
+        }
     };
 
     // created_at 前 10 位即 YYYY-MM-DD(RFC3339 与 SQLite datetime 格式通用),
@@ -326,18 +359,27 @@ pub async fn usage_stats(
             .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
         });
 
-    let (Ok((month_req, month_tok, today_req, today_tok, week_req, week_tok)), Ok(daily_rows), Ok(model_rows)) =
-        (totals, daily_rows, model_rows)
+    let (
+        Ok((month_req, month_tok, today_req, today_tok, week_req, week_tok)),
+        Ok(daily_rows),
+        Ok(model_rows),
+    ) = (totals, daily_rows, model_rows)
     else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-            "error": "query_failed",
-            "message": "Internal server error"
-        }))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": "query_failed",
+                "message": "Internal server error"
+            })),
+        )
+            .into_response();
     };
 
     // 补齐缺失日期为 0,保证图表是完整的 30 天序列
-    let daily_map: std::collections::HashMap<String, (i64, i64, f64, f64)> =
-        daily_rows.into_iter().map(|(d, r, t, lat, sr)| (d, (r, t, lat, sr))).collect();
+    let daily_map: std::collections::HashMap<String, (i64, i64, f64, f64)> = daily_rows
+        .into_iter()
+        .map(|(d, r, t, lat, sr)| (d, (r, t, lat, sr)))
+        .collect();
     let daily: Vec<serde_json::Value> = (0..30)
         .map(|i| {
             let d = fmt(today - chrono::Duration::days(29 - i));
@@ -354,30 +396,40 @@ pub async fn usage_stats(
 
     let top_models: Vec<serde_json::Value> = model_rows
         .into_iter()
-        .map(|(model, requests, tokens)| json!({
-            "model": model,
-            "requests": requests,
-            "tokens": tokens,
-        }))
+        .map(|(model, requests, tokens)| {
+            json!({
+                "model": model,
+                "requests": requests,
+                "tokens": tokens,
+            })
+        })
         .collect();
 
-    (StatusCode::OK, Json(json!({
-        "today": {"requests": today_req, "tokens": today_tok},
-        "week": {"requests": week_req, "tokens": week_tok},
-        "month": {"requests": month_req, "tokens": month_tok},
-        "daily": daily,
-        "top_models": top_models,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "today": {"requests": today_req, "tokens": today_tok},
+            "week": {"requests": week_req, "tokens": week_tok},
+            "month": {"requests": month_req, "tokens": month_tok},
+            "daily": daily,
+            "top_models": top_models,
+        })),
+    )
+        .into_response()
 }
 
 /// 管理员仪表盘全局计数:全系统 api_keys / users / providers 总数与
 /// 今日请求数(按 created_at 日期前缀对齐当天,与 usage_stats 同口径)。
-pub async fn admin_stats(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn admin_stats(State(state): State<AppState>) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            )
+                .into_response();
+        }
     };
 
     let result = conn.query_row(
@@ -397,20 +449,26 @@ pub async fn admin_stats(
     );
 
     match result {
-        Ok((api_keys, users, providers, requests_today)) => {
-            (StatusCode::OK, Json(json!({
+        Ok((api_keys, users, providers, requests_today)) => (
+            StatusCode::OK,
+            Json(json!({
                 "api_keys": api_keys,
                 "users": users,
                 "providers": providers,
                 "requests_today": requests_today,
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Failed to query admin stats: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": "query_failed",
-                "message": "Internal server error"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "query_failed",
+                    "message": "Internal server error"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -441,18 +499,26 @@ pub(crate) fn wallet_daily(
          GROUP BY d ORDER BY d",
     )?;
     let rows = stmt.query_map(params![user_id, since], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
     })?;
     rows.collect()
 }
 
-pub async fn wallet_stats(
-    State(state): State<AppState>,
-    claims: Claims,
-) -> impl IntoResponse {
+pub async fn wallet_stats(State(state): State<AppState>, claims: Claims) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            )
+                .into_response();
+        }
     };
 
     let uid = &claims.sub;
@@ -493,10 +559,14 @@ pub async fn wallet_stats(
         });
 
     let (Ok(balance), Ok(daily_rows), Ok(model_rows)) = (balance, daily_rows, model_rows) else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-            "error": "query_failed",
-            "message": "Internal server error"
-        }))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": "query_failed",
+                "message": "Internal server error"
+            })),
+        )
+            .into_response();
     };
     let (mut month_cost, mut month_tok, mut month_req) = (0i64, 0i64, 0i64);
     let (mut week_cost, mut week_req, mut today_cost, mut today_req) = (0i64, 0i64, 0i64, 0i64);
@@ -515,8 +585,10 @@ pub async fn wallet_stats(
     }
 
     // 补齐缺失日期为 0,保证图表是完整的 30 天序列
-    let daily_map: std::collections::HashMap<String, (i64, i64, i64)> =
-        daily_rows.into_iter().map(|(d, c, t, r)| (d, (c, t, r))).collect();
+    let daily_map: std::collections::HashMap<String, (i64, i64, i64)> = daily_rows
+        .into_iter()
+        .map(|(d, c, t, r)| (d, (c, t, r)))
+        .collect();
     let daily: Vec<serde_json::Value> = (0..30)
         .map(|i| {
             let d = fmt(today - chrono::Duration::days(29 - i));
@@ -532,22 +604,28 @@ pub async fn wallet_stats(
 
     let top_models: Vec<serde_json::Value> = model_rows
         .into_iter()
-        .map(|(model, cost, requests)| json!({
-            "model": model,
-            "cost": crate::billing::micro_to_yuan(cost),
-            "requests": requests,
-        }))
+        .map(|(model, cost, requests)| {
+            json!({
+                "model": model,
+                "cost": crate::billing::micro_to_yuan(cost),
+                "requests": requests,
+            })
+        })
         .collect();
 
     let yuan = crate::billing::micro_to_yuan;
-    (StatusCode::OK, Json(json!({
-        "balance": yuan(balance),
-        "today": {"cost": yuan(today_cost), "requests": today_req},
-        "week": {"cost": yuan(week_cost), "requests": week_req},
-        "month": {"cost": yuan(month_cost), "requests": month_req, "tokens": month_tok},
-        "daily": daily,
-        "top_models": top_models,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "balance": yuan(balance),
+            "today": {"cost": yuan(today_cost), "requests": today_req},
+            "week": {"cost": yuan(week_cost), "requests": week_req},
+            "month": {"cost": yuan(month_cost), "requests": month_req, "tokens": month_tok},
+            "daily": daily,
+            "top_models": top_models,
+        })),
+    )
+        .into_response()
 }
 #[cfg(test)]
 mod tests {
@@ -558,13 +636,20 @@ mod tests {
     fn wallet_daily_survives_log_purge() {
         // 回归(bug ②):明细被保留期清理(聚合进 usage_daily)后,钱包每日
         // 序列与合计不能变少;部分清理的日期也不能重复计数。
-        let config = crate::config::AppConfig { database_url: ":memory:".into(), ..Default::default() };
+        let config = crate::config::AppConfig {
+            database_url: ":memory:".into(),
+            ..Default::default()
+        };
         let pool = Arc::new(crate::db::DbPool::new(&config).unwrap());
         let now = chrono::Utc::now();
         let day = |n: i64| now - chrono::Duration::days(n);
         {
             let conn = pool.conn.lock().unwrap();
-            conn.execute("INSERT INTO users (id, username, password_hash) VALUES ('u1', 'u1', 'h')", []).unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash) VALUES ('u1', 'u1', 'h')",
+                [],
+            )
+            .unwrap();
             let mut i = 0;
             let mut insert = |ts: chrono::DateTime<chrono::Utc>, tokens: i64, cost: i64| {
                 i += 1;
@@ -580,7 +665,9 @@ mod tests {
             insert(day(10), 50, 5_000);
             insert(now, 10, 1_000);
         }
-        let since = (now - chrono::Duration::days(29)).format("%Y-%m-%d").to_string();
+        let since = (now - chrono::Duration::days(29))
+            .format("%Y-%m-%d")
+            .to_string();
         let read = || {
             let conn = pool.conn.lock().unwrap();
             wallet_daily(&conn, "u1", &since).unwrap()

@@ -1,19 +1,21 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::auth::{create_token, hash_api_key, hash_password, parse_expiry, verify_password, Claims};
 use crate::AppState;
+use crate::auth::{
+    Claims, create_token, hash_api_key, hash_password, parse_expiry, verify_password,
+};
 use crate::models::{
-    row_to_user, ApiKey, ApiKeyResponse, CreateApiKeyRequest, LoginRequest, LoginResponse,
-    UpdateApiKeyRequest, UserResponse,
+    ApiKey, ApiKeyResponse, CreateApiKeyRequest, LoginRequest, LoginResponse, UpdateApiKeyRequest,
+    UserResponse, row_to_user,
 };
 
 /// A valid Argon2 hash used to equalize response timing when the requested
@@ -46,7 +48,10 @@ const MAX_FAILS_PER_IP: usize = 30;
 fn lock_login_attempts(
     state: &AppState,
 ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<std::time::Instant>>> {
-    state.login_attempts.lock().unwrap_or_else(|e| e.into_inner())
+    state
+        .login_attempts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// True if either key has exhausted its failure budget within the window.
@@ -59,8 +64,12 @@ fn login_limited(state: &AppState, keys: &[String]) -> bool {
         !v.is_empty()
     });
     keys.iter().any(|k| {
-        let limit = if k.starts_with("ip:") { MAX_FAILS_PER_IP } else { MAX_FAILS_PER_USER };
-        attempts.get(k).map_or(false, |v| v.len() >= limit)
+        let limit = if k.starts_with("ip:") {
+            MAX_FAILS_PER_IP
+        } else {
+            MAX_FAILS_PER_USER
+        };
+        attempts.get(k).is_some_and(|v| v.len() >= limit)
     })
 }
 
@@ -81,17 +90,20 @@ fn clear_login_failures(state: &AppState, keys: &[String]) {
 
 /// 登录限流用的客户端 IP:配置开启 trust_x_forwarded_for 时取
 /// X-Forwarded-For 首个 IP(部署在可信反代之后),否则用对端 socket 地址。
-fn client_ip(headers: &axum::http::HeaderMap, addr: &std::net::SocketAddr, trust_xff: bool) -> String {
-    if trust_xff {
-        if let Some(first) = headers
+fn client_ip(
+    headers: &axum::http::HeaderMap,
+    addr: &std::net::SocketAddr,
+    trust_xff: bool,
+) -> String {
+    if trust_xff
+        && let Some(first) = headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.split(',').next())
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-        {
-            return first.to_string();
-        }
+    {
+        return first.to_string();
     }
     addr.ip().to_string()
 }
@@ -103,12 +115,21 @@ pub async fn login(
     Json(req): Json<LoginRequest>,
 ) -> impl IntoResponse {
     let user_key = format!("user:{}", req.username.to_lowercase());
-    let limit_keys = [format!("ip:{}", client_ip(&headers, &addr, state.config.trust_x_forwarded_for)), user_key.clone()];
+    let limit_keys = [
+        format!(
+            "ip:{}",
+            client_ip(&headers, &addr, state.config.trust_x_forwarded_for)
+        ),
+        user_key.clone(),
+    ];
     if login_limited(&state, &limit_keys) {
-        return (StatusCode::TOO_MANY_REQUESTS, Json(json!({
-            "error": "too_many_attempts",
-            "message": "Too many failed login attempts, try again later"
-        })));
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({
+                "error": "too_many_attempts",
+                "message": "Too many failed login attempts, try again later"
+            })),
+        );
     }
 
     // Look up the user inside the lock; password verification happens outside.
@@ -116,9 +137,12 @@ pub async fn login(
         let conn = match state.pool.read().lock() {
             Ok(c) => c,
             Err(_) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                    "error": "internal_error"
-                })))
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "internal_error"
+                    })),
+                );
             }
         };
         conn.query_row(
@@ -154,32 +178,47 @@ pub async fn login(
 
     if !password_ok {
         record_login_failure(&state, &limit_keys);
-        return (StatusCode::UNAUTHORIZED, Json(json!({
-            "error": "invalid_credentials",
-            "message": "Invalid username or password"
-        })));
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "error": "invalid_credentials",
+                "message": "Invalid username or password"
+            })),
+        );
     }
 
     let (user, token_version) = match user {
         Some(u) => u,
         None => {
-            return (StatusCode::UNAUTHORIZED, Json(json!({
-                "error": "invalid_credentials",
-                "message": "Invalid username or password"
-            })))
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "error": "invalid_credentials",
+                    "message": "Invalid username or password"
+                })),
+            );
         }
     };
 
     // Check account status only after the password has passed, so disabled
     // state cannot be probed without valid credentials.
     if !user.is_active {
-        return (StatusCode::FORBIDDEN, Json(json!({
-            "error": "account_disabled",
-            "message": "This account has been disabled"
-        })));
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "account_disabled",
+                "message": "This account has been disabled"
+            })),
+        );
     }
 
-    match create_token(&user.id, &user.username, &user.role, token_version, &state.config) {
+    match create_token(
+        &user.id,
+        &user.username,
+        &user.role,
+        token_version,
+        &state.config,
+    ) {
         Ok(token) => {
             // 只清该用户的失败记录;ip: 键保留,防止借成功登录重置 IP 限额。
             clear_login_failures(&state, &[user_key]);
@@ -189,19 +228,24 @@ pub async fn login(
             };
             (StatusCode::OK, Json(json!(resp)))
         }
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-            "error": "token_creation_failed"
-        }))),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": "token_creation_failed"
+            })),
+        ),
     }
 }
 
-pub async fn get_current_user(
-    State(state): State<AppState>,
-    claims: Claims,
-) -> impl IntoResponse {
+pub async fn get_current_user(State(state): State<AppState>, claims: Claims) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
 
     let user = conn.query_row(
@@ -215,12 +259,14 @@ pub async fn get_current_user(
         // 余额对本人可见(只读):扣费是实时发生的,用户需要能自查。
         // 库存整数微元,出参转元。
         Ok((u, balance)) => {
-            let mut v = serde_json::to_value(UserResponse::from(u))
-                .unwrap_or_else(|_| json!({}));
+            let mut v = serde_json::to_value(UserResponse::from(u)).unwrap_or_else(|_| json!({}));
             v["balance"] = json!(crate::billing::micro_to_yuan(balance));
             (StatusCode::OK, Json(v))
         }
-        Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "user_not_found"}))),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "user_not_found"})),
+        ),
     }
 }
 
@@ -235,17 +281,25 @@ pub async fn create_api_key(
         match parse_expiry(exp) {
             Some(t) if t > chrono::Utc::now() => {}
             _ => {
-                return (StatusCode::BAD_REQUEST, Json(json!({
-                    "error": "invalid_expires_at",
-                    "message": "expires_at is not a valid future timestamp"
-                })))
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "invalid_expires_at",
+                        "message": "expires_at is not a valid future timestamp"
+                    })),
+                );
             }
         }
     }
 
     let conn = match state.pool.conn.lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
 
     let id = Uuid::new_v4().to_string();
@@ -261,8 +315,8 @@ pub async fn create_api_key(
         .rev()
         .collect();
     let name = req.name.unwrap_or_default();
-    let models_json = serde_json::to_string(&req.models.unwrap_or_default())
-        .unwrap_or_else(|_| "[]".to_string());
+    let models_json =
+        serde_json::to_string(&req.models.unwrap_or_default()).unwrap_or_else(|_| "[]".to_string());
     let rate_limit_rpm = req.rate_limit_rpm.unwrap_or(0).max(0);
     let quota_daily_tokens = req.quota_daily_tokens.unwrap_or(0).max(0);
     let max_concurrent = req.max_concurrent.unwrap_or(0).max(0);
@@ -307,7 +361,12 @@ pub async fn list_api_keys(
 ) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
 
     // admin 带 ?user_id= 时查看指定用户的 key(后台跨用户管理);不带则与
@@ -324,42 +383,50 @@ pub async fn list_api_keys(
     let mut stmt = match conn.prepare(
         "SELECT id, user_id, key_suffix, name, is_active, last_used_at, expires_at, models,
                 rate_limit_rpm, quota_daily_tokens, max_concurrent, created_at
-         FROM api_keys WHERE user_id = ?1"
+         FROM api_keys WHERE user_id = ?1",
     ) {
         Ok(s) => s,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "query_failed"})),
+            );
+        }
     };
 
     let keys: Vec<ApiKeyResponse> = match stmt.query_map(params![target_uid], |row| {
-            Ok(ApiKey {
-                id: row.get(0)?,
-                user_id: row.get(1)?,
-                key: row.get(2)?,
-                name: row.get(3)?,
-                is_active: row.get(4)?,
-                last_used_at: row.get(5)?,
-                expires_at: row.get(6)?,
-                models: row.get(7)?,
-                rate_limit_rpm: row.get(8)?,
-                quota_daily_tokens: row.get(9)?,
-                max_concurrent: row.get(10)?,
-                created_at: row.get(11)?,
+        Ok(ApiKey {
+            id: row.get(0)?,
+            user_id: row.get(1)?,
+            key: row.get(2)?,
+            name: row.get(3)?,
+            is_active: row.get(4)?,
+            last_used_at: row.get(5)?,
+            expires_at: row.get(6)?,
+            models: row.get(7)?,
+            rate_limit_rpm: row.get(8)?,
+            quota_daily_tokens: row.get(9)?,
+            max_concurrent: row.get(10)?,
+            created_at: row.get(11)?,
+        })
+    }) {
+        Ok(rows) => rows
+            .filter_map(|r| r.ok())
+            .map(ApiKeyResponse::from)
+            .map(|mut k| {
+                // Never expose the full key in list responses — the `key`
+                // field here carries key_suffix, not the stored hash.
+                k.key = mask_api_key(&k.key);
+                k
             })
-        }) {
-            Ok(rows) => rows
-                .filter_map(|r| r.ok())
-                .map(ApiKeyResponse::from)
-                .map(|mut k| {
-                    // Never expose the full key in list responses — the `key`
-                    // field here carries key_suffix, not the stored hash.
-                    k.key = mask_api_key(&k.key);
-                    k
-                })
-                .collect(),
-            Err(_) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})))
-            }
-        };
+            .collect(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "query_failed"})),
+            );
+        }
+    };
 
     (StatusCode::OK, Json(json!(keys)))
 }
@@ -380,10 +447,13 @@ pub async fn update_api_key(
             match parse_expiry(exp) {
                 Some(t) if t > chrono::Utc::now() => {}
                 _ => {
-                    return (StatusCode::BAD_REQUEST, Json(json!({
-                        "error": "invalid_expires_at",
-                        "message": "expires_at is not a valid future timestamp"
-                    })))
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "invalid_expires_at",
+                            "message": "expires_at is not a valid future timestamp"
+                        })),
+                    );
                 }
             }
         }
@@ -391,7 +461,12 @@ pub async fn update_api_key(
 
     let conn = match state.pool.conn.lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
 
     let mut updates = Vec::new();
@@ -408,7 +483,11 @@ pub async fn update_api_key(
     if let Some(exp) = &req.expires_at {
         updates.push("expires_at = ?");
         // Empty string clears the expiry.
-        params_vec.push(Box::new(if exp.trim().is_empty() { None } else { Some(exp.clone()) }));
+        params_vec.push(Box::new(if exp.trim().is_empty() {
+            None
+        } else {
+            Some(exp.clone())
+        }));
     }
     if let Some(models) = &req.models {
         updates.push("models = ?");
@@ -430,7 +509,10 @@ pub async fn update_api_key(
     }
 
     if updates.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": "no_fields_to_update"})));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "no_fields_to_update"})),
+        );
     }
 
     let is_admin = claims.role == "admin";
@@ -442,7 +524,8 @@ pub async fn update_api_key(
             updates.join(", ")
         )
     };
-    let mut params: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut params: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|p| p.as_ref()).collect();
     params.push(&key_id);
     if !is_admin {
         params.push(&claims.sub);
@@ -453,10 +536,13 @@ pub async fn update_api_key(
         Ok(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
         Err(e) => {
             tracing::error!("Failed to update API key: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": "update_failed",
-                "message": "Internal server error"
-            })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "update_failed",
+                    "message": "Internal server error"
+                })),
+            )
         }
     }
 }
@@ -468,7 +554,12 @@ pub async fn delete_api_key(
 ) -> impl IntoResponse {
     let conn = match state.pool.conn.lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
 
     match if claims.role == "admin" {
@@ -491,10 +582,13 @@ pub async fn delete_api_key(
         Ok(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
         Err(e) => {
             tracing::error!("Failed to delete API key: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": "internal_error",
-                "message": "Internal server error"
-            })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "internal_error",
+                    "message": "Internal server error"
+                })),
+            )
         }
     }
 }

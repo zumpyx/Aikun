@@ -9,23 +9,21 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    http::StatusCode,
-    response::{
-        IntoResponse, Response,
-    },
     Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, warn};
 
+use crate::AppState;
 use crate::auth::{AuthContext, Claims};
 use crate::billing::ledger::spawn_request_log;
-use crate::pipeline::admission::{enforce_key_limits, has_positive_balance, model_allowed};
-use crate::models::Provider;
-use crate::channel::transport::extract_model;
-use crate::protocol::{protocol_error, Protocol};
 use crate::channel::selector::spawn_record_failure;
-use crate::AppState;
+use crate::channel::transport::extract_model;
+use crate::models::Provider;
+use crate::pipeline::admission::{enforce_key_limits, has_positive_balance, model_allowed};
+use crate::protocol::{Protocol, protocol_error};
 
 pub mod admission;
 mod dispatch;
@@ -53,36 +51,60 @@ pub async fn proxy_completion(
     if model == "unknown" {
         // 缺 model 的 400 也写一条失败日志，保证审计完整
         spawn_request_log(
-            &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-            model.clone(), client_protocol.as_str(), 0, 0, 0, 0, 0, 400, false,
+            &state.pool,
+            claims.sub.clone(),
+            auth_ctx.api_key_id.clone(),
+            None,
+            model.clone(),
+            client_protocol.as_str(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            400,
+            false,
             Some("missing model in request body".to_string()),
         );
         return (
             StatusCode::BAD_REQUEST,
-            Json(protocol_error(client_protocol, "invalid_request_error", "Model field is required in request body")),
+            Json(protocol_error(
+                client_protocol,
+                "invalid_request_error",
+                "Model field is required in request body",
+            )),
         )
             .into_response();
     }
 
     // Enforce the API key's model whitelist (if any): exact match, or prefix
     // match when the entry ends with '*' (e.g. "claude-*" allows claude-*).
-    if auth_ctx.allowed_models.is_some() {
-        if !model_allowed(&auth_ctx.allowed_models, &model) {
-            spawn_request_log(
-                &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-                model.clone(), client_protocol.as_str(), 0, 0, 0, 0, 0, 403, false,
-                Some(format!("model '{}' not allowed for this API key", model)),
-            );
-            return (
-                StatusCode::FORBIDDEN,
-                Json(protocol_error(
-                    client_protocol,
-                    "model_not_allowed",
-                    &format!("Model '{}' is not allowed for this API key", model),
-                )),
-            )
-                .into_response();
-        }
+    if auth_ctx.allowed_models.is_some() && !model_allowed(&auth_ctx.allowed_models, &model) {
+        spawn_request_log(
+            &state.pool,
+            claims.sub.clone(),
+            auth_ctx.api_key_id.clone(),
+            None,
+            model.clone(),
+            client_protocol.as_str(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            403,
+            false,
+            Some(format!("model '{}' not allowed for this API key", model)),
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(protocol_error(
+                client_protocol,
+                "model_not_allowed",
+                &format!("Model '{}' is not allowed for this API key", model),
+            )),
+        )
+            .into_response();
     }
 
     // 余额预检:余额 <= 0 直接 402 拒绝。放在 key 限额检查之前:余额不足
@@ -93,8 +115,19 @@ pub async fn proxy_completion(
     if !has_positive_balance(&state, &claims.sub).await {
         let msg = "Insufficient balance: please top up before making more requests".to_string();
         spawn_request_log(
-            &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-            model.clone(), client_protocol.as_str(), 0, 0, 0, 0, 0, 402, false,
+            &state.pool,
+            claims.sub.clone(),
+            auth_ctx.api_key_id.clone(),
+            None,
+            model.clone(),
+            client_protocol.as_str(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            402,
+            false,
             Some(msg.clone()),
         );
         return (
@@ -111,8 +144,19 @@ pub async fn proxy_completion(
         match enforce_key_limits(&state, key_id).await {
             Err(msg) => {
                 spawn_request_log(
-                    &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-                    model.clone(), client_protocol.as_str(), 0, 0, 0, 0, 0, 429, false,
+                    &state.pool,
+                    claims.sub.clone(),
+                    auth_ctx.api_key_id.clone(),
+                    None,
+                    model.clone(),
+                    client_protocol.as_str(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    429,
+                    false,
                     Some(msg.clone()),
                 );
                 return (
@@ -129,8 +173,14 @@ pub async fn proxy_completion(
     // 高并发时不至于让 stdout 日志 I/O 成为瓶颈。
     debug!(
         "Proxy completion: protocol={} model={} user={}{}",
-        client_protocol, model, claims.username,
-        if auth_ctx.api_key_id.is_some() { " (api-key)" } else { "" }
+        client_protocol,
+        model,
+        claims.username,
+        if auth_ctx.api_key_id.is_some() {
+            " (api-key)"
+        } else {
+            ""
+        }
     );
 
     let is_stream = body["stream"].as_bool().unwrap_or(false);
@@ -138,19 +188,28 @@ pub async fn proxy_completion(
 
     // 响应缓存:准入(白名单 / 余额 / 限额)全部通过后才查缓存,命中时
     // 不触达任何上游,但照常记日志(按 AIKUN_CACHE_HIT_BILLING 计费)。
-    let cache_key = state.cache.key_for(client_protocol, &claims.sub, &body, headers);
-    if let Some(key) = &cache_key {
-        if let Some(hit) = state.cache.get(key).await {
-            debug!("Cache hit: protocol={} model={} user={}", client_protocol, model, claims.username);
-            crate::billing::ledger::record_cache_hit(
-                &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), model.clone(),
-                client_protocol.as_str(), hit.usage,
-                state.cache.hit_billing == crate::config::CacheHitBilling::Full,
-            )
-            .await;
-            drop(concurrency_guard);
-            return (StatusCode::OK, [(CACHE_HEADER, "HIT")], Json(hit.body)).into_response();
-        }
+    let cache_key = state
+        .cache
+        .key_for(client_protocol, &claims.sub, &body, headers);
+    if let Some(key) = &cache_key
+        && let Some(hit) = state.cache.get(key).await
+    {
+        debug!(
+            "Cache hit: protocol={} model={} user={}",
+            client_protocol, model, claims.username
+        );
+        crate::billing::ledger::record_cache_hit(
+            &state.pool,
+            claims.sub.clone(),
+            auth_ctx.api_key_id.clone(),
+            model.clone(),
+            client_protocol.as_str(),
+            hit.usage,
+            state.cache.hit_billing == crate::config::CacheHitBilling::Full,
+        )
+        .await;
+        drop(concurrency_guard);
+        return (StatusCode::OK, [(CACHE_HEADER, "HIT")], Json(hit.body)).into_response();
     }
 
     // 单次尝试的超时取全局与渠道级 timeout_secs 的较大者:渠道允许配到
@@ -181,9 +240,9 @@ pub async fn proxy_completion(
     // 重试循环外包整体超时：避免 max_attempts × 单渠道超时让一次请求挂数分钟，
     // 超时按 504 返回并写失败日志。下限 300s;若单次超时 × 尝试次数
     // 超过下限则随之放大,保证全局与渠道级超时配置都实际生效。
-    let overall_timeout = std::time::Duration::from_secs(300).max(
-        std::time::Duration::from_secs(max_attempts as u64 * per_attempt_secs + 15),
-    );
+    let overall_timeout = std::time::Duration::from_secs(300).max(std::time::Duration::from_secs(
+        max_attempts as u64 * per_attempt_secs + 15,
+    ));
 
     // 与 attempt_loop 共享的已尝试渠道(按选择顺序):整体 deadline 取消
     // 在途尝试时,对最后在试渠道补记一次失败——被取消的尝试不会走任何
@@ -193,9 +252,16 @@ pub async fn proxy_completion(
     match tokio::time::timeout(
         overall_timeout,
         dispatch::attempt_loop(
-            state.clone(), client_protocol, model.clone(), body, is_stream,
-            claims.sub.clone(), auth_ctx.api_key_id.clone(), tried_order.clone(),
-            concurrency_guard, cache_key,
+            state.clone(),
+            client_protocol,
+            model.clone(),
+            body,
+            is_stream,
+            claims.sub.clone(),
+            auth_ctx.api_key_id.clone(),
+            tried_order.clone(),
+            concurrency_guard,
+            cache_key,
         ),
     )
     .await
@@ -204,20 +270,39 @@ pub async fn proxy_completion(
         Err(_) => {
             warn!(
                 "Overall retry deadline ({}s) exceeded: model={} attempts={}",
-                overall_timeout.as_secs(), model, max_attempts
+                overall_timeout.as_secs(),
+                model,
+                max_attempts
             );
             let last_provider = tried_order.lock().ok().and_then(|t| t.last().cloned());
             if let Some(pid) = last_provider.clone() {
                 spawn_record_failure(
-                    state.pool.clone(), pid,
-                    req_start.elapsed().as_millis() as f64, 0,
-                    state.config.auto_disable_threshold, true,
+                    state.pool.clone(),
+                    pid,
+                    req_start.elapsed().as_millis() as f64,
+                    0,
+                    state.config.auto_disable_threshold,
+                    true,
                 );
             }
             spawn_request_log(
-                &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), last_provider,
-                model.clone(), client_protocol.as_str(), 0, 0, 0, 0, 0, 504, false,
-                Some(format!("overall timeout after {}s", overall_timeout.as_secs())),
+                &state.pool,
+                claims.sub.clone(),
+                auth_ctx.api_key_id.clone(),
+                last_provider,
+                model.clone(),
+                client_protocol.as_str(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                504,
+                false,
+                Some(format!(
+                    "overall timeout after {}s",
+                    overall_timeout.as_secs()
+                )),
             );
             (
                 StatusCode::GATEWAY_TIMEOUT,
@@ -237,11 +322,10 @@ pub(crate) fn apply_model_mapping(provider: &Provider, upstream_body: &mut Value
     if provider.model_mapping.is_empty() {
         return;
     }
-    let mapping: HashMap<String, String> =
-        match serde_json::from_str(&provider.model_mapping) {
-            Ok(m) => m,
-            Err(_) => return,
-        };
+    let mapping: HashMap<String, String> = match serde_json::from_str(&provider.model_mapping) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
     if mapping.is_empty() {
         return;
     }
@@ -323,7 +407,9 @@ mod tests {
 
     #[test]
     fn mapping_longest_prefix_wins() {
-        let p = provider_with_mapping(r#"{"gpt-": "short", "gpt-4o": "six-chars", "gpt-4": "five-chars"}"#);
+        let p = provider_with_mapping(
+            r#"{"gpt-": "short", "gpt-4o": "six-chars", "gpt-4": "five-chars"}"#,
+        );
         // "gpt-4o" (len 6) beats "gpt-4" (len 5) beats "gpt-" (len 4).
         let mut body = json!({"model": "gpt-4o-mini"});
         apply_model_mapping(&p, &mut body);

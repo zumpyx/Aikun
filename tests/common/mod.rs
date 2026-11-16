@@ -261,9 +261,7 @@ impl TestApp {
         app.wait_ready().await;
         // 全新库启动时会 seed 内置默认价格(见 billing::seed_default_prices);
         // 各用例自行维护价格数据,这里清空以保证隔离。
-        app.db()
-            .execute("DELETE FROM model_prices", [])
-            .unwrap();
+        app.db().execute("DELETE FROM model_prices", []).unwrap();
         app
     }
 
@@ -280,14 +278,10 @@ impl TestApp {
         let client = reqwest::Client::new();
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            if let Ok(r) = client
-                .get(format!("{}/api/health", self.base))
-                .send()
-                .await
+            if let Ok(r) = client.get(format!("{}/api/health", self.base)).send().await
+                && r.status().is_success()
             {
-                if r.status().is_success() {
-                    return;
-                }
+                return;
             }
             assert!(
                 Instant::now() < deadline,
@@ -424,11 +418,7 @@ pub fn admin_jwt() -> String {
 pub async fn wait_until(desc: &str, timeout: Duration, mut f: impl FnMut() -> bool) {
     let deadline = Instant::now() + timeout;
     while !f() {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for: {}",
-            desc
-        );
+        assert!(Instant::now() < deadline, "timed out waiting for: {}", desc);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }

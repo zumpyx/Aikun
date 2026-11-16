@@ -2,24 +2,23 @@ mod api;
 mod auth;
 mod billing;
 mod cache;
+mod channel;
 mod config;
 mod crypto;
 mod db;
 mod models;
 mod pipeline;
 mod protocol;
-mod channel;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::{
+    Json, Router,
     http::StatusCode,
     middleware,
     response::IntoResponse,
     routing::{delete, get, patch, post},
-    Router,
-    Json,
 };
 use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
@@ -47,7 +46,10 @@ const STATIC_ASSETS: &[(&str, &str)] = &[
     ("js/providers.js", include_str!("frontend/js/providers.js")),
     ("js/users.js", include_str!("frontend/js/users.js")),
     ("js/billing.js", include_str!("frontend/js/billing.js")),
-    ("js/redemption.js", include_str!("frontend/js/redemption.js")),
+    (
+        "js/redemption.js",
+        include_str!("frontend/js/redemption.js"),
+    ),
     ("js/keys.js", include_str!("frontend/js/keys.js")),
     ("js/models.js", include_str!("frontend/js/models.js")),
     ("js/test.js", include_str!("frontend/js/test.js")),
@@ -127,9 +129,7 @@ async fn main() {
             match crate::auth::hash_password(&new_password) {
                 Ok(hash) => match pool.conn.lock() {
                     Ok(conn) => match crate::db::reset_admin_password(&conn, &hash) {
-                        Ok(true) => info!(
-                            "管理员密码已通过环境变量重置,请尽快修改并移除该变量"
-                        ),
+                        Ok(true) => info!("管理员密码已通过环境变量重置,请尽快修改并移除该变量"),
                         Ok(false) => tracing::warn!(
                             "AIKUN_RESET_ADMIN_PASSWORD 已设置,但库中不存在 admin 用户"
                         ),
@@ -174,48 +174,123 @@ async fn main() {
         .route("/api/wallet", get(api::logs::wallet_stats))
         .route("/api/wallet/redeem", post(api::redemption::redeem_code))
         .route("/api/prices", get(api::admin::billing::list_public_prices))
-        .route("/v1/chat/completions", post(api::proxy::chat::chat_completion))
+        .route(
+            "/v1/chat/completions",
+            post(api::proxy::chat::chat_completion),
+        )
         .route("/v1/messages", post(api::proxy::messages::messages))
         .route("/v1/responses", post(api::proxy::responses::responses))
         .route("/v1/models", get(api::proxy::chat::list_models))
         // 其余 OpenAI 兼容端点的字节级透传(白名单见 passthrough.rs);
         // 通配路由排在显式路由之后,chat/messages/responses/models 不受影响。
         .route("/v1/{*path}", post(api::proxy::passthrough::passthrough))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
 
     // --- Admin routes (auth + admin role required) ---
     let admin_routes = Router::new()
         .route("/api/admin/users", get(api::admin::users::list_users))
         .route("/api/admin/users", post(api::admin::users::create_user))
-        .route("/api/admin/users/batch", post(api::admin::users::create_users_batch))
+        .route(
+            "/api/admin/users/batch",
+            post(api::admin::users::create_users_batch),
+        )
         .route("/api/admin/users/{id}", get(api::admin::users::get_user))
-        .route("/api/admin/users/{id}", patch(api::admin::users::update_user))
-        .route("/api/admin/users/{id}", delete(api::admin::users::delete_user))
-        .route("/api/admin/providers", get(api::admin::providers::list_providers))
-        .route("/api/admin/providers", post(api::admin::providers::create_provider))
-        .route("/api/admin/providers/batch", post(api::admin::providers::create_providers_batch))
-        .route("/api/admin/providers/fetch-models", post(api::admin::providers::fetch_upstream_models))
-        .route("/api/admin/providers/{id}", get(api::admin::providers::get_provider))
-        .route("/api/admin/providers/{id}", patch(api::admin::providers::update_provider))
-        .route("/api/admin/providers/{id}", delete(api::admin::providers::delete_provider))
-        .route("/api/admin/providers/{id}/test", post(api::admin::providers::test_provider))
-        .route("/api/admin/providers/{id}/test-model", post(api::admin::providers::test_provider_model))
-        .route("/api/admin/providers/{id}/duplicate", post(api::admin::providers::duplicate_provider))
-        .route("/api/admin/model-health", get(api::admin::providers::list_model_health))
-        .route("/api/admin/channel-kinds", get(api::admin::providers::list_channel_kinds))
+        .route(
+            "/api/admin/users/{id}",
+            patch(api::admin::users::update_user),
+        )
+        .route(
+            "/api/admin/users/{id}",
+            delete(api::admin::users::delete_user),
+        )
+        .route(
+            "/api/admin/providers",
+            get(api::admin::providers::list_providers),
+        )
+        .route(
+            "/api/admin/providers",
+            post(api::admin::providers::create_provider),
+        )
+        .route(
+            "/api/admin/providers/batch",
+            post(api::admin::providers::create_providers_batch),
+        )
+        .route(
+            "/api/admin/providers/fetch-models",
+            post(api::admin::providers::fetch_upstream_models),
+        )
+        .route(
+            "/api/admin/providers/{id}",
+            get(api::admin::providers::get_provider),
+        )
+        .route(
+            "/api/admin/providers/{id}",
+            patch(api::admin::providers::update_provider),
+        )
+        .route(
+            "/api/admin/providers/{id}",
+            delete(api::admin::providers::delete_provider),
+        )
+        .route(
+            "/api/admin/providers/{id}/test",
+            post(api::admin::providers::test_provider),
+        )
+        .route(
+            "/api/admin/providers/{id}/test-model",
+            post(api::admin::providers::test_provider_model),
+        )
+        .route(
+            "/api/admin/providers/{id}/duplicate",
+            post(api::admin::providers::duplicate_provider),
+        )
+        .route(
+            "/api/admin/model-health",
+            get(api::admin::providers::list_model_health),
+        )
+        .route(
+            "/api/admin/channel-kinds",
+            get(api::admin::providers::list_channel_kinds),
+        )
         .route("/api/admin/prices", get(api::admin::billing::list_prices))
         .route("/api/admin/prices", post(api::admin::billing::create_price))
-        .route("/api/admin/prices/{id}", patch(api::admin::billing::update_price))
-        .route("/api/admin/prices/{id}", delete(api::admin::billing::delete_price))
-        .route("/api/admin/users/{id}/balance", post(api::admin::billing::adjust_balance))
-        .route("/api/admin/billing/transactions", get(api::admin::billing::list_transactions))
-        .route("/api/admin/redemption-codes", get(api::redemption::list_redemption_codes))
-        .route("/api/admin/redemption-codes", post(api::redemption::create_redemption_codes))
-        .route("/api/admin/redemption-codes/{id}/disable", post(api::redemption::disable_redemption_code))
+        .route(
+            "/api/admin/prices/{id}",
+            patch(api::admin::billing::update_price),
+        )
+        .route(
+            "/api/admin/prices/{id}",
+            delete(api::admin::billing::delete_price),
+        )
+        .route(
+            "/api/admin/users/{id}/balance",
+            post(api::admin::billing::adjust_balance),
+        )
+        .route(
+            "/api/admin/billing/transactions",
+            get(api::admin::billing::list_transactions),
+        )
+        .route(
+            "/api/admin/redemption-codes",
+            get(api::redemption::list_redemption_codes),
+        )
+        .route(
+            "/api/admin/redemption-codes",
+            post(api::redemption::create_redemption_codes),
+        )
+        .route(
+            "/api/admin/redemption-codes/{id}/disable",
+            post(api::redemption::disable_redemption_code),
+        )
         .route("/api/admin/usage-stats", get(api::logs::usage_stats))
         .route("/api/admin/stats", get(api::logs::admin_stats))
         .layer(middleware::from_fn(require_admin))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
 
     // Spawn the health check background task under a supervisor: if the loop
     // ever panics or exits, log it and restart after a short backoff so
@@ -226,15 +301,18 @@ async fn main() {
     tokio::spawn(async move {
         use futures_util::FutureExt;
         loop {
-            let result = std::panic::AssertUnwindSafe(crate::channel::health::run_health_check_loop(
-                health_pool.clone(),
-                health_config.clone(),
-                health_clients.clone(),
-            ))
-            .catch_unwind()
-            .await;
+            let result =
+                std::panic::AssertUnwindSafe(crate::channel::health::run_health_check_loop(
+                    health_pool.clone(),
+                    health_config.clone(),
+                    health_clients.clone(),
+                ))
+                .catch_unwind()
+                .await;
             match result {
-                Ok(()) => tracing::error!("Health check loop exited unexpectedly — restarting in 5s"),
+                Ok(()) => {
+                    tracing::error!("Health check loop exited unexpectedly — restarting in 5s")
+                }
                 Err(_) => tracing::error!("Health check loop panicked — restarting in 5s"),
             }
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -247,12 +325,13 @@ async fn main() {
     tokio::spawn(async move {
         use futures_util::FutureExt;
         loop {
-            let result = std::panic::AssertUnwindSafe(crate::channel::model_test::run_model_test_loop(
-                model_test_pool.clone(),
-                model_test_clients.clone(),
-            ))
-            .catch_unwind()
-            .await;
+            let result =
+                std::panic::AssertUnwindSafe(crate::channel::model_test::run_model_test_loop(
+                    model_test_pool.clone(),
+                    model_test_clients.clone(),
+                ))
+                .catch_unwind()
+                .await;
             match result {
                 Ok(()) => tracing::error!("Model test loop exited unexpectedly — restarting in 5s"),
                 Err(_) => tracing::error!("Model test loop panicked — restarting in 5s"),
@@ -294,10 +373,13 @@ async fn main() {
         .expect("Failed to bind address");
 
     info!("Server listening on {}", config.host);
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal(shutdown_token))
-        .await
-        .expect("Server failed");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown_token))
+    .await
+    .expect("Server failed");
 }
 
 /// Resolve when a shutdown signal arrives: Ctrl-C (SIGINT) or SIGTERM (the
@@ -363,9 +445,7 @@ async fn serve_frontend() -> impl IntoResponse {
 
 /// Serve an embedded frontend asset by its /static/ path. 404 for anything
 /// not in the embedded table, so no filesystem access ever happens.
-async fn serve_static(
-    axum::extract::Path(path): axum::extract::Path<String>,
-) -> impl IntoResponse {
+async fn serve_static(axum::extract::Path(path): axum::extract::Path<String>) -> impl IntoResponse {
     let asset = STATIC_ASSETS.iter().find(|(name, _)| *name == path);
     match asset {
         Some((_, content)) => {

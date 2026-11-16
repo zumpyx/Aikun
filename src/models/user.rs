@@ -122,10 +122,10 @@ pub struct ApiKey {
     pub is_active: bool,
     pub last_used_at: Option<String>,
     pub expires_at: Option<String>,
-    pub models: String, // JSON array; empty = all models allowed
-    pub rate_limit_rpm: i64,      // 0 = unlimited
-    pub quota_daily_tokens: i64,  // 0 = unlimited
-    pub max_concurrent: i64,      // 并发在途请求上限,0 = unlimited
+    pub models: String,          // JSON array; empty = all models allowed
+    pub rate_limit_rpm: i64,     // 0 = unlimited
+    pub quota_daily_tokens: i64, // 0 = unlimited
+    pub max_concurrent: i64,     // 并发在途请求上限,0 = unlimited
     pub created_at: String,
 }
 

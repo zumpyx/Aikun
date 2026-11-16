@@ -1,6 +1,6 @@
 use argon2::{
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 
 pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
@@ -33,14 +33,14 @@ pub fn generate_random_password() -> String {
 }
 
 use axum::{
+    Json,
     extract::{FromRequestParts, Request, State},
-    http::request::Parts,
     http::StatusCode,
+    http::request::Parts,
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -51,8 +51,8 @@ pub fn hash_api_key(key: &str) -> String {
     format!("{:x}", Sha256::digest(key.as_bytes()))
 }
 
-use crate::config::AppConfig;
 use crate::AppState;
+use crate::config::AppConfig;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
@@ -106,7 +106,10 @@ pub fn create_token(
     )
 }
 
-pub fn validate_token(token: &str, config: &AppConfig) -> Result<Claims, jsonwebtoken::errors::Error> {
+pub fn validate_token(
+    token: &str,
+    config: &AppConfig,
+) -> Result<Claims, jsonwebtoken::errors::Error> {
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(config.jwt_secret.as_bytes()),
@@ -326,10 +329,14 @@ pub async fn auth_middleware(
                     req.extensions_mut().insert(ctx);
                     next.run(req).await
                 }
-                None => (StatusCode::UNAUTHORIZED, Json(json!({
-                    "error": "invalid_token",
-                    "message": "Invalid or expired token"
-                }))).into_response(),
+                None => (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": "invalid_token",
+                        "message": "Invalid or expired token"
+                    })),
+                )
+                    .into_response(),
             }
         }
         // Anthropic clients send the key as `x-api-key` instead of a Bearer
@@ -357,44 +364,49 @@ pub async fn auth_middleware(
                     req.extensions_mut().insert(ctx);
                     next.run(req).await
                 }
-                None => (StatusCode::UNAUTHORIZED, Json(json!({
-                    "error": "unauthorized",
-                    "message": "Missing or invalid Authorization header"
-                }))).into_response(),
+                None => (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": "unauthorized",
+                        "message": "Missing or invalid Authorization header"
+                    })),
+                )
+                    .into_response(),
             }
         }
-        _ => {
-            (StatusCode::UNAUTHORIZED, Json(json!({
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
                 "error": "unauthorized",
                 "message": "Missing or invalid Authorization header"
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
     }
 }
 
 /// Require admin role — run after auth middleware.
-pub async fn require_admin(
-    req: Request,
-    next: Next,
-) -> Response {
+pub async fn require_admin(req: Request, next: Next) -> Response {
     let claims = req.extensions().get::<Claims>();
 
     match claims {
-        Some(claims) if claims.role == "admin" => {
-            next.run(req).await
-        }
-        Some(_) => {
-            (StatusCode::FORBIDDEN, Json(json!({
+        Some(claims) if claims.role == "admin" => next.run(req).await,
+        Some(_) => (
+            StatusCode::FORBIDDEN,
+            Json(json!({
                 "error": "forbidden",
                 "message": "Admin access required"
-            }))).into_response()
-        }
-        None => {
-            (StatusCode::UNAUTHORIZED, Json(json!({
+            })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
                 "error": "unauthorized",
                 "message": "Authentication required"
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
     }
 }
 #[cfg(test)]

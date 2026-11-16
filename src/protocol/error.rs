@@ -1,9 +1,9 @@
 //! 面向客户端的错误形状:按客户端协议生成错误 JSON / 流内错误事件 / 流终止帧。
 //! roadmap-v0.5 阶段 1:从 pipeline 归位到协议层(纯数据变换,穷举 match)。
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::protocol::{anthropic_error_type, Protocol, SseOut};
+use crate::protocol::{Protocol, SseOut, anthropic_error_type};
 
 /// Build an error body in the client-facing protocol shape.
 pub fn protocol_error(client_protocol: Protocol, err_type: &str, message: &str) -> Value {
@@ -23,8 +23,12 @@ pub fn protocol_error(client_protocol: Protocol, err_type: &str, message: &str) 
 /// Convert an upstream error body to the client-facing protocol shape,
 /// preserving the original error message and type.
 pub fn convert_error(err_body: &Value, client_protocol: Protocol) -> Value {
-    let message = err_body["error"]["message"].as_str().unwrap_or("upstream error");
-    let err_type = err_body["error"]["type"].as_str().unwrap_or("upstream_error");
+    let message = err_body["error"]["message"]
+        .as_str()
+        .unwrap_or("upstream error");
+    let err_type = err_body["error"]["type"]
+        .as_str()
+        .unwrap_or("upstream_error");
     match client_protocol {
         Protocol::Anthropic => json!({
             "type": "error",
@@ -76,7 +80,10 @@ pub fn stream_terminal_event(client_protocol: Protocol) -> Option<SseOut> {
             event: Some("message_stop".to_string()),
             data: json!({"type": "message_stop"}).to_string(),
         }),
-        Protocol::OpenAi => Some(SseOut { event: None, data: "[DONE]".to_string() }),
+        Protocol::OpenAi => Some(SseOut {
+            event: None,
+            data: "[DONE]".to_string(),
+        }),
         Protocol::Responses => None,
     }
 }
@@ -92,15 +99,32 @@ mod tests {
         assert_eq!(an["error"]["type"], "rate_limit_error");
         let oa = protocol_error(Protocol::OpenAi, "insufficient_quota", "pay");
         assert_eq!(oa["error"]["code"], "insufficient_quota");
-        assert_eq!(protocol_error(Protocol::Responses, "x", "y"), protocol_error(Protocol::OpenAi, "x", "y"));
+        assert_eq!(
+            protocol_error(Protocol::Responses, "x", "y"),
+            protocol_error(Protocol::OpenAi, "x", "y")
+        );
     }
 
     #[test]
     fn terminal_events_per_protocol() {
-        assert_eq!(stream_terminal_event(Protocol::OpenAi).unwrap().data, "[DONE]");
-        assert_eq!(stream_terminal_event(Protocol::Anthropic).unwrap().event.as_deref(), Some("message_stop"));
+        assert_eq!(
+            stream_terminal_event(Protocol::OpenAi).unwrap().data,
+            "[DONE]"
+        );
+        assert_eq!(
+            stream_terminal_event(Protocol::Anthropic)
+                .unwrap()
+                .event
+                .as_deref(),
+            Some("message_stop")
+        );
         assert!(stream_terminal_event(Protocol::Responses).is_none());
-        assert_eq!(stream_error_event(Protocol::Responses, "boom").event.as_deref(), Some("error"));
+        assert_eq!(
+            stream_error_event(Protocol::Responses, "boom")
+                .event
+                .as_deref(),
+            Some("error")
+        );
         assert!(stream_error_event(Protocol::OpenAi, "boom").event.is_none());
     }
 }

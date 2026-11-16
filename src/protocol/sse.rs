@@ -1,7 +1,5 @@
 //! SSE 字节流解析:事件边界(LF / CRLF / CR)、多行 data、event 字段。
 
-
-
 #[allow(unused_imports)]
 use crate::protocol::*;
 
@@ -77,7 +75,6 @@ pub(crate) fn parse_sse_block(raw: &[u8]) -> Option<SseEvent> {
         })
     }
 }
-
 
 #[cfg(test)]
 mod tests {

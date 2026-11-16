@@ -28,7 +28,8 @@ fn row_to_price(row: &rusqlite::Row) -> rusqlite::Result<Value> {
     }))
 }
 
-const PRICE_COLS: &str = "id, model, prompt_price, completion_price, cached_price, created_at, updated_at";
+const PRICE_COLS: &str =
+    "id, model, prompt_price, completion_price, cached_price, created_at, updated_at";
 
 #[derive(Debug, Deserialize)]
 pub struct ListPricesQuery {
@@ -40,12 +41,12 @@ pub struct ListPricesQuery {
 /// 收集全部渠道(含禁用,只看"已添加")的模型名集合。
 fn channel_models(conn: &rusqlite::Connection) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
-    if let Ok(mut stmt) = conn.prepare("SELECT models FROM providers") {
-        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
-            for r in rows.flatten() {
-                if let Ok(list) = serde_json::from_str::<Vec<String>>(&r) {
-                    set.extend(list);
-                }
+    if let Ok(mut stmt) = conn.prepare("SELECT models FROM providers")
+        && let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0))
+    {
+        for r in rows.flatten() {
+            if let Ok(list) = serde_json::from_str::<Vec<String>>(&r) {
+                set.extend(list);
             }
         }
     }
@@ -68,7 +69,10 @@ pub async fn list_prices(
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
         }
     };
     let result = conn
@@ -87,7 +91,9 @@ pub async fn list_prices(
                 let prices: Vec<Value> = prices
                     .into_iter()
                     .filter(|p| {
-                        p["model"].as_str().is_some_and(|m| price_in_use(m, &models))
+                        p["model"]
+                            .as_str()
+                            .is_some_and(|m| price_in_use(m, &models))
                     })
                     .collect();
                 return (StatusCode::OK, Json(json!(prices)));
@@ -96,7 +102,10 @@ pub async fn list_prices(
         }
         Err(e) => {
             tracing::error!("Failed to list prices: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "query_failed"})),
+            )
         }
     }
 }
@@ -127,11 +136,17 @@ pub async fn list_public_prices(State(state): State<AppState>) -> impl IntoRespo
         Ok(Ok(rows)) => (StatusCode::OK, Json(json!(rows))),
         Ok(Err(e)) => {
             tracing::error!("Failed to list public prices: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "query_failed"})),
+            )
         }
         Err(e) => {
             tracing::error!("Failed to list public prices: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "query_failed"})),
+            )
         }
     }
 }
@@ -162,28 +177,40 @@ where
 
 /// 校验:model 非空(创建时必填),价格有限且非负;通配条目的 *
 /// 只允许出现在末尾且前缀非空(否则永远不命中,属于配置错误)。
-fn valid_price_fields(req: &UpsertPriceRequest, creating: bool) -> Result<(), (StatusCode, Json<Value>)> {
+fn valid_price_fields(
+    req: &UpsertPriceRequest,
+    creating: bool,
+) -> Result<(), (StatusCode, Json<Value>)> {
     let model = req.model.as_deref().map(|m| m.trim());
     if creating && model.unwrap_or("").is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_model",
-            "message": "model 不能为空"
-        }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_model",
+                "message": "model 不能为空"
+            })),
+        ));
     }
     if let Some(m) = model {
         if m.is_empty() {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_model",
-                "message": "model 不能为空"
-            }))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_model",
+                    "message": "model 不能为空"
+                })),
+            ));
         }
         if m.contains('*') {
             let prefix = m.trim_end_matches('*');
             if !m.ends_with('*') || prefix.contains('*') || prefix.is_empty() {
-                return Err((StatusCode::BAD_REQUEST, Json(json!({
-                    "error": "invalid_model",
-                    "message": "通配只支持末尾单个 *,且前缀非空(如 gpt-*)"
-                }))));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "invalid_model",
+                        "message": "通配只支持末尾单个 *,且前缀非空(如 gpt-*)"
+                    })),
+                ));
             }
         }
     }
@@ -193,10 +220,13 @@ fn valid_price_fields(req: &UpsertPriceRequest, creating: bool) -> Result<(), (S
         .chain(req.cached_price.into_iter().flatten())
     {
         if !v.is_finite() || v < 0.0 {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_price",
-                "message": "价格必须是非负有限数"
-            }))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_price",
+                    "message": "价格必须是非负有限数"
+                })),
+            ));
         }
     }
     Ok(())
@@ -214,7 +244,10 @@ pub async fn create_price(
     let conn = match state.pool.conn.lock() {
         Ok(c) => c,
         Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
         }
     };
     let result = conn.execute(
@@ -236,20 +269,29 @@ pub async fn create_price(
             );
             match row {
                 Ok(v) => (StatusCode::CREATED, Json(v)),
-                Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"}))),
+                Err(_) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "query_failed"})),
+                ),
             }
         }
         Err(rusqlite::Error::SqliteFailure(err, _))
             if err.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
-            (StatusCode::CONFLICT, Json(json!({
-                "error": "duplicate_model",
-                "message": "该模型(或通配)的价格已存在,请直接编辑"
-            })))
+            (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "duplicate_model",
+                    "message": "该模型(或通配)的价格已存在,请直接编辑"
+                })),
+            )
         }
         Err(e) => {
             tracing::error!("Failed to create price: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "create_failed"})))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "create_failed"})),
+            )
         }
     }
 }
@@ -267,10 +309,13 @@ pub async fn update_price(
     if let Some(model) = &req.model {
         let m = model.trim().to_string();
         if m.is_empty() {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_model",
-                "message": "model 不能为空"
-            })));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_model",
+                    "message": "model 不能为空"
+                })),
+            );
         }
         updates.push("model = ?");
         params_vec.push(Box::new(m));
@@ -290,17 +335,26 @@ pub async fn update_price(
         params_vec.push(Box::new(k));
     }
     if updates.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": "no_fields_to_update"})));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "no_fields_to_update"})),
+        );
     }
     updates.push("updated_at = datetime('now')");
 
     let conn = match state.pool.conn.lock() {
         Ok(c) => c,
         Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
         }
     };
-    let sql = format!("UPDATE model_prices SET {} WHERE id = ?", updates.join(", "));
+    let sql = format!(
+        "UPDATE model_prices SET {} WHERE id = ?",
+        updates.join(", ")
+    );
     let mut params: Vec<&dyn rusqlite::types::ToSql> =
         params_vec.iter().map(|p| p.as_ref()).collect();
     params.push(&price_id);
@@ -313,21 +367,30 @@ pub async fn update_price(
             );
             match row {
                 Ok(v) => (StatusCode::OK, Json(v)),
-                Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"}))),
+                Err(_) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "query_failed"})),
+                ),
             }
         }
         Ok(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
         Err(rusqlite::Error::SqliteFailure(err, _))
             if err.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
-            (StatusCode::CONFLICT, Json(json!({
-                "error": "duplicate_model",
-                "message": "该模型(或通配)的价格已存在"
-            })))
+            (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "duplicate_model",
+                    "message": "该模型(或通配)的价格已存在"
+                })),
+            )
         }
         Err(e) => {
             tracing::error!("Failed to update price: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "update_failed"})))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "update_failed"})),
+            )
         }
     }
 }
@@ -339,7 +402,10 @@ pub async fn delete_price(
     let conn = match state.pool.conn.lock() {
         Ok(c) => c,
         Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
         }
     };
     match conn.execute("DELETE FROM model_prices WHERE id = ?1", params![price_id]) {
@@ -347,7 +413,10 @@ pub async fn delete_price(
         Ok(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
         Err(e) => {
             tracing::error!("Failed to delete price: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "delete_failed"})))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "delete_failed"})),
+            )
         }
     }
 }
@@ -366,22 +435,31 @@ pub async fn adjust_balance(
     Json(req): Json<AdjustBalanceRequest>,
 ) -> impl IntoResponse {
     if !req.amount.is_finite() || req.amount == 0.0 {
-        return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_amount",
-            "message": "amount 必须是非零有限数"
-        })));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_amount",
+                "message": "amount 必须是非零有限数"
+            })),
+        );
     }
     let amount_micro = crate::billing::yuan_to_micro(req.amount);
     if amount_micro == 0 {
-        return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_amount",
-            "message": "amount 过小,低于最小记账单位(0.000001 元)"
-        })));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_amount",
+                "message": "amount 过小,低于最小记账单位(0.000001 元)"
+            })),
+        );
     }
     let mut conn = match state.pool.conn.lock() {
         Ok(c) => c,
         Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
         }
     };
     // UPDATE 余额与 INSERT 流水包在同一事务:失败整体回滚,
@@ -400,7 +478,11 @@ pub async fn adjust_balance(
             params![user_id],
             |row| row.get(0),
         )?;
-        let kind = if amount_micro > 0 { "recharge" } else { "adjust" };
+        let kind = if amount_micro > 0 {
+            "recharge"
+        } else {
+            "adjust"
+        };
         tx.execute(
             "INSERT INTO billing_transactions (id, user_id, amount, balance_after, kind, note)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -417,16 +499,22 @@ pub async fn adjust_balance(
         Ok((balance, kind))
     })();
     match result {
-        Ok((balance, kind)) => (StatusCode::OK, Json(json!({
-            "balance": crate::billing::micro_to_yuan(balance),
-            "kind": kind
-        }))),
+        Ok((balance, kind)) => (
+            StatusCode::OK,
+            Json(json!({
+                "balance": crate::billing::micro_to_yuan(balance),
+                "kind": kind
+            })),
+        ),
         Err(rusqlite::Error::QueryReturnedNoRows) => {
             (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"})))
         }
         Err(e) => {
             tracing::error!("Failed to adjust balance: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "update_failed"})))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "update_failed"})),
+            )
         }
     }
 }
@@ -444,7 +532,10 @@ pub async fn list_transactions(
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
         Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
         }
     };
     let uid = query.user_id.as_deref().unwrap_or("").trim();
@@ -488,7 +579,10 @@ pub async fn list_transactions(
         Ok(list) => (StatusCode::OK, Json(json!(list))),
         Err(e) => {
             tracing::error!("Failed to list billing transactions: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "query_failed"})),
+            )
         }
     }
 }

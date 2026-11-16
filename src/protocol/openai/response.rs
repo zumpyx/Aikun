@@ -1,7 +1,6 @@
 //! OpenAI 响应 → 其他协议(OpenAI → Anthropic / Responses)。
 
-
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[allow(unused_imports)]
 use crate::protocol::*;
@@ -32,28 +31,28 @@ pub(crate) fn openai_resp_to_anthropic(resp: &Value) -> Value {
             return json!({
                 "type": "error",
                 "error": {"type": "upstream_error", "message": "Upstream returned an invalid response"}
-            })
+            });
         }
     };
     let message = &choice["message"];
 
     let mut blocks: Vec<Value> = Vec::new();
-    if let Some(reasoning) = message["reasoning_content"].as_str() {
-        if !reasoning.is_empty() {
-            let mut thinking = json!({"type": "thinking", "thinking": reasoning});
-            if let Some(sig) = message["reasoning_signature"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-            {
-                thinking["signature"] = json!(sig);
-            }
-            blocks.push(thinking);
+    if let Some(reasoning) = message["reasoning_content"].as_str()
+        && !reasoning.is_empty()
+    {
+        let mut thinking = json!({"type": "thinking", "thinking": reasoning});
+        if let Some(sig) = message["reasoning_signature"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            thinking["signature"] = json!(sig);
         }
+        blocks.push(thinking);
     }
-    if let Some(text) = message["content"].as_str() {
-        if !text.is_empty() {
-            blocks.push(json!({"type": "text", "text": text}));
-        }
+    if let Some(text) = message["content"].as_str()
+        && !text.is_empty()
+    {
+        blocks.push(json!({"type": "text", "text": text}));
     }
     if let Some(tcs) = message["tool_calls"].as_array() {
         for tc in tcs {
@@ -70,7 +69,8 @@ pub(crate) fn openai_resp_to_anthropic(resp: &Value) -> Value {
         }
     }
 
-    let stop_reason = openai_finish_to_anthropic(choice["finish_reason"].as_str().unwrap_or("stop"));
+    let stop_reason =
+        openai_finish_to_anthropic(choice["finish_reason"].as_str().unwrap_or("stop"));
     // OpenAI 的 prompt_tokens 含缓存命中部分;Anthropic 的 input_tokens 不含,
     // 缓存命中单列 cache_read_input_tokens。与 anthropic_resp_to_openai 的
     // 合并口径互为镜像(0.4 曾把含缓存的 prompt 整个塞进 input_tokens 并丢掉
@@ -106,16 +106,16 @@ pub(crate) fn openai_resp_to_responses(resp: &Value) -> Value {
     let message = &resp["choices"][0]["message"];
     let mut output: Vec<Value> = Vec::new();
 
-    if let Some(text) = message["content"].as_str() {
-        if !text.is_empty() {
-            output.push(json!({
-                "id": format!("msg_{}", uuid::Uuid::new_v4().simple()),
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
-            }));
-        }
+    if let Some(text) = message["content"].as_str()
+        && !text.is_empty()
+    {
+        output.push(json!({
+            "id": format!("msg_{}", uuid::Uuid::new_v4().simple()),
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        }));
     }
     if let Some(tcs) = message["tool_calls"].as_array() {
         for tc in tcs {
@@ -131,7 +131,9 @@ pub(crate) fn openai_resp_to_responses(resp: &Value) -> Value {
     }
 
     // 截断/审核命中的响应不能标 completed,否则客户端当成完整结果使用。
-    let finish = resp["choices"][0]["finish_reason"].as_str().unwrap_or("stop");
+    let finish = resp["choices"][0]["finish_reason"]
+        .as_str()
+        .unwrap_or("stop");
     let incomplete = openai_finish_to_incomplete_reason(finish);
     let (status, incomplete_details) = match incomplete {
         Some(reason) => ("incomplete", json!({"reason": reason})),
@@ -140,7 +142,9 @@ pub(crate) fn openai_resp_to_responses(resp: &Value) -> Value {
 
     let u = &resp["usage"];
     let prompt = u["prompt_tokens"].as_i64().unwrap_or(0);
-    let cached = u["prompt_tokens_details"]["cached_tokens"].as_i64().unwrap_or(0);
+    let cached = u["prompt_tokens_details"]["cached_tokens"]
+        .as_i64()
+        .unwrap_or(0);
     let completion = u["completion_tokens"].as_i64().unwrap_or(0);
     let total = u["total_tokens"].as_i64().unwrap_or(prompt + completion);
 
@@ -162,7 +166,6 @@ pub(crate) fn openai_resp_to_responses(resp: &Value) -> Value {
         },
     })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -273,7 +276,10 @@ mod tests {
         assert!(out["id"].as_str().unwrap().starts_with("resp_"));
         let output = out["output"].as_array().unwrap();
         assert_eq!(output[0]["type"], "message");
-        assert_eq!(output[0]["content"][0], json!({"type": "output_text", "text": "hi", "annotations": []}));
+        assert_eq!(
+            output[0]["content"][0],
+            json!({"type": "output_text", "text": "hi", "annotations": []})
+        );
         assert_eq!(output[1]["type"], "function_call");
         assert_eq!(output[1]["call_id"], "c1");
         assert_eq!(output[1]["arguments"], "{\"a\":1}");

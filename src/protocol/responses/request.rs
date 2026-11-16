@@ -1,7 +1,6 @@
 //! OpenAI Responses 请求 → OpenAI Chat(枢纽)。
 
-
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 #[allow(unused_imports)]
 use crate::protocol::*;
@@ -177,7 +176,6 @@ pub(crate) fn responses_content_to_openai_parts(content: &Value) -> Vec<Value> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
@@ -227,9 +225,15 @@ mod tests {
         assert_eq!(msgs[2]["tool_calls"][0]["id"], "c1");
         assert_eq!(msgs[2]["tool_calls"][0]["function"]["name"], "f");
         // function_call_output → tool 消息
-        assert_eq!(msgs[3], json!({"role": "tool", "tool_call_id": "c1", "content": "done"}));
+        assert_eq!(
+            msgs[3],
+            json!({"role": "tool", "tool_call_id": "c1", "content": "done"})
+        );
         // reasoning 丢弃;省略 type 的简易消息按 message 处理
-        assert_eq!(msgs[4], json!({"role": "user", "content": "plain easy message"}));
+        assert_eq!(
+            msgs[4],
+            json!({"role": "user", "content": "plain easy message"})
+        );
         assert_eq!(msgs.len(), 5);
 
         // 内置工具 web_search 丢弃,function 工具包回嵌套形状
@@ -247,8 +251,14 @@ mod tests {
             "tool_choice": {"type": "function", "name": "f"}
         });
         let out = convert_request(&body, Protocol::Responses, Protocol::OpenAi);
-        assert_eq!(out["messages"], json!([{"role": "user", "content": "hello"}]));
-        assert_eq!(out["tool_choice"], json!({"type": "function", "function": {"name": "f"}}));
+        assert_eq!(
+            out["messages"],
+            json!([{"role": "user", "content": "hello"}])
+        );
+        assert_eq!(
+            out["tool_choice"],
+            json!({"type": "function", "function": {"name": "f"}})
+        );
         // 非流式不带 stream_options
         assert!(out["stream_options"].is_null());
     }

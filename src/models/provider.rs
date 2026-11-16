@@ -19,7 +19,7 @@ pub struct Provider {
     /// attempt_loop 据此跳过该渠道,避免空凭证打到上游吃 401。
     #[serde(default, skip_serializing)]
     pub key_decrypt_failed: bool,
-    pub models: String,  // JSON array
+    pub models: String, // JSON array
     pub priority: i32,
     pub weight: f64,
     pub is_active: bool,
@@ -108,7 +108,8 @@ pub fn valid_protocol_list(list: &[String]) -> bool {
 /// responses 是附加协议,不能单独成渠道——其上游地址、凭证与默认协议
 /// 语义都依附于 openai/anthropic 配置,协议列表至少含一个可作默认的协议。
 pub fn has_defaultable_protocol(list: &[String]) -> bool {
-    list.iter().any(|p| DEFAULTABLE_PROTOCOLS.contains(&p.as_str()))
+    list.iter()
+        .any(|p| DEFAULTABLE_PROTOCOLS.contains(&p.as_str()))
 }
 
 /// default_protocol 合法性:必须已勾选,且属于可作默认的协议。
@@ -142,7 +143,9 @@ pub fn channel_protocol(p: &Provider) -> Protocol {
 /// 客户端协议为 responses 的情形。
 pub fn upstream_protocol_for(p: &Provider, client_protocol: Protocol) -> Protocol {
     if client_protocol == Protocol::Responses
-        && channel_protocols(p).iter().any(|x| x == Protocol::Responses.as_str())
+        && channel_protocols(p)
+            .iter()
+            .any(|x| x == Protocol::Responses.as_str())
     {
         return Protocol::Responses;
     }
@@ -152,19 +155,27 @@ pub fn upstream_protocol_for(p: &Provider, client_protocol: Protocol) -> Protoco
 /// 按上游协议选择对应的 base URL:有些供应商对 OpenAI / Anthropic 两种协议
 /// 提供不同路由。协议专属地址为空时回退另一个,保证只配了一个地址的
 /// 渠道照常工作。
-pub fn base_url_for<'a>(p: &'a Provider, protocol: Protocol) -> &'a str {
+pub fn base_url_for(p: &Provider, protocol: Protocol) -> &str {
     pick_base_url(protocol, &p.openai_base_url, &p.anthropic_base_url)
 }
 
 /// [`base_url_for`] 的拆列版本:健康检查 / 管理端单测等只查了两个地址列、
 /// 没有完整 Provider 的路径共用同一回退口径。
-pub fn pick_base_url<'a>(protocol: Protocol, openai_url: &'a str, anthropic_url: &'a str) -> &'a str {
+pub fn pick_base_url<'a>(
+    protocol: Protocol,
+    openai_url: &'a str,
+    anthropic_url: &'a str,
+) -> &'a str {
     let (primary, fallback) = match protocol {
         Protocol::Anthropic => (anthropic_url, openai_url),
         // Responses 走 OpenAI 地址(同一家 OpenAI 兼容上游的 /responses 路由)。
         Protocol::OpenAi | Protocol::Responses => (openai_url, anthropic_url),
     };
-    if primary.is_empty() { fallback } else { primary }
+    if primary.is_empty() {
+        fallback
+    } else {
+        primary
+    }
 }
 
 /// Parse the channel's supported protocol list, with the legacy
@@ -174,7 +185,11 @@ pub fn channel_protocols(p: &Provider) -> Vec<String> {
     if valid_protocol_list(&list) {
         return list;
     }
-    vec![Protocol::for_provider_type(&p.provider_type).as_str().to_string()]
+    vec![
+        Protocol::for_provider_type(&p.provider_type)
+            .as_str()
+            .to_string(),
+    ]
 }
 
 /// Map a row of the standard providers-table select order (id, name,
@@ -428,16 +443,28 @@ pub(crate) mod tests {
     fn upstream_protocol_prefers_native_responses() {
         let mut p = bare_provider();
         // 未声明 responses:responses 客户端走渠道默认协议(转换降级)
-        assert_eq!(upstream_protocol_for(&p, Protocol::Responses), Protocol::OpenAi);
+        assert_eq!(
+            upstream_protocol_for(&p, Protocol::Responses),
+            Protocol::OpenAi
+        );
         // 声明后:responses 客户端原生直通
         p.protocols = "[\"openai\",\"responses\"]".into();
-        assert_eq!(upstream_protocol_for(&p, Protocol::Responses), Protocol::Responses);
+        assert_eq!(
+            upstream_protocol_for(&p, Protocol::Responses),
+            Protocol::Responses
+        );
         // 其他客户端协议不受 responses 声明影响
-        assert_eq!(upstream_protocol_for(&p, Protocol::OpenAi), Protocol::OpenAi);
+        assert_eq!(
+            upstream_protocol_for(&p, Protocol::OpenAi),
+            Protocol::OpenAi
+        );
         // anthropic 默认协议渠道:responses 客户端也走 anthropic(组合转换)
         p.default_protocol = "anthropic".into();
         p.protocols = "[\"anthropic\"]".into();
-        assert_eq!(upstream_protocol_for(&p, Protocol::Responses), Protocol::Anthropic);
+        assert_eq!(
+            upstream_protocol_for(&p, Protocol::Responses),
+            Protocol::Anthropic
+        );
     }
 
     #[test]
@@ -449,10 +476,16 @@ pub(crate) mod tests {
         // responses 不能单独成渠道,也不能作默认协议
         assert!(!has_defaultable_protocol(&[responses()]));
         assert!(has_defaultable_protocol(&[openai(), responses()]));
-        assert!(!valid_default_protocol("responses", &[openai(), responses()]));
+        assert!(!valid_default_protocol(
+            "responses",
+            &[openai(), responses()]
+        ));
         assert!(valid_default_protocol("openai", &[openai(), responses()]));
         // 默认必须已勾选
-        assert!(!valid_default_protocol("anthropic", &[openai(), responses()]));
+        assert!(!valid_default_protocol(
+            "anthropic",
+            &[openai(), responses()]
+        ));
         // 兜底取第一个可作默认的协议
         assert_eq!(
             first_defaultable_protocol(&[responses(), anthropic()]),

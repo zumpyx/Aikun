@@ -1,9 +1,9 @@
-use axum::{extract::State, response::Response, Json};
+use axum::{Json, extract::State, response::Response};
 use serde_json::Value;
 
+use crate::AppState;
 use crate::auth::{AuthContext, Claims};
 use crate::protocol::Protocol;
-use crate::AppState;
 
 /// Anthropic Messages endpoint.
 /// Accepts Anthropic-format requests and routes them through the same proxy
@@ -15,5 +15,6 @@ pub async fn messages(
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    crate::pipeline::proxy_completion(state, claims, auth_ctx, Protocol::Anthropic, body, &headers).await
+    crate::pipeline::proxy_completion(state, claims, auth_ctx, Protocol::Anthropic, body, &headers)
+        .await
 }

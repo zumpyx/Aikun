@@ -6,9 +6,9 @@ use futures_util::future::join_all;
 use rusqlite::params;
 use tracing::info;
 
+use crate::channel::transport::{cached_client, sanitize_log_url, sanitize_proxy_url};
 use crate::config::AppConfig;
 use crate::db::DbPool;
-use crate::channel::transport::{cached_client, sanitize_log_url, sanitize_proxy_url};
 
 /// Check the health of a single provider by making a lightweight request to the models endpoint.
 pub async fn check_provider_health(
@@ -40,7 +40,10 @@ pub async fn check_provider_health(
             let status = resp.status();
             let elapsed = latency;
             if status.is_success() {
-                info!("Health check OK: {} -> {} ({}ms)", log_url, status, elapsed as i64);
+                info!(
+                    "Health check OK: {} -> {} ({}ms)",
+                    log_url, status, elapsed as i64
+                );
                 ("healthy".to_string(), elapsed)
             } else if status.is_server_error()
                 || status == reqwest::StatusCode::UNAUTHORIZED
@@ -49,10 +52,16 @@ pub async fn check_provider_health(
                 // 401/403 是凭证失效,与"响应慢"的 degraded 是两回事:与请求
                 // 路径(record_failure 对 401/403 立即禁用)口径对齐,ping
                 // 直接判不健康,提前拦下而不是等真实用户请求踩雷。
-                info!("Health check unhealthy: {} -> {} ({}ms)", log_url, status, elapsed as i64);
+                info!(
+                    "Health check unhealthy: {} -> {} ({}ms)",
+                    log_url, status, elapsed as i64
+                );
                 ("unhealthy".to_string(), elapsed)
             } else {
-                info!("Health check degraded: {} -> {} ({}ms)", log_url, status, elapsed as i64);
+                info!(
+                    "Health check degraded: {} -> {} ({}ms)",
+                    log_url, status, elapsed as i64
+                );
                 ("degraded".to_string(), elapsed)
             }
         }
@@ -115,7 +124,8 @@ fn purge_old_request_logs_batched(pool: &Arc<DbPool>, retention_days: u32, batch
                 .lock()
                 .map_err(|_| rusqlite::Error::InvalidQuery)?;
             let tx = conn.transaction()?;
-            let batch_rows = "SELECT rowid FROM request_logs WHERE created_at < ?1 ORDER BY rowid LIMIT ?2";
+            let batch_rows =
+                "SELECT rowid FROM request_logs WHERE created_at < ?1 ORDER BY rowid LIMIT ?2";
             tx.execute(
                 &format!(
                     "INSERT INTO usage_daily (user_id, date, requests, tokens, cost)
@@ -187,37 +197,38 @@ async fn run_health_check_round(
 ) {
     info!("Running periodic health check...");
 
-        // Enforce the log retention policy on every round. The purge holds the
-        // DB mutex while deleting, so run it on the blocking thread pool.
-        {
-            let pool = pool.clone();
-            let retention_days = config.log_retention_days;
-            tokio::task::spawn_blocking(move || purge_old_request_logs(&pool, retention_days));
-        }
+    // Enforce the log retention policy on every round. The purge holds the
+    // DB mutex while deleting, so run it on the blocking thread pool.
+    {
+        let pool = pool.clone();
+        let retention_days = config.log_retention_days;
+        tokio::task::spawn_blocking(move || purge_old_request_logs(&pool, retention_days));
+    }
 
-        let providers = {
-            let conn = match pool.read().lock() {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!("Failed to lock DB for health check: {}", e);
-                    return;
-                }
-            };
+    let providers = {
+        let conn = match pool.read().lock() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to lock DB for health check: {}", e);
+                return;
+            }
+        };
 
-            let mut stmt = match conn.prepare(
-                "SELECT id, openai_base_url, anthropic_base_url, api_key,
+        let mut stmt = match conn.prepare(
+            "SELECT id, openai_base_url, anthropic_base_url, api_key,
                         COALESCE(NULLIF(default_protocol, ''), provider_type),
-                        timeout_secs, proxy_url, channel_kind FROM providers WHERE is_active = 1"
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("Failed to prepare health check query: {}", e);
-                    return;
-                }
-            };
+                        timeout_secs, proxy_url, channel_kind FROM providers WHERE is_active = 1",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to prepare health check query: {}", e);
+                return;
+            }
+        };
 
-            #[allow(clippy::type_complexity)]
-            let result: Vec<(String, String, String, String, String, i32, String, String)> = match stmt.query_map([], |row| {
+        #[allow(clippy::type_complexity)]
+        let result: Vec<(String, String, String, String, String, i32, String, String)> = match stmt
+            .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -230,76 +241,84 @@ async fn run_health_check_round(
                     row.get::<_, String>(7)?,
                 ))
             }) {
-                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-                Err(e) => {
-                    tracing::error!("Failed to query providers: {}", e);
-                    return;
-                }
-            };
-            result
-        }; // lock released
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                tracing::error!("Failed to query providers: {}", e);
+                return;
+            }
+        };
+        result
+    }; // lock released
 
-        // Probe all providers concurrently (each one only reads its own config,
-        // no DB lock is held while awaiting). Each probe gets its own timeout
-        // (min(timeout_secs, 60)) so one slow channel can never cancel the
-        // whole round — a timed-out probe simply counts as unhealthy and is
-        // persisted like any other result.
-        let probes = join_all(providers.iter().map(
-            |(id, openai_url, anthropic_url, api_key, protocol, timeout, proxy_url, channel_kind)| {
-                let clients = clients.clone();
-                async move {
-                    // Clamp defensively: timeout_secs is validated 1..=600 at the
-                    // API layer, but old rows may hold out-of-range values.
-                    let probe_timeout = (*timeout).clamp(1, 600).min(60) as u64;
-                    // 按默认协议选对应的上游地址,留空的一路回退到另一个。
-                    // 默认协议列为空时退回 provider_type(azure/custom 等讲 OpenAI)。
-                    let protocol = crate::protocol::Protocol::parse(protocol)
-                        .unwrap_or_else(|| crate::protocol::Protocol::for_provider_type(protocol));
-                    let base_url = crate::models::pick_base_url(protocol, openai_url, anthropic_url);
-                    let (status, latency) = match tokio::time::timeout(
-                        std::time::Duration::from_secs(probe_timeout),
-                        check_provider_health(
-                            &clients, base_url, api_key, protocol, probe_timeout, proxy_url,
-                            channel_kind,
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(r) => r,
-                        Err(_) => {
-                            info!("Health check [{}]: timed out after {}s", id, probe_timeout);
-                            ("unhealthy".to_string(), probe_timeout as f64 * 1000.0)
-                        }
-                    };
-                    info!("Health check [{}]: status={}, latency={}ms", id, status, latency as i64);
-                    (id.clone(), status, latency)
-                }
-            },
-        ));
+    // Probe all providers concurrently (each one only reads its own config,
+    // no DB lock is held while awaiting). Each probe gets its own timeout
+    // (min(timeout_secs, 60)) so one slow channel can never cancel the
+    // whole round — a timed-out probe simply counts as unhealthy and is
+    // persisted like any other result.
+    let probes = join_all(providers.iter().map(
+        |(id, openai_url, anthropic_url, api_key, protocol, timeout, proxy_url, channel_kind)| {
+            let clients = clients.clone();
+            async move {
+                // Clamp defensively: timeout_secs is validated 1..=600 at the
+                // API layer, but old rows may hold out-of-range values.
+                let probe_timeout = (*timeout).clamp(1, 600).min(60) as u64;
+                // 按默认协议选对应的上游地址,留空的一路回退到另一个。
+                // 默认协议列为空时退回 provider_type(azure/custom 等讲 OpenAI)。
+                let protocol = crate::protocol::Protocol::parse(protocol)
+                    .unwrap_or_else(|| crate::protocol::Protocol::for_provider_type(protocol));
+                let base_url = crate::models::pick_base_url(protocol, openai_url, anthropic_url);
+                let (status, latency) = match tokio::time::timeout(
+                    std::time::Duration::from_secs(probe_timeout),
+                    check_provider_health(
+                        &clients,
+                        base_url,
+                        api_key,
+                        protocol,
+                        probe_timeout,
+                        proxy_url,
+                        channel_kind,
+                    ),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(_) => {
+                        info!("Health check [{}]: timed out after {}s", id, probe_timeout);
+                        ("unhealthy".to_string(), probe_timeout as f64 * 1000.0)
+                    }
+                };
+                info!(
+                    "Health check [{}]: status={}, latency={}ms",
+                    id, status, latency as i64
+                );
+                (id.clone(), status, latency)
+            }
+        },
+    ));
 
-        let results: Vec<(String, String, f64)> = probes.await;
+    let results: Vec<(String, String, f64)> = probes.await;
 
-        {
-            let conn = match pool.conn.lock() {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!("Failed to lock DB for health update: {}", e);
-                    return;
-                }
-            };
+    {
+        let conn = match pool.conn.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to lock DB for health update: {}", e);
+                return;
+            }
+        };
 
-            // Only record the ping outcome: latency_ms is the real-request EMA
-            // used for routing and must not be overwritten by ping latency.
-            let now = chrono::Utc::now().to_rfc3339();
-            for (id, status, _latency) in &results {
-                if let Err(e) = conn.execute(
-                    "UPDATE providers SET health_status = ?1, last_health_check = ?2 WHERE id = ?3",
-                    params![status, now, id],
-                ) {
-                    tracing::error!("Failed to update provider health: {}", e);
-                }
+        // Only record the ping outcome: latency_ms is the real-request EMA
+        // used for routing and must not be overwritten by ping latency.
+        let now = chrono::Utc::now().to_rfc3339();
+        for (id, status, _latency) in &results {
+            if let Err(e) = conn.execute(
+                "UPDATE providers SET health_status = ?1, last_health_check = ?2 WHERE id = ?3",
+                params![status, now, id],
+            ) {
+                tracing::error!("Failed to update provider health: {}", e);
             }
         }
+    }
 }
 
 #[cfg(test)]

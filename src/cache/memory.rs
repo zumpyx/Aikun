@@ -59,7 +59,11 @@ impl MemoryCache {
                 }
             }
         }
-        if inner.map.insert(key.to_string(), (now + ttl, entry)).is_none() {
+        if inner
+            .map
+            .insert(key.to_string(), (now + ttl, entry))
+            .is_none()
+        {
             inner.order.push_back(key.to_string());
         }
         // order 里可能残留已过期/已淘汰的键:长度明显超过 map 时整理一次。
@@ -90,7 +94,10 @@ mod tests {
     use serde_json::json;
 
     fn e(n: i32) -> CacheEntry {
-        CacheEntry { body: json!({"n": n}), usage: (n, 0, n, 0) }
+        CacheEntry {
+            body: json!({"n": n}),
+            usage: (n, 0, n, 0),
+        }
     }
 
     #[test]

@@ -11,13 +11,13 @@ use std::time::Duration;
 
 use futures_util::future::join_all;
 use rusqlite::params;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{info, warn};
 
+use crate::channel::transport::{MAX_RESP_BODY, read_json_limited, send_request};
 use crate::db::DbPool;
 use crate::models::Provider;
-use crate::channel::transport::{read_json_limited, send_request, MAX_RESP_BODY};
-use crate::protocol::{parse_sse_events, Protocol};
+use crate::protocol::{Protocol, parse_sse_events};
 
 /// How often the background loop re-tests every (channel, model) pair.
 pub const MODEL_TEST_INTERVAL_SECS: u64 = 1800;
@@ -52,7 +52,13 @@ pub struct ModelProbe {
 /// responses look broken). For OpenAI both field names are sent: newer
 /// o-series models reject `max_tokens`, older OpenAI-compatible servers
 /// ignore unknown fields.
-fn build_probe_body(model: &str, protocol: Protocol, messages: &[Value], max_tokens: u32, stream: bool) -> Value {
+fn build_probe_body(
+    model: &str,
+    protocol: Protocol,
+    messages: &[Value],
+    max_tokens: u32,
+    stream: bool,
+) -> Value {
     let mut body = json!({
         "model": model,
         "max_tokens": max_tokens,
@@ -124,9 +130,7 @@ pub async fn probe_model(
     stream: bool,
 ) -> ModelProbe {
     let body = build_probe_body(model, protocol, &messages, max_tokens, stream);
-    let (resp, latency) = match send_request(
-        clients, provider, protocol, body, stream, 120,
-    ).await {
+    let (resp, latency) = match send_request(clients, provider, protocol, body, stream, 120).await {
         Ok(v) => v,
         Err((err_body, status, latency)) => {
             return ModelProbe {
@@ -272,7 +276,14 @@ pub async fn probe_model(
         latency_ms: latency,
         status,
         error: stream_error,
-        snippet: Some(summary["content"].as_str().unwrap_or("").chars().take(120).collect()),
+        snippet: Some(
+            summary["content"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect(),
+        ),
         response: Some(summary),
     }
 }
@@ -319,7 +330,14 @@ pub async fn record_model_health_async(
     error: Option<String>,
 ) {
     let _ = tokio::task::spawn_blocking(move || {
-        record_model_health(&pool, &provider_id, &model, ok, latency_ms, error.as_deref())
+        record_model_health(
+            &pool,
+            &provider_id,
+            &model,
+            ok,
+            latency_ms,
+            error.as_deref(),
+        )
     })
     .await;
 }
@@ -357,12 +375,10 @@ async fn run_model_test_round(
                 return;
             }
         };
-        let mut stmt = match conn.prepare(
-            &format!(
-             "SELECT {} FROM providers WHERE is_active = 1",
-             crate::models::PROVIDER_SELECT_COLUMNS
-         ),
-        ) {
+        let mut stmt = match conn.prepare(&format!(
+            "SELECT {} FROM providers WHERE is_active = 1",
+            crate::models::PROVIDER_SELECT_COLUMNS
+        )) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!("Model test loop failed to query providers: {}", e);

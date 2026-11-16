@@ -1,6 +1,5 @@
 //! usage 提取与缓存 token 拆分口径(三协议统一)。
 
-
 use serde_json::Value;
 
 #[allow(unused_imports)]
@@ -67,7 +66,6 @@ pub fn extract_usage_any(resp: &Value) -> (i32, i32, i32, i32) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
@@ -133,7 +131,8 @@ mod tests {
         let only_total = json!({"usage": {"total_tokens": 10}});
         assert_eq!(extract_usage_any(&only_total), (0, 0, 0, 0));
         // 带 input_tokens 的 Responses 形状不受影响
-        let responses = json!({"usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}});
+        let responses =
+            json!({"usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}});
         assert_eq!(extract_usage_any(&responses), (7, 3, 10, 0));
     }
 }

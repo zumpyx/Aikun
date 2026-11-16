@@ -46,7 +46,10 @@ impl Drop for ConcurrencyGuard {
 /// 限额配置与当日已用 token 在 blocking 线程一次取回;RPM 用内存滑动窗口
 /// (key 为 api_keys.id)。查询失败时放行——key 刚通过认证,行必然存在,
 /// 瞬时的锁/IO 失败不应打断流量。
-pub(crate) async fn enforce_key_limits(state: &AppState, key_id: &str) -> Result<Option<ConcurrencyGuard>, String> {
+pub(crate) async fn enforce_key_limits(
+    state: &AppState,
+    key_id: &str,
+) -> Result<Option<ConcurrencyGuard>, String> {
     let pool = state.pool.clone();
     let key = key_id.to_string();
     let limits = tokio::task::spawn_blocking(move || {
@@ -78,7 +81,10 @@ pub(crate) async fn enforce_key_limits(state: &AppState, key_id: &str) -> Result
     let Some((rpm, daily_quota, max_concurrent, used_today)) = limits else {
         // fail-open 必须留信号:DB 故障(锁竞争/IO)会持续走这个分支,
         // 没有日志的话 RPM/日额度/并发三项限额静默失效而无人察觉。
-        warn!("API key limit query failed for key {}, allowing request without enforcement", key_id);
+        warn!(
+            "API key limit query failed for key {}, allowing request without enforcement",
+            key_id
+        );
         return Ok(None);
     };
 
@@ -155,7 +161,10 @@ pub(crate) async fn has_positive_balance(state: &AppState, user_id: &str) -> boo
         Some(positive) => positive,
         None => {
             // fail-open 同样要留信号:DB 故障期间余额拦截形同虚设。
-            warn!("Balance precheck failed for user {}, allowing request (fail-open)", uid_log);
+            warn!(
+                "Balance precheck failed for user {}, allowing request (fail-open)",
+                uid_log
+            );
             true
         }
     }

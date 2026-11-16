@@ -5,23 +5,24 @@ use rand::Rng;
 use rusqlite::{Connection, params};
 
 use crate::db::DbPool;
-use crate::models::{row_to_provider, Provider};
+use crate::models::{Provider, row_to_provider};
 
 /// Check whether a provider can serve the requested model. The models list
 /// only matches exactly; model_mapping keys (requested → upstream) match by
 /// prefix, consistent with how the mapping is applied later.
 fn provider_supports_model(p: &Provider, model: &str) -> bool {
-    if let Ok(models) = serde_json::from_str::<Vec<String>>(&p.models) {
-        if models.iter().any(|m| m == model) {
-            return true;
-        }
+    if let Ok(models) = serde_json::from_str::<Vec<String>>(&p.models)
+        && models.iter().any(|m| m == model)
+    {
+        return true;
     }
     if let Ok(mapping) =
         serde_json::from_str::<std::collections::HashMap<String, String>>(&p.model_mapping)
+        && mapping
+            .keys()
+            .any(|k| !k.is_empty() && model.starts_with(k.as_str()))
     {
-        if mapping.keys().any(|k| !k.is_empty() && model.starts_with(k.as_str())) {
-            return true;
-        }
+        return true;
     }
     false
 }
@@ -29,11 +30,7 @@ fn provider_supports_model(p: &Provider, model: &str) -> bool {
 /// 非有限值防御：持久化数据或计算结果中的 inf/NaN 一律回退安全值，
 /// 避免 random_range(0.0..inf) panic。
 fn finite_or(v: f64, fallback: f64) -> f64 {
-    if v.is_finite() {
-        v
-    } else {
-        fallback
-    }
+    if v.is_finite() { v } else { fallback }
 }
 
 /// Score a candidate provider: lower latency, higher priority/weight, better
@@ -145,15 +142,13 @@ pub fn select_provider(
     let conn = pool.read().lock().ok()?;
     let providers = find_providers_for_model(&conn, &pool.cipher, model)?;
 
-    if let Some(key_id) = api_key_id.map(str::trim).filter(|s| !s.is_empty()) {
-        if let Some(pinned_id) = pinned_provider_id(&conn, key_id, model) {
-            if let Some(p) = providers
-                .iter()
-                .find(|p| p.id == pinned_id && affinity_usable(p, exclude))
-            {
-                return Some(p.clone());
-            }
-        }
+    if let Some(key_id) = api_key_id.map(str::trim).filter(|s| !s.is_empty())
+        && let Some(pinned_id) = pinned_provider_id(&conn, key_id, model)
+        && let Some(p) = providers
+            .iter()
+            .find(|p| p.id == pinned_id && affinity_usable(p, exclude))
+    {
+        return Some(p.clone());
     }
 
     let mut candidates: Vec<&Provider> = providers
@@ -178,11 +173,7 @@ pub fn select_provider(
     if healthy.is_empty() {
         // Fall back to any active provider even if unhealthy — still using
         // weighted scoring instead of always picking the first one.
-        let active: Vec<&Provider> = candidates
-            .iter()
-            .copied()
-            .filter(|p| p.is_active)
-            .collect();
+        let active: Vec<&Provider> = candidates.iter().copied().filter(|p| p.is_active).collect();
         return weighted_pick(&active);
     }
 
@@ -197,12 +188,10 @@ fn find_providers_for_model(
     model: &str,
 ) -> Option<Vec<Provider>> {
     let mut stmt = conn
-        .prepare(
-            &format!(
-             "SELECT {} FROM providers WHERE is_active = 1",
-             crate::models::PROVIDER_SELECT_COLUMNS
-         ),
-        )
+        .prepare(&format!(
+            "SELECT {} FROM providers WHERE is_active = 1",
+            crate::models::PROVIDER_SELECT_COLUMNS
+        ))
         .ok()?;
 
     let providers: Vec<Provider> = stmt
@@ -273,12 +262,7 @@ pub fn list_available_models(pool: &DbPool) -> Vec<String> {
 
 /// Record a successful request: update latency/error-rate EMAs and reset the
 /// consecutive failure counter.
-pub fn record_request_result(
-    pool: &DbPool,
-    provider_id: &str,
-    latency_ms: f64,
-    success: bool,
-) {
+pub fn record_request_result(pool: &DbPool, provider_id: &str, latency_ms: f64, success: bool) {
     let conn = match pool.conn.lock() {
         Ok(c) => c,
         Err(_) => return,
@@ -329,8 +313,7 @@ pub fn record_failure(
     };
 
     let is_upstream_failure = status == 0 || status == 408 || status == 429 || status >= 500;
-    let counts_as_failure =
-        (count_consecutive && is_upstream_failure && status != 429) as i32;
+    let counts_as_failure = (count_consecutive && is_upstream_failure && status != 429) as i32;
     let _ = conn.execute(
         "UPDATE providers SET
             latency_ms = CASE
@@ -428,7 +411,14 @@ pub fn spawn_record_failure(
     count_consecutive: bool,
 ) {
     tokio::task::spawn_blocking(move || {
-        record_failure(&pool, &provider_id, latency_ms, status, threshold, count_consecutive);
+        record_failure(
+            &pool,
+            &provider_id,
+            latency_ms,
+            status,
+            threshold,
+            count_consecutive,
+        );
     });
 }
 

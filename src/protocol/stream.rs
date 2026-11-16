@@ -1,7 +1,6 @@
 //! 流式转换调度:按 (客户端协议, 上游协议) 组合各协议的流式状态机。
 
-
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[allow(unused_imports)]
 use crate::protocol::*;
@@ -33,10 +32,17 @@ pub enum StreamConverter {
     /// (客户端未请求 include_usage,由网关注入时不应多送一个 chunk)。
     /// model 为客户端请求的模型名:转发前回写 chunk 的 model 字段。
     /// usage 4 元组:(未缓存输入, 输出, 总计, 缓存),见 extract_usage_any。
-    PassOpenAi { usage: (i32, i32, i32, i32), strip_usage_chunk: bool, model: String },
+    PassOpenAi {
+        usage: (i32, i32, i32, i32),
+        strip_usage_chunk: bool,
+        model: String,
+    },
     /// Same protocol, Anthropic: pass events through, capturing usage.
     /// model 用途同上(message_start 事件的 message.model 回写)。
-    PassAnthropic { usage: (i32, i32, i32, i32), model: String },
+    PassAnthropic {
+        usage: (i32, i32, i32, i32),
+        model: String,
+    },
     /// OpenAI upstream → Anthropic client.
     OpenAiToAnthropic(OaStreamState),
     /// Anthropic upstream → OpenAI client.
@@ -44,12 +50,18 @@ pub enum StreamConverter {
     /// Same protocol, Responses API: pass events through, capturing usage.
     /// usage 来自结尾的 response.completed 事件;response.created/completed
     /// 里的 response.model 回写为客户端请求的模型名。
-    PassResponses { usage: (i32, i32, i32, i32), model: String },
+    PassResponses {
+        usage: (i32, i32, i32, i32),
+        model: String,
+    },
     /// OpenAI chat-completions upstream → Responses API client.
     OpenAiToResponses(OarStreamState),
     /// Anthropic upstream → Responses API client:AnStreamState 先转成 chat
     /// chunks,再喂给 OarStreamState 组合出 responses 事件。
-    AnthropicToResponses { an: AnStreamState, oar: OarStreamState },
+    AnthropicToResponses {
+        an: AnStreamState,
+        oar: OarStreamState,
+    },
 }
 
 impl StreamConverter {
@@ -61,14 +73,16 @@ impl StreamConverter {
                 strip_usage_chunk: false,
                 model: model.to_string(),
             },
-            (Anthropic, Anthropic) => {
-                StreamConverter::PassAnthropic { usage: (0, 0, 0, 0), model: model.to_string() }
-            }
+            (Anthropic, Anthropic) => StreamConverter::PassAnthropic {
+                usage: (0, 0, 0, 0),
+                model: model.to_string(),
+            },
             (Anthropic, OpenAi) => StreamConverter::OpenAiToAnthropic(OaStreamState::new(model)),
             (OpenAi, Anthropic) => StreamConverter::AnthropicToOpenAi(AnStreamState::new(model)),
-            (Responses, Responses) => {
-                StreamConverter::PassResponses { usage: (0, 0, 0, 0), model: model.to_string() }
-            }
+            (Responses, Responses) => StreamConverter::PassResponses {
+                usage: (0, 0, 0, 0),
+                model: model.to_string(),
+            },
             (Responses, OpenAi) => StreamConverter::OpenAiToResponses(OarStreamState::new(model)),
             (Responses, Anthropic) => StreamConverter::AnthropicToResponses {
                 an: AnStreamState::new(model),
@@ -87,7 +101,10 @@ impl StreamConverter {
     /// 设置是否剥掉仅含 usage 的结尾 chunk(仅对 OpenAI 直通生效)。
     /// 客户端自己请求了 include_usage 时应传 false,usage chunk 原样转发。
     pub fn strip_usage_chunk(mut self, strip: bool) -> Self {
-        if let StreamConverter::PassOpenAi { strip_usage_chunk, .. } = &mut self {
+        if let StreamConverter::PassOpenAi {
+            strip_usage_chunk, ..
+        } = &mut self
+        {
             *strip_usage_chunk = strip;
         }
         self
@@ -95,7 +112,11 @@ impl StreamConverter {
 
     pub fn push(&mut self, ev: &SseEvent) -> Vec<SseOut> {
         match self {
-            StreamConverter::PassOpenAi { usage, strip_usage_chunk, model } => {
+            StreamConverter::PassOpenAi {
+                usage,
+                strip_usage_chunk,
+                model,
+            } => {
                 let mut forward = true;
                 // 解析成功且转发时重序列化(model 字段回写);解析失败
                 // (如 [DONE])原样直通。
@@ -108,7 +129,10 @@ impl StreamConverter {
                     // 仅含 usage 的结尾 chunk:choices 缺失或为空且带 usage。
                     if *strip_usage_chunk
                         && !chunk["usage"].is_null()
-                        && chunk["choices"].as_array().map(|a| a.is_empty()).unwrap_or(true)
+                        && chunk["choices"]
+                            .as_array()
+                            .map(|a| a.is_empty())
+                            .unwrap_or(true)
                     {
                         forward = false;
                     }
@@ -204,7 +228,10 @@ impl StreamConverter {
             StreamConverter::AnthropicToResponses { an, oar } => {
                 let mut out = Vec::new();
                 for mid in an.push(ev) {
-                    out.extend(oar.push(&SseEvent { event: mid.event, data: mid.data }));
+                    out.extend(oar.push(&SseEvent {
+                        event: mid.event,
+                        data: mid.data,
+                    }));
                 }
                 out
             }
@@ -229,9 +256,8 @@ impl StreamConverter {
 
     pub fn usage(&self) -> (i32, i32, i32, i32) {
         match self {
-            StreamConverter::PassOpenAi { usage, .. } | StreamConverter::PassAnthropic { usage, .. } => {
-                *usage
-            }
+            StreamConverter::PassOpenAi { usage, .. }
+            | StreamConverter::PassAnthropic { usage, .. } => *usage,
             StreamConverter::OpenAiToAnthropic(state) => state.usage,
             StreamConverter::AnthropicToOpenAi(state) => state.usage,
             StreamConverter::PassResponses { usage, .. } => *usage,
@@ -240,7 +266,6 @@ impl StreamConverter {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -256,7 +281,9 @@ mod tests {
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"x"}}]}"#));
         assert_eq!(outs.len(), 1);
         assert_eq!(c.usage(), (0, 0, 0, 0));
-        c.push(&sse(r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#));
+        c.push(&sse(
+            r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#,
+        ));
         assert_eq!(c.usage(), (1, 2, 3, 0));
         assert!(c.finish().is_empty());
     }
@@ -264,20 +291,32 @@ mod tests {
     #[test]
     fn stream_pass_openai_strips_unrequested_usage_chunk() {
         // 客户端未请求 include_usage(由网关注入):usage chunk 只记账、不转发。
-        let mut c = StreamConverter::new(Protocol::OpenAi, Protocol::OpenAi, "m").strip_usage_chunk(true);
+        let mut c =
+            StreamConverter::new(Protocol::OpenAi, Protocol::OpenAi, "m").strip_usage_chunk(true);
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"x"}}]}"#));
         assert_eq!(outs.len(), 1);
-        let outs = c.push(&sse(r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#));
-        assert!(outs.is_empty(), "usage-only chunk must not reach the client");
+        let outs = c.push(&sse(
+            r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#,
+        ));
+        assert!(
+            outs.is_empty(),
+            "usage-only chunk must not reach the client"
+        );
         assert_eq!(c.usage(), (1, 2, 3, 0));
     }
 
     #[test]
     fn stream_pass_anthropic_captures_usage() {
         let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::Anthropic, "m");
-        c.push(&sse_typed("message_start", r#"{"type":"message_start","message":{"usage":{"input_tokens":7}}}"#));
+        c.push(&sse_typed(
+            "message_start",
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":7}}}"#,
+        ));
         assert_eq!(c.usage(), (7, 0, 7, 0));
-        c.push(&sse_typed("message_delta", r#"{"type":"message_delta","usage":{"output_tokens":4}}"#));
+        c.push(&sse_typed(
+            "message_delta",
+            r#"{"type":"message_delta","usage":{"output_tokens":4}}"#,
+        ));
         assert_eq!(c.usage(), (7, 4, 11, 0));
     }
 
@@ -288,7 +327,10 @@ mod tests {
         let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::Anthropic, "m");
         c.push(&sse_typed("message_start", r#"{"type":"message_start","message":{"usage":{"input_tokens":7,"cache_creation_input_tokens":3,"cache_read_input_tokens":5}}}"#));
         assert_eq!(c.usage(), (10, 0, 15, 5));
-        c.push(&sse_typed("message_delta", r#"{"type":"message_delta","usage":{"output_tokens":4}}"#));
+        c.push(&sse_typed(
+            "message_delta",
+            r#"{"type":"message_delta","usage":{"output_tokens":4}}"#,
+        ));
         assert_eq!(c.usage(), (10, 4, 19, 5));
     }
 
@@ -296,7 +338,9 @@ mod tests {
     fn stream_pass_openai_rewrites_chunk_model() {
         // 映射场景:chunk 里的上游真实模型名回写为请求模型名。
         let mut c = StreamConverter::new(Protocol::OpenAi, Protocol::OpenAi, "gpt-4");
-        let outs = c.push(&sse(r#"{"model":"real-gpt-4-2024","choices":[{"delta":{"content":"x"}}]}"#));
+        let outs = c.push(&sse(
+            r#"{"model":"real-gpt-4-2024","choices":[{"delta":{"content":"x"}}]}"#,
+        ));
         assert_eq!(outs.len(), 1);
         let chunk: Value = serde_json::from_str(&outs[0].data).unwrap();
         assert_eq!(chunk["model"], "gpt-4");
@@ -347,7 +391,10 @@ mod tests {
             "response.output_text.delta",
             r#"{"type":"response.output_text.delta","delta":"hi"}"#,
         ));
-        assert_eq!(outs[0].data, r#"{"type":"response.output_text.delta","delta":"hi"}"#);
+        assert_eq!(
+            outs[0].data,
+            r#"{"type":"response.output_text.delta","delta":"hi"}"#
+        );
 
         let outs = c.push(&sse_typed(
             "response.completed",
@@ -362,14 +409,27 @@ mod tests {
     #[test]
     fn stream_anthropic_to_responses_composition() {
         let mut c = StreamConverter::new(Protocol::Responses, Protocol::Anthropic, "claude-4");
-        let outs = c.push(&sse_typed("message_start", r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":9}}}"#));
+        let outs = c.push(&sse_typed(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":9}}}"#,
+        ));
         // an → chat chunk → oar:response.created/in_progress
-        assert_eq!(out_types(&outs), vec!["response.created", "response.in_progress"]);
-
-        let outs = c.push(&sse_typed("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#));
         assert_eq!(
             out_types(&outs),
-            vec!["response.output_item.added", "response.content_part.added", "response.output_text.delta"]
+            vec!["response.created", "response.in_progress"]
+        );
+
+        let outs = c.push(&sse_typed(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+        ));
+        assert_eq!(
+            out_types(&outs),
+            vec![
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta"
+            ]
         );
 
         c.push(&sse_typed("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}"#));

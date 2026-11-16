@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[allow(unused_imports)]
 use crate::protocol::*;
@@ -33,7 +33,12 @@ impl AnStreamState {
         }
     }
 
-    pub(crate) fn chunk(&self, delta: Value, finish_reason: Option<&str>, usage: Option<Value>) -> SseOut {
+    pub(crate) fn chunk(
+        &self,
+        delta: Value,
+        finish_reason: Option<&str>,
+        usage: Option<Value>,
+    ) -> SseOut {
         let mut obj = json!({
             "id": self.msg_id,
             "object": "chat.completion.chunk",
@@ -88,10 +93,15 @@ impl AnStreamState {
                 // 缓存拆分口径同 PassAnthropic:cache_creation 并入未缓存输入,
                 // cache_read 记入缓存维度。
                 let mu = &msg["usage"];
-                self.usage.0 = clamp_token_count(mu["input_tokens"].as_i64())
-                    .saturating_add(clamp_token_count(mu["cache_creation_input_tokens"].as_i64()));
+                self.usage.0 = clamp_token_count(mu["input_tokens"].as_i64()).saturating_add(
+                    clamp_token_count(mu["cache_creation_input_tokens"].as_i64()),
+                );
                 self.usage.3 = clamp_token_count(mu["cache_read_input_tokens"].as_i64());
-                self.usage.2 = self.usage.0.saturating_add(self.usage.1).saturating_add(self.usage.3);
+                self.usage.2 = self
+                    .usage
+                    .0
+                    .saturating_add(self.usage.1)
+                    .saturating_add(self.usage.3);
                 vec![self.chunk(json!({"role": "assistant", "content": ""}), None, None)]
             }
             "content_block_start" => {
@@ -172,7 +182,11 @@ impl AnStreamState {
                 if let Some(v) = du["cache_creation_input_tokens"].as_i64() {
                     self.usage.0 = self.usage.0.saturating_add(clamp_token_count(Some(v)));
                 }
-                self.usage.2 = self.usage.0.saturating_add(self.usage.1).saturating_add(self.usage.3);
+                self.usage.2 = self
+                    .usage
+                    .0
+                    .saturating_add(self.usage.1)
+                    .saturating_add(self.usage.3);
                 let mut out = Vec::new();
                 if let Some(stop) = data["delta"]["stop_reason"].as_str() {
                     let finish = anthropic_stop_to_openai(stop);
@@ -194,7 +208,6 @@ impl AnStreamState {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -226,7 +239,10 @@ mod tests {
         assert_eq!(chunk["id"], "msg_1");
         assert_eq!(chunk["choices"][0]["delta"]["role"], "assistant");
 
-        let outs = c.push(&sse_typed("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#));
+        let outs = c.push(&sse_typed(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+        ));
         let chunk: Value = serde_json::from_str(&outs[0].data).unwrap();
         assert_eq!(chunk["choices"][0]["delta"]["content"], "Hi");
 
@@ -277,14 +293,23 @@ mod tests {
     #[test]
     fn stream_anthropic_to_openai_tool_flow() {
         let mut c = StreamConverter::new(Protocol::OpenAi, Protocol::Anthropic, "m");
-        c.push(&sse_typed("message_start", r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1}}}"#));
+        c.push(&sse_typed(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1}}}"#,
+        ));
         let outs = c.push(&sse_typed("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu1","name":"fn"}}"#));
         let chunk: Value = serde_json::from_str(&outs[0].data).unwrap();
-        assert_eq!(chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["name"], "fn");
+        assert_eq!(
+            chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+            "fn"
+        );
 
         let outs = c.push(&sse_typed("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}}"#));
         let chunk: Value = serde_json::from_str(&outs[0].data).unwrap();
-        assert_eq!(chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"], "{\"a\":");
+        assert_eq!(
+            chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            "{\"a\":"
+        );
     }
 
     #[test]
@@ -329,7 +354,10 @@ mod tests {
             "message_start",
             r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":9,"cache_creation_input_tokens":2,"cache_read_input_tokens":5}}}"#,
         ));
-        c.push(&sse_typed("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#));
+        c.push(&sse_typed(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+        ));
         c.push(&sse_typed("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}"#));
 
         // usage:(未缓存输入 9+2=11, 输出 3, 总 19, 缓存 5)

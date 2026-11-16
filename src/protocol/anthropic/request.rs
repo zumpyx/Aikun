@@ -1,7 +1,6 @@
 //! Anthropic 请求 → OpenAI(枢纽)。
 
-
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 #[allow(unused_imports)]
 use crate::protocol::*;
@@ -57,10 +56,7 @@ pub(crate) fn anthropic_req_to_openai(body: &Value) -> Value {
     if stream {
         out.insert("stream".into(), json!(true));
         // Ask the OpenAI upstream to report token usage in the final chunk.
-        out.insert(
-            "stream_options".into(),
-            json!({"include_usage": true}),
-        );
+        out.insert("stream_options".into(), json!({"include_usage": true}));
     }
     for key in ["temperature", "top_p"] {
         if !body[key].is_null() {
@@ -223,10 +219,7 @@ pub(crate) fn anthropic_req_to_openai(body: &Value) -> Value {
                     m.insert("role".into(), json!("assistant"));
                     m.insert("content".into(), json!(text));
                     if !reasoning_parts.is_empty() {
-                        m.insert(
-                            "reasoning_content".into(),
-                            json!(reasoning_parts.join("")),
-                        );
+                        m.insert("reasoning_content".into(), json!(reasoning_parts.join("")));
                     }
                     // 多块思考各带签名时无法合成一个,宁可不带也不要贴错。
                     if signatures.len() == 1 {
@@ -245,7 +238,6 @@ pub(crate) fn anthropic_req_to_openai(body: &Value) -> Value {
     out.insert("messages".into(), json!(messages));
     Value::Object(out)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -288,10 +280,16 @@ mod tests {
         });
         let out = convert_request(&body, Protocol::Anthropic, Protocol::OpenAi);
         let msgs = out["messages"].as_array().unwrap();
-        assert_eq!(msgs[0], json!({"role": "tool", "tool_call_id": "t1", "content": "result-text"}));
+        assert_eq!(
+            msgs[0],
+            json!({"role": "tool", "tool_call_id": "t1", "content": "result-text"})
+        );
         assert_eq!(msgs[1], json!({"role": "user", "content": "follow-up"}));
         assert_eq!(msgs[2]["role"], "assistant");
-        assert_eq!(msgs[2]["tool_calls"][0]["function"]["arguments"], "{\"a\":1}");
+        assert_eq!(
+            msgs[2]["tool_calls"][0]["function"]["arguments"],
+            "{\"a\":1}"
+        );
     }
 
     #[test]

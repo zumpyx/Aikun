@@ -26,7 +26,9 @@ pub struct ChannelKindInfo {
 
 impl ChannelRegistry {
     pub fn empty() -> Self {
-        Self { adapters: BTreeMap::new() }
+        Self {
+            adapters: BTreeMap::new(),
+        }
     }
 
     /// 注册一个适配器;同名 kind 后注册者覆盖先注册者。
@@ -136,7 +138,12 @@ mod tests {
         fn endpoint_path(&self, _protocol: crate::protocol::Protocol) -> &'static str {
             "/api/chat"
         }
-        fn prepare_request(&self, _p: &Provider, _protocol: crate::protocol::Protocol, body: &mut serde_json::Value) {
+        fn prepare_request(
+            &self,
+            _p: &Provider,
+            _protocol: crate::protocol::Protocol,
+            body: &mut serde_json::Value,
+        ) {
             body["vendor_flag"] = serde_json::json!(true);
         }
     }
@@ -148,11 +155,17 @@ mod tests {
         let a = reg.resolve("demo");
         let mut p = crate::models::provider::tests::bare_provider();
         p.openai_base_url = "https://vendor.example/v1".into();
-        assert_eq!(a.chat_url(&p, crate::protocol::Protocol::OpenAi), "https://vendor.example/v1/api/chat");
+        assert_eq!(
+            a.chat_url(&p, crate::protocol::Protocol::OpenAi),
+            "https://vendor.example/v1/api/chat"
+        );
         let mut body = serde_json::json!({"model": "m"});
         a.prepare_request(&p, crate::protocol::Protocol::OpenAi, &mut body);
         assert_eq!(body["vendor_flag"], true);
         // 未覆写的钩子沿用默认实现
-        assert_eq!(a.models_url("https://vendor.example", crate::protocol::Protocol::OpenAi), "https://vendor.example/v1/models");
+        assert_eq!(
+            a.models_url("https://vendor.example", crate::protocol::Protocol::OpenAi),
+            "https://vendor.example/v1/models"
+        );
     }
 }

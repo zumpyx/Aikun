@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use crate::models::Provider;
@@ -28,7 +28,9 @@ impl std::fmt::Display for BodyReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BodyReadError::Read(e) => write!(f, "failed to read upstream body: {}", e),
-            BodyReadError::TooLarge(max) => write!(f, "upstream response body exceeded {} bytes", max),
+            BodyReadError::TooLarge(max) => {
+                write!(f, "upstream response body exceeded {} bytes", max)
+            }
             BodyReadError::Parse(e) => write!(f, "failed to parse upstream response: {}", e),
         }
     }
@@ -48,7 +50,10 @@ impl BodyReadError {
 /// 读取上游 JSON 响应体,带硬性字节上限。读取失败、超限或解析失败都返回
 /// Err —— 解析失败必须报错而不是当空对象:否则 200+HTML 错误页/非 JSON
 /// 响应会被当成"合法的 200"。对话、直通、模型实测、fetch-models 共用。
-pub async fn read_json_limited(resp: reqwest::Response, max_bytes: usize) -> Result<Value, BodyReadError> {
+pub async fn read_json_limited(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Value, BodyReadError> {
     use futures_util::StreamExt;
     let mut stream = std::pin::pin!(resp.bytes_stream());
     let mut buf: Vec<u8> = Vec::new();
@@ -143,7 +148,9 @@ fn build_client(proxy_url: &str, context: &str, timeout_secs: u64) -> Client {
             Err(e) => {
                 warn!(
                     "Invalid proxy_url '{}' for {}: {} — connecting directly",
-                    sanitize_proxy_url(proxy_url), context, e
+                    sanitize_proxy_url(proxy_url),
+                    context,
+                    e
                 );
             }
         }
@@ -153,7 +160,8 @@ fn build_client(proxy_url: &str, context: &str, timeout_secs: u64) -> Client {
         Err(e) => {
             tracing::error!(
                 "Failed to build HTTP client for {}: {} — falling back to default client",
-                context, e
+                context,
+                e
             );
             Client::new()
         }
@@ -352,7 +360,10 @@ mod tests {
     fn api_url_full_endpoint_not_appended() {
         // base 已含完整端点路径时原样使用（如 Azure 部署 URL）
         assert_eq!(
-            build_api_url("https://x.com/openai/deployments/d/chat/completions", "/chat/completions"),
+            build_api_url(
+                "https://x.com/openai/deployments/d/chat/completions",
+                "/chat/completions"
+            ),
             "https://x.com/openai/deployments/d/chat/completions"
         );
         assert_eq!(
@@ -373,7 +384,10 @@ mod tests {
         );
         // 完整端点 + query：不追加，query 原样保留
         assert_eq!(
-            build_api_url("https://x.com/d/chat/completions?api-version=1&x=2", "/chat/completions"),
+            build_api_url(
+                "https://x.com/d/chat/completions?api-version=1&x=2",
+                "/chat/completions"
+            ),
             "https://x.com/d/chat/completions?api-version=1&x=2"
         );
     }
@@ -398,7 +412,10 @@ mod tests {
             sanitize_log_url("https://user:pw@x.com/v1/chat/completions?api-version=1&key=abc"),
             "https://x.com/v1/chat/completions"
         );
-        assert_eq!(sanitize_log_url("https://x.com/v1/models"), "https://x.com/v1/models");
+        assert_eq!(
+            sanitize_log_url("https://x.com/v1/models"),
+            "https://x.com/v1/models"
+        );
     }
 
     #[test]

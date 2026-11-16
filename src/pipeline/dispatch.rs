@@ -5,27 +5,25 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::{
-    http::StatusCode,
-    response::{
-        IntoResponse, Response,
-    },
     Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use super::*;
+use crate::AppState;
 use crate::billing::ledger::{request_log_sync, spawn_request_log};
-use crate::pipeline::admission::ConcurrencyGuard;
-use crate::channel::transport::send_request;
-use crate::protocol::{
-    convert_error, convert_request, convert_response, extract_usage_any, protocol_error,
-    valid_response_shape, Protocol,
-};
 use crate::channel::selector::{
     select_provider_async, spawn_pin_channel, spawn_record_failure, spawn_record_result,
 };
-use crate::AppState;
+use crate::channel::transport::send_request;
+use crate::pipeline::admission::ConcurrencyGuard;
+use crate::protocol::{
+    Protocol, convert_error, convert_request, convert_response, extract_usage_any, protocol_error,
+    valid_response_shape,
+};
 
 /// 渠道重试/故障转移循环：依次尝试可用渠道，全部失败时返回最后一次上游
 /// 错误（或 503）。流式请求在拿到 200 头后直接移交 stream_response。
@@ -76,7 +74,9 @@ pub(super) async fn attempt_loop(
         }
 
         // 渠道级重试上限:该渠道已尝试 max_retries + 1 次后跳过,换下一个。
-        let attempts = per_provider_attempts.entry(provider.id.clone()).or_insert(0);
+        let attempts = per_provider_attempts
+            .entry(provider.id.clone())
+            .or_insert(0);
         *attempts += 1;
         if *attempts > provider.max_retries.max(0) as u32 + 1 {
             debug!(
@@ -95,7 +95,11 @@ pub(super) async fn attempt_loop(
                 provider.name
             );
             spawn_record_failure(
-                state.pool.clone(), provider.id.clone(), 0.0, 0, threshold,
+                state.pool.clone(),
+                provider.id.clone(),
+                0.0,
+                0,
+                threshold,
                 failure_counted.insert(provider.id.clone()),
             );
             continue;
@@ -104,8 +108,12 @@ pub(super) async fn attempt_loop(
         let provider_protocol = crate::models::upstream_protocol_for(&provider, client_protocol);
         debug!(
             "Routing '{}' ({} client) → provider '{}' ({} upstream, health={} latency={}ms)",
-            model, client_protocol, provider.name, provider_protocol,
-            provider.health_status, provider.latency_ms as i64
+            model,
+            client_protocol,
+            provider.name,
+            provider_protocol,
+            provider.health_status,
+            provider.latency_ms as i64
         );
 
         // Convert the request into the provider's native protocol, then apply
@@ -114,25 +122,50 @@ pub(super) async fn attempt_loop(
         apply_model_mapping(&provider, &mut upstream_body);
 
         let adapter = crate::channel::adapter_for(&provider);
-        let (resp, latency) =
-            match send_request(&state.clients, &provider, provider_protocol, upstream_body, is_stream, state.config.request_timeout_secs).await {
-                Ok(v) => v,
-                Err((err_body, status, latency)) => {
-                    warn!(
-                        "Transport error from provider {}: status={} — failing over",
-                        provider.name, status
-                    );
-                    spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold, failure_counted.insert(provider.id.clone()));
-                    spawn_request_log(
-                        &state.pool, user_id.clone(), api_key_id.clone(),
-                        Some(provider.id.clone()), model.clone(), client_protocol.as_str(),
-                        0, 0, 0, 0, latency as i32, status as i32, false,
-                        Some("upstream transport error".to_string()),
-                    );
-                    last_error = Some((err_body, status));
-                    continue;
-                }
-            };
+        let (resp, latency) = match send_request(
+            &state.clients,
+            &provider,
+            provider_protocol,
+            upstream_body,
+            is_stream,
+            state.config.request_timeout_secs,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err((err_body, status, latency)) => {
+                warn!(
+                    "Transport error from provider {}: status={} — failing over",
+                    provider.name, status
+                );
+                spawn_record_failure(
+                    state.pool.clone(),
+                    provider.id.clone(),
+                    latency,
+                    0,
+                    threshold,
+                    failure_counted.insert(provider.id.clone()),
+                );
+                spawn_request_log(
+                    &state.pool,
+                    user_id.clone(),
+                    api_key_id.clone(),
+                    Some(provider.id.clone()),
+                    model.clone(),
+                    client_protocol.as_str(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    latency as i32,
+                    status as i32,
+                    false,
+                    Some("upstream transport error".to_string()),
+                );
+                last_error = Some((err_body, status));
+                continue;
+            }
+        };
 
         let status = resp.status().as_u16();
 
@@ -156,17 +189,32 @@ pub(super) async fn attempt_loop(
                         let (p, c, t, k) = extract_usage_any(&resp_body);
                         // 计费级:响应返回前日志与扣费已落库(await)。
                         request_log_sync(
-                            &state.pool, user_id.clone(), api_key_id.clone(),
-                            Some(provider.id.clone()), model.clone(), client_protocol.as_str(),
-                            p, c, t, k, latency as i32, 200, true, None,
+                            &state.pool,
+                            user_id.clone(),
+                            api_key_id.clone(),
+                            Some(provider.id.clone()),
+                            model.clone(),
+                            client_protocol.as_str(),
+                            p,
+                            c,
+                            t,
+                            k,
+                            latency as i32,
+                            200,
+                            true,
+                            None,
                         )
                         .await;
                         debug!(
                             "Completed: model={} provider={} latency={}ms tokens={}",
                             model, provider.name, latency as i64, t
                         );
-                        let client_body =
-                            convert_response(&resp_body, provider_protocol, client_protocol, &model);
+                        let client_body = convert_response(
+                            &resp_body,
+                            provider_protocol,
+                            client_protocol,
+                            &model,
+                        );
                         if let Some(key) = cache_key {
                             // 同步写入(内存后端为纳秒级),
                             // 保证响应返回后紧接着的同一请求必然命中。
@@ -198,11 +246,29 @@ pub(super) async fn attempt_loop(
                             "Upstream 200 from provider {} but body unusable: {} — failing over",
                             provider.name, detail
                         );
-                        spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold, failure_counted.insert(provider.id.clone()));
+                        spawn_record_failure(
+                            state.pool.clone(),
+                            provider.id.clone(),
+                            latency,
+                            0,
+                            threshold,
+                            failure_counted.insert(provider.id.clone()),
+                        );
                         spawn_request_log(
-                            &state.pool, user_id.clone(), api_key_id.clone(),
-                            Some(provider.id.clone()), model.clone(), client_protocol.as_str(),
-                            0, 0, 0, 0, latency as i32, 502, false, Some(detail),
+                            &state.pool,
+                            user_id.clone(),
+                            api_key_id.clone(),
+                            Some(provider.id.clone()),
+                            model.clone(),
+                            client_protocol.as_str(),
+                            0,
+                            0,
+                            0,
+                            0,
+                            latency as i32,
+                            502,
+                            false,
+                            Some(detail),
                         );
                         last_error = Some((
                             json!({"error": {"message": msg, "type": "upstream_error"}}),
@@ -237,11 +303,29 @@ pub(super) async fn attempt_loop(
                     "Upstream 200 from provider {} but not an SSE stream: {} — failing over",
                     provider.name, detail
                 );
-                spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold, failure_counted.insert(provider.id.clone()));
+                spawn_record_failure(
+                    state.pool.clone(),
+                    provider.id.clone(),
+                    latency,
+                    0,
+                    threshold,
+                    failure_counted.insert(provider.id.clone()),
+                );
                 spawn_request_log(
-                    &state.pool, user_id.clone(), api_key_id.clone(),
-                    Some(provider.id.clone()), model.clone(), client_protocol.as_str(),
-                    0, 0, 0, 0, latency as i32, 502, false, Some(detail),
+                    &state.pool,
+                    user_id.clone(),
+                    api_key_id.clone(),
+                    Some(provider.id.clone()),
+                    model.clone(),
+                    client_protocol.as_str(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    latency as i32,
+                    502,
+                    false,
+                    Some(detail),
                 );
                 last_error = Some((
                     json!({"error": {"message": msg, "type": "upstream_error"}}),
@@ -255,8 +339,9 @@ pub(super) async fn attempt_loop(
             // 失败也不会改钉,下一次仍先试这个渠道,再失败才换。
             // 客户端是否自己请求了 include_usage:未请求时转发前剥掉
             // 网关注入的 usage chunk。
-            let client_wants_usage =
-                body["stream_options"]["include_usage"].as_bool().unwrap_or(false);
+            let client_wants_usage = body["stream_options"]["include_usage"]
+                .as_bool()
+                .unwrap_or(false);
             spawn_pin_channel(
                 state.pool.clone(),
                 api_key_id.clone(),
@@ -264,9 +349,18 @@ pub(super) async fn attempt_loop(
                 provider.id.clone(),
             );
             return super::stream::stream_response(
-                state, resp, adapter, client_protocol, provider_protocol,
-                provider.id.clone(), provider.timeout_secs, model, user_id,
-                api_key_id, client_wants_usage, concurrency_guard.take(),
+                state,
+                resp,
+                adapter,
+                client_protocol,
+                provider_protocol,
+                provider.id.clone(),
+                provider.timeout_secs,
+                model,
+                user_id,
+                api_key_id,
+                client_wants_usage,
+                concurrency_guard.take(),
             );
         }
 
@@ -282,7 +376,14 @@ pub(super) async fn attempt_loop(
             "Upstream error: model={} provider={} status={} msg={}",
             model, provider.name, status, msg
         );
-        spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, status, threshold, failure_counted.insert(provider.id.clone()));
+        spawn_record_failure(
+            state.pool.clone(),
+            provider.id.clone(),
+            latency,
+            status,
+            threshold,
+            failure_counted.insert(provider.id.clone()),
+        );
         // 401/403 的上游消息可能回显渠道凭证(one-api 系常见);request_logs
         // 对终端用户可见(/api/logs 按 user_id 过滤),日志只存通用文案,
         // 完整消息仅留在服务端 warn 里。
@@ -292,9 +393,20 @@ pub(super) async fn attempt_loop(
             msg.clone()
         };
         spawn_request_log(
-            &state.pool, user_id.clone(), api_key_id.clone(),
-            Some(provider.id.clone()), model.clone(), client_protocol.as_str(),
-            0, 0, 0, 0, latency as i32, status as i32, false, Some(log_msg),
+            &state.pool,
+            user_id.clone(),
+            api_key_id.clone(),
+            Some(provider.id.clone()),
+            model.clone(),
+            client_protocol.as_str(),
+            0,
+            0,
+            0,
+            0,
+            latency as i32,
+            status as i32,
+            false,
+            Some(log_msg),
         );
 
         // Retryable: rate limits, server errors, timeouts, and dead channels
@@ -335,8 +447,19 @@ pub(super) async fn attempt_loop(
             // the audit log reflects every failed request, not just upstream
             // ones.
             spawn_request_log(
-                &state.pool, user_id.clone(), api_key_id.clone(), None,
-                model.clone(), client_protocol.as_str(), 0, 0, 0, 0, 0, 503, false,
+                &state.pool,
+                user_id.clone(),
+                api_key_id.clone(),
+                None,
+                model.clone(),
+                client_protocol.as_str(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                503,
+                false,
                 Some(format!("no available provider for model '{}'", model)),
             );
             (
@@ -354,4 +477,3 @@ pub(super) async fn attempt_loop(
         }
     }
 }
-

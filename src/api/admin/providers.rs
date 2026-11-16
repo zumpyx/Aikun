@@ -1,57 +1,66 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use rusqlite::params;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::protocol::Protocol;
 use crate::AppState;
-use crate::models::{
-    channel_protocol, channel_protocols, first_defaultable_protocol, has_defaultable_protocol,
-    row_to_provider, valid_default_protocol, valid_protocol_list, CreateProviderRequest,
-    ProviderResponse, UpdateProviderRequest,
-};
 use crate::channel::health::check_provider_health;
+use crate::models::{
+    CreateProviderRequest, ProviderResponse, UpdateProviderRequest, channel_protocol,
+    channel_protocols, first_defaultable_protocol, has_defaultable_protocol, row_to_provider,
+    valid_default_protocol, valid_protocol_list,
+};
+use crate::protocol::Protocol;
 
-pub async fn list_providers(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn list_providers(State(state): State<AppState>) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
 
-    let mut stmt = match conn.prepare(
-        &format!(
-         "SELECT {} FROM providers ORDER BY priority DESC, name ASC",
-         crate::models::PROVIDER_SELECT_COLUMNS
-     )
-    ) {
+    let mut stmt = match conn.prepare(&format!(
+        "SELECT {} FROM providers ORDER BY priority DESC, name ASC",
+        crate::models::PROVIDER_SELECT_COLUMNS
+    )) {
         Ok(s) => s,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "query_failed"})),
+            );
+        }
     };
 
     let providers: Vec<ProviderResponse> = match stmt.query_map([], row_to_provider) {
-            Ok(rows) => rows
-                .filter_map(|r| r.ok())
-                .map(|p| {
-                    let mut resp = ProviderResponse::from(p);
-                    // proxy_url 可能内嵌凭证，列表响应一律脱敏回显
-                    resp.proxy_url = crate::channel::transport::sanitize_proxy_url(&resp.proxy_url);
-                    resp
-                })
-                .collect(),
-            // 查询失败要报 500 而不是返回空列表——否则 DB 故障在前端
-            // 表现为"没有任何渠道",掩盖真实故障。
-            Err(e) => {
-                tracing::error!("Failed to list providers: {}", e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})));
-            }
-        };
+        Ok(rows) => rows
+            .filter_map(|r| r.ok())
+            .map(|p| {
+                let mut resp = ProviderResponse::from(p);
+                // proxy_url 可能内嵌凭证，列表响应一律脱敏回显
+                resp.proxy_url = crate::channel::transport::sanitize_proxy_url(&resp.proxy_url);
+                resp
+            })
+            .collect(),
+        // 查询失败要报 500 而不是返回空列表——否则 DB 故障在前端
+        // 表现为"没有任何渠道",掩盖真实故障。
+        Err(e) => {
+            tracing::error!("Failed to list providers: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "query_failed"})),
+            );
+        }
+    };
 
     (StatusCode::OK, Json(json!(providers)))
 }
@@ -90,7 +99,10 @@ fn channel_kind_names() -> String {
 
 /// 管理端「渠道类型」下拉:列出全部已注册的渠道适配器。
 pub async fn list_channel_kinds() -> impl IntoResponse {
-    (StatusCode::OK, Json(json!(crate::channel::registry().list())))
+    (
+        StatusCode::OK,
+        Json(json!(crate::channel::registry().list())),
+    )
 }
 
 pub fn valid_weight(w: f64) -> bool {
@@ -118,16 +130,22 @@ fn insert_provider(
     let protocols = match req.protocols {
         Some(list) => {
             if !valid_protocol_list(&list) {
-                return Err((StatusCode::BAD_REQUEST, Json(json!({
-                    "error": "invalid_protocols",
-                    "message": "protocols 不能为空，且仅支持 openai / anthropic / responses"
-                }))));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "invalid_protocols",
+                        "message": "protocols 不能为空，且仅支持 openai / anthropic / responses"
+                    })),
+                ));
             }
             if !has_defaultable_protocol(&list) {
-                return Err((StatusCode::BAD_REQUEST, Json(json!({
-                    "error": "invalid_protocols",
-                    "message": "responses 为附加协议，需同时勾选 openai 或 anthropic"
-                }))));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "invalid_protocols",
+                        "message": "responses 为附加协议，需同时勾选 openai 或 anthropic"
+                    })),
+                ));
             }
             list
         }
@@ -136,18 +154,23 @@ fn insert_provider(
     let default_protocol = match req.default_protocol {
         Some(d) if valid_default_protocol(&d, &protocols) => d,
         Some(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_default_protocol",
-                "message": "default_protocol 必须是已勾选的 openai / anthropic 协议之一"
-            }))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_default_protocol",
+                    "message": "default_protocol 必须是已勾选的 openai / anthropic 协议之一"
+                })),
+            ));
         }
         None => first_defaultable_protocol(&protocols),
     };
-    let protocols_json = serde_json::to_string(&protocols)
-        .unwrap_or_else(|_| "[\"openai\"]".to_string());
+    let protocols_json =
+        serde_json::to_string(&protocols).unwrap_or_else(|_| "[\"openai\"]".to_string());
     // Keep the legacy provider_type column in sync with the default protocol
     // so old fallback paths stay consistent.
-    let provider_type = req.provider_type.unwrap_or_else(|| default_protocol.clone());
+    let provider_type = req
+        .provider_type
+        .unwrap_or_else(|| default_protocol.clone());
     let priority = req.priority.unwrap_or(0);
     let weight = req.weight.unwrap_or(1.0);
     let max_retries = req.max_retries.unwrap_or(3);
@@ -155,10 +178,13 @@ fn insert_provider(
 
     let name = req.name.trim().to_string();
     if name.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_name",
-            "message": "name 不能为空"
-        }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_name",
+                "message": "name 不能为空"
+            })),
+        ));
     }
     // 两种协议的上游地址独立配置;至少填一个,留空的一路回退到另一个。
     let openai_base_url = req
@@ -175,46 +201,67 @@ fn insert_provider(
         .to_string();
     // 勾选了哪个协议就必须填对应的上游地址;responses 复用 openai 地址。
     if protocols.iter().any(|p| p == "openai" || p == "responses") && openai_base_url.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_base_url",
-            "message": "勾选 openai / responses 协议时必须填写 openai_base_url"
-        }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_base_url",
+                "message": "勾选 openai / responses 协议时必须填写 openai_base_url"
+            })),
+        ));
     }
     if protocols.iter().any(|p| p == "anthropic") && anthropic_base_url.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_base_url",
-            "message": "勾选 anthropic 协议时必须填写 anthropic_base_url"
-        }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_base_url",
+                "message": "勾选 anthropic 协议时必须填写 anthropic_base_url"
+            })),
+        ));
     }
     if !valid_provider_type(&provider_type) {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_provider_type",
-            "message": "provider_type 仅支持 openai / anthropic / custom"
-        }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_provider_type",
+                "message": "provider_type 仅支持 openai / anthropic / custom"
+            })),
+        ));
     }
     if !valid_priority(priority) {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_priority",
-            "message": "priority must be between 0 and 100"
-        }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_priority",
+                "message": "priority must be between 0 and 100"
+            })),
+        ));
     }
     if !valid_weight(weight) {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_weight",
-            "message": "weight must be finite and between 0.1 and 1000"
-        }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_weight",
+                "message": "weight must be finite and between 0.1 and 1000"
+            })),
+        ));
     }
     if !valid_max_retries(max_retries) {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_max_retries",
-            "message": "max_retries must be between 0 and 10"
-        }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_max_retries",
+                "message": "max_retries must be between 0 and 10"
+            })),
+        ));
     }
     if !valid_timeout_secs(timeout_secs) {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_timeout",
-            "message": "timeout_secs must be between 1 and 600"
-        }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_timeout",
+                "message": "timeout_secs must be between 1 and 600"
+            })),
+        ));
     }
     let proxy_url = req.proxy_url.unwrap_or_default();
     let model_mapping = serde_json::to_string(&req.model_mapping.unwrap_or_default())
@@ -223,10 +270,13 @@ fn insert_provider(
     let website_url = req.website_url.unwrap_or_default().trim().to_string();
     let channel_kind = req.channel_kind.unwrap_or_default().trim().to_string();
     if !valid_channel_kind(&channel_kind) {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_channel_kind",
-            "message": format!("channel_kind 仅支持: {}", channel_kind_names())
-        }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_channel_kind",
+                "message": format!("channel_kind 仅支持: {}", channel_kind_names())
+            })),
+        ));
     }
     // 静态加密落库(enc:v1: 前缀),明文只存在于本次请求内存中。
     let encrypted_key = cipher.encrypt(&req.api_key);
@@ -246,10 +296,13 @@ fn insert_provider(
             )
             .ok();
         if let Some(dup_name) = dup {
-            return Err((StatusCode::CONFLICT, Json(json!({
-                "error": "duplicate_key",
-                "message": format!("该 key 已用于渠道「{}」;同一 key 建多个渠道会失去 key↔账号的对应关系", dup_name)
-            }))));
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "duplicate_key",
+                    "message": format!("该 key 已用于渠道「{}」;同一 key 建多个渠道会失去 key↔账号的对应关系", dup_name)
+                })),
+            ));
         }
     }
 
@@ -307,7 +360,12 @@ pub async fn create_provider(
 ) -> impl IntoResponse {
     let conn = match state.pool.conn.lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
     match insert_provider(&conn, &state.pool.cipher, req) {
         Ok(resp) => (StatusCode::CREATED, Json(json!(resp))),
@@ -340,7 +398,9 @@ pub async fn create_providers_batch(
     if keys.is_empty() || keys.len() > 100 {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid_api_keys", "message": "api_keys 须为 1..=100 个非空 key"})),
+            Json(
+                json!({"error": "invalid_api_keys", "message": "api_keys 须为 1..=100 个非空 key"}),
+            ),
         );
     }
     let base_name = req.shared.name.trim().to_string();
@@ -356,7 +416,7 @@ pub async fn create_providers_batch(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "internal_error"})),
-            )
+            );
         }
     };
     let mut created = Vec::new();
@@ -389,7 +449,11 @@ pub async fn create_providers_batch(
     }
     (
         // 全部失败时 400:不是"部分成功",属于请求整体不可用
-        if created.is_empty() { StatusCode::BAD_REQUEST } else { StatusCode::CREATED },
+        if created.is_empty() {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::CREATED
+        },
         Json(json!({
             "created": created.len(),
             "failed": failed,
@@ -404,14 +468,19 @@ pub async fn get_provider(
 ) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
 
     let provider = conn.query_row(
         &format!(
-         "SELECT {} FROM providers WHERE id = ?1",
-         crate::models::PROVIDER_SELECT_COLUMNS
-     ),
+            "SELECT {} FROM providers WHERE id = ?1",
+            crate::models::PROVIDER_SELECT_COLUMNS
+        ),
         params![provider_id],
         row_to_provider,
     );
@@ -434,7 +503,12 @@ pub async fn update_provider(
 ) -> impl IntoResponse {
     let conn = match state.pool.conn.lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
 
     let mut updates = Vec::new();
@@ -443,20 +517,26 @@ pub async fn update_provider(
     if let Some(name) = &req.name {
         let name = name.trim();
         if name.is_empty() {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_name",
-                "message": "name 不能为空"
-            })));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_name",
+                    "message": "name 不能为空"
+                })),
+            );
         }
         updates.push("name = ?");
         params_vec.push(Box::new(name.to_string()));
     }
     if let Some(p_type) = &req.provider_type {
         if !valid_provider_type(p_type) {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_provider_type",
-                "message": "provider_type 仅支持 openai / anthropic / custom"
-            })));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_provider_type",
+                    "message": "provider_type 仅支持 openai / anthropic / custom"
+                })),
+            );
         }
         updates.push("provider_type = ?");
         params_vec.push(Box::new(p_type.clone()));
@@ -483,10 +563,13 @@ pub async fn update_provider(
     if let Some(kind) = &req.channel_kind {
         let kind = kind.trim().to_string();
         if !valid_channel_kind(&kind) {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_channel_kind",
-                "message": format!("channel_kind 仅支持: {}", channel_kind_names())
-            })));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_channel_kind",
+                    "message": format!("channel_kind 仅支持: {}", channel_kind_names())
+                })),
+            );
         }
         updates.push("channel_kind = ?");
         params_vec.push(Box::new(kind));
@@ -507,10 +590,13 @@ pub async fn update_provider(
                 )
                 .ok();
             if let Some(dup_name) = dup {
-                return (StatusCode::CONFLICT, Json(json!({
-                    "error": "duplicate_key",
-                    "message": format!("该 key 已用于渠道「{}」", dup_name)
-                })));
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "duplicate_key",
+                        "message": format!("该 key 已用于渠道「{}」", dup_name)
+                    })),
+                );
             }
         }
         updates.push("api_key = ?");
@@ -519,28 +605,34 @@ pub async fn update_provider(
         updates.push("key_hash = ?");
         params_vec.push(Box::new(key_hash));
     }
-    if let Some(models) = &req.models {
-        if let Ok(json_str) = serde_json::to_string(models) {
-            updates.push("models = ?");
-            params_vec.push(Box::new(json_str));
-        }
+    if let Some(models) = &req.models
+        && let Ok(json_str) = serde_json::to_string(models)
+    {
+        updates.push("models = ?");
+        params_vec.push(Box::new(json_str));
     }
     if let Some(priority) = req.priority {
         if !valid_priority(priority) {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_priority",
-                "message": "priority must be between 0 and 100"
-            })));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_priority",
+                    "message": "priority must be between 0 and 100"
+                })),
+            );
         }
         updates.push("priority = ?");
         params_vec.push(Box::new(priority));
     }
     if let Some(weight) = req.weight {
         if !valid_weight(weight) {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_weight",
-                "message": "weight must be finite and between 0.1 and 1000"
-            })));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_weight",
+                    "message": "weight must be finite and between 0.1 and 1000"
+                })),
+            );
         }
         updates.push("weight = ?");
         params_vec.push(Box::new(weight));
@@ -556,20 +648,26 @@ pub async fn update_provider(
     }
     if let Some(retries) = req.max_retries {
         if !valid_max_retries(retries) {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_max_retries",
-                "message": "max_retries must be between 0 and 10"
-            })));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_max_retries",
+                    "message": "max_retries must be between 0 and 10"
+                })),
+            );
         }
         updates.push("max_retries = ?");
         params_vec.push(Box::new(retries));
     }
     if let Some(timeout) = req.timeout_secs {
         if !valid_timeout_secs(timeout) {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_timeout",
-                "message": "timeout_secs must be between 1 and 600"
-            })));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_timeout",
+                    "message": "timeout_secs must be between 1 and 600"
+                })),
+            );
         }
         updates.push("timeout_secs = ?");
         params_vec.push(Box::new(timeout));
@@ -600,16 +698,22 @@ pub async fn update_provider(
         let protocols = match &req.protocols {
             Some(list) => {
                 if !valid_protocol_list(list) {
-                    return (StatusCode::BAD_REQUEST, Json(json!({
-                        "error": "invalid_protocols",
-                        "message": "protocols 不能为空，且仅支持 openai / anthropic / responses"
-                    })));
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "invalid_protocols",
+                            "message": "protocols 不能为空，且仅支持 openai / anthropic / responses"
+                        })),
+                    );
                 }
                 if !has_defaultable_protocol(list) {
-                    return (StatusCode::BAD_REQUEST, Json(json!({
-                        "error": "invalid_protocols",
-                        "message": "responses 为附加协议，需同时勾选 openai 或 anthropic"
-                    })));
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "invalid_protocols",
+                            "message": "responses 为附加协议，需同时勾选 openai 或 anthropic"
+                        })),
+                    );
                 }
                 list.clone()
             }
@@ -619,18 +723,19 @@ pub async fn update_provider(
         let default_protocol = match &req.default_protocol {
             Some(d) => {
                 if !valid_default_protocol(d, &protocols) {
-                    return (StatusCode::BAD_REQUEST, Json(json!({
-                        "error": "invalid_default_protocol",
-                        "message": "default_protocol 必须是已勾选的 openai / anthropic 协议之一"
-                    })));
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "invalid_default_protocol",
+                            "message": "default_protocol 必须是已勾选的 openai / anthropic 协议之一"
+                        })),
+                    );
                 }
                 d.clone()
             }
             // Stored default fell out of the new list: reset to the first
             // defaultable one.
-            None if !protocols.contains(&stored_default) => {
-                first_defaultable_protocol(&protocols)
-            }
+            None if !protocols.contains(&stored_default) => first_defaultable_protocol(&protocols),
             None => stored_default,
         };
         if req.protocols.is_some() {
@@ -645,7 +750,8 @@ pub async fn update_provider(
 
     // 与 create 同一约束:勾选的协议必须有对应上游地址。协议或地址任一
     // 被修改时,按更新后的最终状态校验,防止造出运行时必失败的渠道。
-    if req.protocols.is_some() || req.openai_base_url.is_some() || req.anthropic_base_url.is_some() {
+    if req.protocols.is_some() || req.openai_base_url.is_some() || req.anthropic_base_url.is_some()
+    {
         let stored = conn.query_row(
             "SELECT protocols, openai_base_url, anthropic_base_url FROM providers WHERE id = ?1",
             params![provider_id],
@@ -677,31 +783,42 @@ pub async fn update_provider(
             .unwrap_or(&stored_anthropic)
             .trim();
         // responses 复用 openai 地址,勾选其一即要求 openai_base_url。
-        if final_protocols.iter().any(|p| p == "openai" || p == "responses") && final_openai.is_empty() {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_base_url",
-                "message": "勾选 openai / responses 协议时必须填写 openai_base_url"
-            })));
+        if final_protocols
+            .iter()
+            .any(|p| p == "openai" || p == "responses")
+            && final_openai.is_empty()
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_base_url",
+                    "message": "勾选 openai / responses 协议时必须填写 openai_base_url"
+                })),
+            );
         }
         if final_protocols.iter().any(|p| p == "anthropic") && final_anthropic.is_empty() {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_base_url",
-                "message": "勾选 anthropic 协议时必须填写 anthropic_base_url"
-            })));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_base_url",
+                    "message": "勾选 anthropic 协议时必须填写 anthropic_base_url"
+                })),
+            );
         }
     }
 
     if updates.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": "no_fields_to_update"})));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "no_fields_to_update"})),
+        );
     }
 
     updates.push("updated_at = datetime('now')");
-    let sql = format!(
-        "UPDATE providers SET {} WHERE id = ?",
-        updates.join(", ")
-    );
+    let sql = format!("UPDATE providers SET {} WHERE id = ?", updates.join(", "));
 
-    let mut params: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut params: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|p| p.as_ref()).collect();
     params.push(&provider_id);
 
     match conn.execute(&sql, params.as_slice()) {
@@ -709,10 +826,13 @@ pub async fn update_provider(
         Ok(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
         Err(e) => {
             tracing::error!("Failed to update provider: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": "update_failed",
-                "message": "Internal server error"
-            })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "update_failed",
+                    "message": "Internal server error"
+                })),
+            )
         }
     }
 }
@@ -723,7 +843,12 @@ pub async fn delete_provider(
 ) -> impl IntoResponse {
     let conn = match state.pool.conn.lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
 
     match conn.execute("DELETE FROM providers WHERE id = ?1", params![provider_id]) {
@@ -731,10 +856,13 @@ pub async fn delete_provider(
         Ok(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
         Err(e) => {
             tracing::error!("Failed to delete provider: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": "delete_failed",
-                "message": "Internal server error"
-            })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "delete_failed",
+                    "message": "Internal server error"
+                })),
+            )
         }
     }
 }
@@ -749,7 +877,12 @@ pub async fn duplicate_provider(
 ) -> impl IntoResponse {
     let conn = match state.pool.conn.lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
 
     let source = conn.query_row(
@@ -782,9 +915,26 @@ pub async fn duplicate_provider(
         },
     );
 
-    let (name, provider_type, openai_base_url, anthropic_base_url, api_key, key_hash, models,
-         priority, weight, max_retries, timeout_secs, proxy_url, model_mapping,
-         protocols, default_protocol, note, website_url, channel_kind) = match source {
+    let (
+        name,
+        provider_type,
+        openai_base_url,
+        anthropic_base_url,
+        api_key,
+        key_hash,
+        models,
+        priority,
+        weight,
+        max_retries,
+        timeout_secs,
+        proxy_url,
+        model_mapping,
+        protocols,
+        default_protocol,
+        note,
+        website_url,
+        channel_kind,
+    ) = match source {
         Ok(s) => s,
         Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))),
     };
@@ -851,7 +1001,12 @@ pub async fn test_provider(
     let provider_info = {
         let conn = match state.pool.read().lock() {
             Ok(c) => c,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "internal_error"})),
+                );
+            }
         };
 
         match conn.query_row(
@@ -878,23 +1033,39 @@ pub async fn test_provider(
         }
     }; // MutexGuard dropped here
 
-    let (id, name, openai_url, anthropic_url, api_key, protocol, timeout, proxy_url, channel_kind) = provider_info;
+    let (id, name, openai_url, anthropic_url, api_key, protocol, timeout, proxy_url, channel_kind) =
+        provider_info;
     // api_key 出库解密(enc:v1: 前缀密文,明文兼容)
     let api_key = crate::crypto::decrypt_or_plain(&state.pool.cipher, &api_key);
 
     // 默认协议列为空时退回 provider_type(azure/custom 等讲 OpenAI)。
-    let protocol = Protocol::parse(&protocol).unwrap_or_else(|| Protocol::for_provider_type(&protocol));
+    let protocol =
+        Protocol::parse(&protocol).unwrap_or_else(|| Protocol::for_provider_type(&protocol));
     // 按渠道的默认协议选对应的上游地址;留空的一路回退到另一个。
     let base_url = crate::models::pick_base_url(protocol, &openai_url, &anthropic_url);
 
     // Step 2: Make health check request (async, no lock held)
-    let (status, latency) = check_provider_health(&state.clients, base_url, &api_key, protocol, timeout.clamp(1, 600) as u64, &proxy_url, &channel_kind).await;
+    let (status, latency) = check_provider_health(
+        &state.clients,
+        base_url,
+        &api_key,
+        protocol,
+        timeout.clamp(1, 600) as u64,
+        &proxy_url,
+        &channel_kind,
+    )
+    .await;
 
     // Step 3: Re-lock DB to update status
     {
         let conn = match state.pool.conn.lock() {
             Ok(c) => c,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "internal_error"})),
+                );
+            }
         };
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -905,24 +1076,32 @@ pub async fn test_provider(
             params![status, now, id],
         ) {
             tracing::error!("Failed to update provider health: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": "update_failed",
-                "message": "Internal server error"
-            })));
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "update_failed",
+                    "message": "Internal server error"
+                })),
+            );
         }
     } // MutexGuard dropped here
 
-    (StatusCode::OK, Json(json!({
-        "provider_id": id,
-        "name": name,
-        "status": status,
-        "latency_ms": latency,
-        "message": format!("Provider {} is {} ({}ms)", name, status, latency as i64)
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "provider_id": id,
+            "name": name,
+            "status": status,
+            "latency_ms": latency,
+            "message": format!("Provider {} is {} ({}ms)", name, status, latency as i64)
+        })),
+    )
 }
 #[cfg(test)]
 mod tests {
-    use super::{valid_max_retries, valid_priority, valid_provider_type, valid_timeout_secs, valid_weight};
+    use super::{
+        valid_max_retries, valid_priority, valid_provider_type, valid_timeout_secs, valid_weight,
+    };
 
     #[test]
     fn timeout_bounds() {
@@ -1004,10 +1183,13 @@ pub async fn fetch_upstream_models(
     let protocol = match Protocol::parse(&protocol) {
         Some(p @ (Protocol::OpenAi | Protocol::Anthropic)) => p,
         Some(Protocol::Responses) | None => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "invalid_protocol",
-                "message": "protocol 仅支持 openai / anthropic"
-            })));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_protocol",
+                    "message": "protocol 仅支持 openai / anthropic"
+                })),
+            );
         }
     };
     let mut proxy_url = req.proxy_url.unwrap_or_default();
@@ -1020,7 +1202,10 @@ pub async fn fetch_upstream_models(
             let conn = match state.pool.read().lock() {
                 Ok(c) => c,
                 Err(_) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "internal_error"})),
+                    );
                 }
             };
             conn.query_row(
@@ -1044,15 +1229,20 @@ pub async fn fetch_upstream_models(
     }
 
     if base_url.is_empty() || api_key.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": "missing_config",
-            "message": "base_url 和 API Key 不能为空"
-        })));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "missing_config",
+                "message": "base_url 和 API Key 不能为空"
+            })),
+        );
     }
 
-    let client = crate::channel::transport::cached_client(&state.clients, &proxy_url, "fetch-models", 15);
+    let client =
+        crate::channel::transport::cached_client(&state.clients, &proxy_url, "fetch-models", 15);
     // URL 与鉴权头由渠道适配器决定,与对话 / 健康检查路径同一口径。
-    let adapter = crate::channel::registry().resolve(req.channel_kind.as_deref().unwrap_or("").trim());
+    let adapter =
+        crate::channel::registry().resolve(req.channel_kind.as_deref().unwrap_or("").trim());
     let url = adapter.models_url(&base_url, protocol);
     let upstream_req = adapter.apply_auth(client.get(&url), &api_key, protocol);
 
@@ -1060,24 +1250,35 @@ pub async fn fetch_upstream_models(
         Ok(resp) => {
             let status = resp.status().as_u16();
             // 响应体加 8MB 上限，避免异常大的上游响应撑爆内存
-            let body: serde_json::Value = match crate::channel::transport::read_json_limited(resp, crate::channel::transport::MAX_RESP_BODY).await {
+            let body: serde_json::Value = match crate::channel::transport::read_json_limited(
+                resp,
+                crate::channel::transport::MAX_RESP_BODY,
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(e) => {
-                    return (StatusCode::BAD_GATEWAY, Json(json!({
-                        "error": "upstream_error",
-                        "message": format!("上游响应读取失败: {}", e.zh())
-                    })));
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({
+                            "error": "upstream_error",
+                            "message": format!("上游响应读取失败: {}", e.zh())
+                        })),
+                    );
                 }
             };
             if status != 200 {
                 let msg = body["error"]["message"]
                     .as_str()
                     .unwrap_or("upstream rejected the request");
-                return (StatusCode::BAD_GATEWAY, Json(json!({
-                    "error": "upstream_error",
-                    "status": status,
-                    "message": format!("上游返回 {}: {}", status, msg)
-                })));
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "error": "upstream_error",
+                        "status": status,
+                        "message": format!("上游返回 {}: {}", status, msg)
+                    })),
+                );
             }
             // Both OpenAI and Anthropic list models as {"data": [{"id": ...}]}.
             let models: Vec<String> = body["data"]
@@ -1089,19 +1290,25 @@ pub async fn fetch_upstream_models(
                 })
                 .unwrap_or_default();
             if models.is_empty() {
-                return (StatusCode::BAD_GATEWAY, Json(json!({
-                    "error": "no_models",
-                    "message": "上游响应中没有模型列表"
-                })));
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "error": "no_models",
+                        "message": "上游响应中没有模型列表"
+                    })),
+                );
             }
             (StatusCode::OK, Json(json!({"models": models})))
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({
-            "error": "upstream_error",
-            // 只回显 host，避免泄露完整 URL（可能含敏感路径/参数）；
-            // reqwest 错误本身也含 URL，用 without_url 去掉
-            "message": format!("无法连接上游 {}: {}", url_host(&base_url), e.without_url())
-        }))),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": "upstream_error",
+                // 只回显 host，避免泄露完整 URL（可能含敏感路径/参数）；
+                // reqwest 错误本身也含 URL，用 without_url 去掉
+                "message": format!("无法连接上游 {}: {}", url_host(&base_url), e.without_url())
+            })),
+        ),
     }
 }
 
@@ -1141,24 +1348,30 @@ pub async fn test_provider_model(
 ) -> impl IntoResponse {
     let model = req.model.trim().to_string();
     if model.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": "missing_model",
-            "message": "model 不能为空"
-        })));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "missing_model",
+                "message": "model 不能为空"
+            })),
+        );
     }
 
     let provider = {
         let conn = match state.pool.read().lock() {
             Ok(c) => c,
             Err(_) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"})))
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "internal_error"})),
+                );
             }
         };
         match conn.query_row(
             &format!(
-             "SELECT {} FROM providers WHERE id = ?1",
-             crate::models::PROVIDER_SELECT_COLUMNS
-         ),
+                "SELECT {} FROM providers WHERE id = ?1",
+                crate::models::PROVIDER_SELECT_COLUMNS
+            ),
             params![provider_id],
             row_to_provider,
         ) {
@@ -1175,10 +1388,13 @@ pub async fn test_provider_model(
         Some(p) => match Protocol::parse(p) {
             Some(proto) if channel_protocols(&provider).iter().any(|s| s == p) => proto,
             _ => {
-                return (StatusCode::BAD_REQUEST, Json(json!({
-                    "error": "unsupported_protocol",
-                    "message": format!("该渠道不支持 {} 协议", p)
-                })));
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "unsupported_protocol",
+                        "message": format!("该渠道不支持 {} 协议", p)
+                    })),
+                );
             }
         },
         None => channel_protocol(&provider),
@@ -1200,8 +1416,15 @@ pub async fn test_provider_model(
 
     let stream = req.stream.unwrap_or(false);
     let probe = crate::channel::model_test::probe_model(
-        &state.clients, &provider, protocol, &model, messages, 1024, stream,
-    ).await;
+        &state.clients,
+        &provider,
+        protocol,
+        &model,
+        messages,
+        1024,
+        stream,
+    )
+    .await;
     crate::channel::model_test::record_model_health_async(
         state.pool.clone(),
         provider.id.clone(),
@@ -1233,19 +1456,27 @@ pub async fn test_provider_model(
 
 /// Latest measured health per (channel, model), newest probe per pair.
 /// Powers the models page and the test matrix's initial cell colors.
-pub async fn list_model_health(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn list_model_health(State(state): State<AppState>) -> impl IntoResponse {
     let conn = match state.pool.read().lock() {
         Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal_error"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal_error"})),
+            );
+        }
     };
 
     let mut stmt = match conn.prepare(
-        "SELECT provider_id, model, status, latency_ms, error, checked_at FROM model_health"
+        "SELECT provider_id, model, status, latency_ms, error, checked_at FROM model_health",
     ) {
         Ok(s) => s,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"}))),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "query_failed"})),
+            );
+        }
     };
 
     let rows: Vec<serde_json::Value> = match stmt.query_map([], |row| {
@@ -1262,7 +1493,10 @@ pub async fn list_model_health(
         // 同上:查询失败报 500,不静默返回空列表。
         Err(e) => {
             tracing::error!("Failed to list model health: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "query_failed"})));
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "query_failed"})),
+            );
         }
     };
 

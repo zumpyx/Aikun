@@ -34,9 +34,20 @@ pub(crate) fn spawn_request_log(
     let request_type = request_type.to_string();
     tokio::task::spawn_blocking(move || {
         insert_request_log(
-            &pool, &user_id, api_key_id.as_deref(), provider_id.as_deref(),
-            &model, &request_type, prompt_tokens, completion_tokens, total_tokens,
-            cached_tokens, latency_ms, status_code, success, error_message,
+            &pool,
+            &user_id,
+            api_key_id.as_deref(),
+            provider_id.as_deref(),
+            &model,
+            &request_type,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cached_tokens,
+            latency_ms,
+            status_code,
+            success,
+            error_message,
         );
     });
 }
@@ -64,9 +75,20 @@ pub(crate) async fn request_log_sync(
     let request_type = request_type.to_string();
     if let Err(e) = tokio::task::spawn_blocking(move || {
         insert_request_log(
-            &pool, &user_id, api_key_id.as_deref(), provider_id.as_deref(),
-            &model, &request_type, prompt_tokens, completion_tokens, total_tokens,
-            cached_tokens, latency_ms, status_code, success, error_message,
+            &pool,
+            &user_id,
+            api_key_id.as_deref(),
+            provider_id.as_deref(),
+            &model,
+            &request_type,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cached_tokens,
+            latency_ms,
+            status_code,
+            success,
+            error_message,
         );
     })
     .await
@@ -93,8 +115,21 @@ pub(crate) async fn record_cache_hit(
     let (p, c, t, k) = usage;
     if let Err(e) = tokio::task::spawn_blocking(move || {
         insert_request_log_ext(
-            &pool, &user_id, api_key_id.as_deref(), None, &model, &request_type,
-            p, c, t, k, 0, 200, true, None, billable,
+            &pool,
+            &user_id,
+            api_key_id.as_deref(),
+            None,
+            &model,
+            &request_type,
+            p,
+            c,
+            t,
+            k,
+            0,
+            200,
+            true,
+            None,
+            billable,
         );
     })
     .await
@@ -121,9 +156,21 @@ pub(crate) fn insert_request_log(
     error_message: Option<String>,
 ) {
     insert_request_log_ext(
-        pool, user_id, api_key_id, provider_id, model, request_type, prompt_tokens,
-        completion_tokens, total_tokens, cached_tokens, latency_ms, status_code, success,
-        error_message, true,
+        pool,
+        user_id,
+        api_key_id,
+        provider_id,
+        model,
+        request_type,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        cached_tokens,
+        latency_ms,
+        status_code,
+        success,
+        error_message,
+        true,
     )
 }
 
@@ -162,7 +209,12 @@ fn insert_request_log_ext(
         let result = (|| -> Result<(), rusqlite::Error> {
             let cost = if billable && total_tokens > 0 {
                 match crate::billing::find_price(&conn, model) {
-                    Some(prices) => crate::billing::compute_cost(prompt_tokens, cached_tokens, completion_tokens, prices),
+                    Some(prices) => crate::billing::compute_cost(
+                        prompt_tokens,
+                        cached_tokens,
+                        completion_tokens,
+                        prices,
+                    ),
                     None => {
                         // 有用量但无价格配置:静默免费必须可见。
                         warn!(

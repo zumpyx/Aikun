@@ -4,7 +4,6 @@ pub mod request;
 pub mod response;
 pub mod stream;
 
-
 use serde_json::Value;
 
 #[allow(unused_imports)]
@@ -16,10 +15,10 @@ pub(crate) fn cache_control_of(v: &Value) -> Option<&Value> {
 }
 
 pub(crate) fn with_cache_control(mut block: Value, src: &Value) -> Value {
-    if let Some(cc) = cache_control_of(src) {
-        if let Some(obj) = block.as_object_mut() {
-            obj.insert("cache_control".into(), cc.clone());
-        }
+    if let Some(cc) = cache_control_of(src)
+        && let Some(obj) = block.as_object_mut()
+    {
+        obj.insert("cache_control".into(), cc.clone());
     }
     block
 }

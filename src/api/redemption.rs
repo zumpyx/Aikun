@@ -48,16 +48,24 @@ fn hash_code(code: &str) -> String {
 /// 兑换限流计数与登录限流同构(内存滑动窗口,重启清零可接受)。
 fn redeem_limited(state: &AppState, user_id: &str) -> bool {
     let now = std::time::Instant::now();
-    let mut attempts = state.redeem_attempts.lock().unwrap_or_else(|e| e.into_inner());
+    let mut attempts = state
+        .redeem_attempts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     attempts.retain(|_, v| {
         v.retain(|t| now.duration_since(*t) < REDEEM_WINDOW);
         !v.is_empty()
     });
-    attempts.get(user_id).is_some_and(|v| v.len() >= REDEEM_MAX_FAILS)
+    attempts
+        .get(user_id)
+        .is_some_and(|v| v.len() >= REDEEM_MAX_FAILS)
 }
 
 fn record_redeem_failure(state: &AppState, user_id: &str) {
-    let mut attempts = state.redeem_attempts.lock().unwrap_or_else(|e| e.into_inner());
+    let mut attempts = state
+        .redeem_attempts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     attempts
         .entry(user_id.to_string())
         .or_default()
@@ -65,7 +73,10 @@ fn record_redeem_failure(state: &AppState, user_id: &str) {
 }
 
 fn clear_redeem_failures(state: &AppState, user_id: &str) {
-    let mut attempts = state.redeem_attempts.lock().unwrap_or_else(|e| e.into_inner());
+    let mut attempts = state
+        .redeem_attempts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     attempts.remove(user_id);
 }
 
@@ -159,7 +170,9 @@ pub async fn create_redemption_codes(
     if amount_micro <= 0 {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid_amount", "message": "amount 低于最小记账单位(0.000001 元)"})),
+            Json(
+                json!({"error": "invalid_amount", "message": "amount 低于最小记账单位(0.000001 元)"}),
+            ),
         );
     }
     let batch = req.batch.unwrap_or_default().trim().to_string();
@@ -183,7 +196,7 @@ pub async fn create_redemption_codes(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "internal_error"})),
-            )
+            );
         }
     };
     let result = (|| -> Result<(), rusqlite::Error> {
@@ -253,10 +266,15 @@ pub async fn list_redemption_codes(
     Query(query): Query<ListCodesQuery>,
 ) -> impl IntoResponse {
     let status = query.status.as_deref().unwrap_or("").trim().to_string();
-    if !matches!(status.as_str(), "" | "unused" | "used" | "disabled" | "expired") {
+    if !matches!(
+        status.as_str(),
+        "" | "unused" | "used" | "disabled" | "expired"
+    ) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid_status", "message": "status 只支持 unused/used/disabled/expired"})),
+            Json(
+                json!({"error": "invalid_status", "message": "status 只支持 unused/used/disabled/expired"}),
+            ),
         );
     }
     let batch = query.batch.as_deref().unwrap_or("").trim().to_string();
@@ -268,7 +286,7 @@ pub async fn list_redemption_codes(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "internal_error"})),
-            )
+            );
         }
     };
     // expired 是显示态:库中 status 仍为 unused,按过期时间与当前时间判定。
@@ -283,7 +301,10 @@ pub async fn list_redemption_codes(
     // 供前端把"过期未使用"显示为已过期(status 本身保持 unused)。
     let result = (|| -> Result<(i64, Vec<Value>), rusqlite::Error> {
         let total: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM redemption_codes c WHERE {}", where_sql),
+            &format!(
+                "SELECT COUNT(*) FROM redemption_codes c WHERE {}",
+                where_sql
+            ),
             params![batch],
             |row| row.get(0),
         )?;
@@ -314,7 +335,10 @@ pub async fn list_redemption_codes(
         Ok((total, rows.filter_map(|r| r.ok()).collect::<Vec<_>>()))
     })();
     match result {
-        Ok((total, items)) => (StatusCode::OK, Json(json!({"total": total, "items": items}))),
+        Ok((total, items)) => (
+            StatusCode::OK,
+            Json(json!({"total": total, "items": items})),
+        ),
         Err(e) => {
             tracing::error!("Failed to list redemption codes: {}", e);
             (
@@ -335,7 +359,7 @@ pub async fn disable_redemption_code(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "internal_error"})),
-            )
+            );
         }
     };
     // 只有未使用的码可禁用;used/disabled 返回 409,不存在返回 404。
@@ -391,7 +415,11 @@ pub async fn redeem_code(
         );
     }
     // 归一化:去空白、统一大写(输入允许小写/多空格)
-    let code = req.code.split_whitespace().collect::<String>().to_uppercase();
+    let code = req
+        .code
+        .split_whitespace()
+        .collect::<String>()
+        .to_uppercase();
     let invalid = |state: &AppState| {
         record_redeem_failure(state, &claims.sub);
         (
@@ -410,7 +438,7 @@ pub async fn redeem_code(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "internal_error"})),
-            )
+            );
         }
     };
     let result = (|| -> Result<Option<(i64, i64)>, rusqlite::Error> {
