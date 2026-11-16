@@ -44,6 +44,28 @@ jobs:
       - name: cargo test
         run: cargo test --locked --workspace
 
+  # 生成物纯净性守卫(五支柱之五):重跑生成管线,与入库副本逐字节比对,
+  # 任何差异(改了 spec 未重生成 / 手改生成物)即失败。无 Java——openapi-to-rust 是 Rust 原生。
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (含已安装的钉版生成器)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: ~/.cargo/bin
+
+      - name: Install pinned generator (openapi-to-rust 0.24.0)
+        run: cargo install openapi-to-rust --version 0.24.0 --locked
+
+      - name: Regenerate and diff
+        run: |
+          bash scripts/gen-api.sh
+          git diff --exit-code -- crates/aikun-openapi
+
   # 完整走一遍 release 的 docker 路径(metadata-action → build-push),
   # 但不推送,只验证 Dockerfile 与元数据输出在 CI 环境中可用。
   docker-build-check:
