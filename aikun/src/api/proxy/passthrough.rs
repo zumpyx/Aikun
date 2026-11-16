@@ -235,16 +235,15 @@ pub async fn passthrough(
             .header("Content-Type", "application/json")
             .json(&upstream_body);
         // 免密钥本地上游不携带 Authorization(空 Bearer 会让部分上游 401)。
-        let req = if provider.api_key.is_empty() {
-            req
-        } else {
+        let mut req = req;
+        if !provider.api_key.is_empty() {
             // 鉴权头由渠道适配器决定(透传只走 openai 协议)。
-            crate::channel::adapter_for(&provider).apply_auth(
-                req,
-                &provider.api_key,
-                Protocol::OpenAi,
-            )
-        };
+            for (k, v) in aikun_channels::adapter_for(&provider)
+                .auth_headers(&provider.api_key, Protocol::OpenAi)
+            {
+                req = req.header(k, v);
+            }
+        }
 
         debug!(
             "Passthrough /v1/{} model={} → provider '{}' (health={})",

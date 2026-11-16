@@ -65,6 +65,7 @@ name = "aikun"
 version = "0.4.4"
 dependencies = [
  "aes-gcm",
+ "aikun-channels",
  "aikun-protocol",
  "argon2",
  "async-stream",
@@ -87,6 +88,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "aikun-channels"
+version = "0.5.0"
+dependencies = [
+ "aikun-protocol",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

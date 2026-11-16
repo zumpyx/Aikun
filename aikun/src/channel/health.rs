@@ -23,13 +23,16 @@ pub async fn check_provider_health(
     let start = Instant::now();
     let client = cached_client(clients, proxy_url, base_url, timeout_secs);
 
-    // URL 与鉴权头由渠道适配器决定(见 crate::channel::adapter)。
+    // URL 与鉴权头由渠道适配器决定(见 aikun_channels)。
     let adapter = crate::channel::registry().resolve(channel_kind);
     let url = adapter.models_url(base_url, protocol);
     // 日志脱敏:URL 可能带 userinfo 或 query(如 ?key=...),不落明文。
     let log_url = sanitize_log_url(&url);
 
-    let req = adapter.apply_auth(client.get(&url), api_key, protocol);
+    let mut req = client.get(&url);
+    for (k, v) in adapter.auth_headers(api_key, protocol) {
+        req = req.header(k, v);
+    }
 
     let result = req.send().await;
 

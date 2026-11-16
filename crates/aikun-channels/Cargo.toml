@@ -1,0 +1,12 @@
+[package]
+name = "aikun-channels"
+version = "0.5.0"
+edition = "2024"
+description = "渠道适配器层:ChannelAdapter trait + 静态注册表 + 渠道域类型(Provider/URL 拼接);纯描述,零网络 I/O"
+
+[dependencies]
+aikun-protocol = { path = "../aikun-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 日志门面(注册表回退 warn);纯 facade,无 I/O
+tracing = "0.1"

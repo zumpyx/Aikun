@@ -68,47 +68,8 @@ pub async fn read_json_limited(
 }
 
 /// Build a proper URL path based on provider type and base URL.
-pub fn build_api_url(base_url: &str, path: &str) -> String {
-    // base_url 可能带 query（如 Azure 的 ?api-version=...），先拆出来最后拼回
-    let (base, query) = match base_url.split_once('?') {
-        Some((b, q)) => (b, Some(q)),
-        None => (base_url, None),
-    };
-    let base = base.trim_end_matches('/');
-    let joined = if is_endpoint_url(base) {
-        // base 已含完整端点路径（如 Azure 部署 URL），原样使用
-        base.to_string()
-    } else if is_version_segment(base.rsplit('/').next().unwrap_or("")) {
-        // 已含版本段（/v1、/v1beta、/v2 等），不再追加 /v1
-        format!("{}{}", base, path)
-    } else {
-        format!("{}/v1{}", base, path)
-    };
-    match query {
-        Some(q) => format!("{}?{}", joined, q),
-        None => joined,
-    }
-}
+pub use aikun_channels::build_api_url; // 移至 channels crate,re-export 保持旧路径
 
-/// base 是否已是完整端点（以已知端点路径结尾）。
-fn is_endpoint_url(base: &str) -> bool {
-    ["/chat/completions", "/messages", "/models", "/responses"]
-        .iter()
-        .any(|ep| base.ends_with(ep))
-}
-
-/// 路径段是否为版本段：v 开头紧跟数字，其余仅字母数字/./-（v1、v1beta、v2.0）。
-fn is_version_segment(seg: &str) -> bool {
-    seg.len() >= 2
-        && seg.starts_with('v')
-        && seg.as_bytes()[1].is_ascii_digit()
-        && seg
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-}
-
-/// Strip embedded credentials from a proxy URL for logging:
-/// `socks5://user:pass@host:1080` → `socks5://host:1080`.
 pub fn sanitize_proxy_url(url: &str) -> String {
     match url.split_once("://") {
         Some((scheme, rest)) => {
@@ -225,8 +186,8 @@ pub async fn send_request(
         if stream { 0 } else { non_stream_timeout },
     );
 
-    // URL、鉴权头与请求体修补都交给渠道适配器(见 crate::channel::adapter)。
-    let adapter = crate::channel::adapter_for(provider);
+    // URL、鉴权头与请求体修补都交给渠道适配器(见 aikun_channels)。
+    let adapter = aikun_channels::adapter_for(provider);
     adapter.prepare_request(provider, protocol, &mut request_body);
     let url = adapter.chat_url(provider, protocol);
 
@@ -247,7 +208,10 @@ pub async fn send_request(
         .post(&url)
         .header("Content-Type", "application/json")
         .json(&request_body);
-    let req = adapter.apply_auth(req, &provider.api_key, protocol);
+    let mut req = req;
+    for (k, v) in adapter.auth_headers(&provider.api_key, protocol) {
+        req = req.header(k, v);
+    }
 
     // 流式响应总时长任意,client 不带整体超时(中段 stall 由流读取侧的
     // idle 超时约束);但首字节必须有界:上游 accept 后迟迟不发响应头时

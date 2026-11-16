@@ -19,18 +19,17 @@
 //! 上游本身就兼容 OpenAI / Anthropic 协议时不需要写代码:用默认的
 //! `generic` 类型、填好 Base URL 即可。
 
-pub mod generic;
-pub mod qoder;
-pub mod registry;
-pub mod workbuddy;
-
-use reqwest::RequestBuilder;
 use serde_json::Value;
 
-use crate::models::Provider;
 use aikun_protocol::{Protocol, SseEvent};
 
-pub use registry::{adapter_for, registry};
+pub mod adapters;
+pub mod provider;
+pub mod url;
+
+pub use adapters::{adapter_for, registry};
+pub use provider::*;
+pub use url::build_api_url;
 
 /// 渠道适配器接口。所有方法都有与现网行为一致的默认实现,
 /// 适配器只覆写和标准协议不同的部分。
@@ -61,8 +60,8 @@ pub trait ChannelAdapter: Send + Sync + 'static {
 
     /// 对话请求的完整上游 URL。
     fn chat_url(&self, provider: &Provider, protocol: Protocol) -> String {
-        crate::channel::transport::build_api_url(
-            crate::models::base_url_for(provider, protocol),
+        crate::url::build_api_url(
+            crate::provider::base_url_for(provider, protocol),
             self.endpoint_path(protocol),
         )
     }
@@ -70,13 +69,14 @@ pub trait ChannelAdapter: Send + Sync + 'static {
     /// 模型列表 / 健康探测 URL。只拿 base_url:管理端「获取模型」在渠道
     /// 落库之前就会调用,没有完整的 Provider。
     fn models_url(&self, base_url: &str, _protocol: Protocol) -> String {
-        crate::channel::transport::build_api_url(base_url, "/models")
+        crate::url::build_api_url(base_url, "/models")
     }
 
-    /// 写入鉴权头。默认:anthropic 协议同时带 x-api-key 与 Bearer
-    /// (部分 Anthropic 兼容上游只认 Authorization),其余协议带 Bearer。
-    fn apply_auth(&self, req: RequestBuilder, api_key: &str, protocol: Protocol) -> RequestBuilder {
-        default_auth(req, api_key, protocol)
+    /// 返回鉴权头(纯数据,不碰 RequestBuilder——crate 纯净度要求零 reqwest)。
+    /// 默认:anthropic 协议同时带 x-api-key 与 Bearer(部分兼容上游只认
+    /// Authorization)加 anthropic-version,其余协议带 Bearer。
+    fn auth_headers(&self, api_key: &str, protocol: Protocol) -> Vec<(&'static str, String)> {
+        default_auth_headers(api_key, protocol)
     }
 
     /// 发送前修补上游请求体(已完成协议转换与模型映射)。
@@ -100,14 +100,15 @@ pub fn default_endpoint_path(protocol: Protocol) -> &'static str {
 }
 
 /// 默认鉴权头,与重构前 proxy/client.rs 的 apply_auth 完全一致。
-pub fn default_auth(req: RequestBuilder, api_key: &str, protocol: Protocol) -> RequestBuilder {
+pub fn default_auth_headers(api_key: &str, protocol: Protocol) -> Vec<(&'static str, String)> {
     match protocol {
-        Protocol::Anthropic => req
-            .header("x-api-key", api_key)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("anthropic-version", "2023-06-01"),
+        Protocol::Anthropic => vec![
+            ("x-api-key", api_key.to_string()),
+            ("Authorization", format!("Bearer {api_key}")),
+            ("anthropic-version", "2023-06-01".to_string()),
+        ],
         Protocol::OpenAi | Protocol::Responses => {
-            req.header("Authorization", format!("Bearer {}", api_key))
+            vec![("Authorization", format!("Bearer {api_key}"))]
         }
     }
 }

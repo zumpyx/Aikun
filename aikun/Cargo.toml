@@ -8,6 +8,7 @@ description = "A lightweight AI gateway with multi-provider aggregation, failove
 [dependencies]
 # 协议转换 crate(本仓库)
 aikun-protocol = { path = "../crates/aikun-protocol" }
+aikun-channels = { path = "../crates/aikun-channels" }
 # Web framework
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }

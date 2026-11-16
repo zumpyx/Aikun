@@ -2,7 +2,7 @@
 //! one-api / new-api 类中转站、DeepSeek、智谱、MiniMax、OrcaRouter 等)。
 //! 即重构前的全部行为;channel_kind 为空的存量渠道也落到这里。
 
-use super::ChannelAdapter;
+use crate::ChannelAdapter;
 
 pub struct GenericAdapter;
 

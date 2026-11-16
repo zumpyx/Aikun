@@ -121,7 +121,7 @@ pub(super) async fn attempt_loop(
         let mut upstream_body = convert_request(&body, client_protocol, provider_protocol);
         apply_model_mapping(&provider, &mut upstream_body);
 
-        let adapter = crate::channel::adapter_for(&provider);
+        let adapter = aikun_channels::adapter_for(&provider);
         let (resp, latency) = match send_request(
             &state.clients,
             &provider,

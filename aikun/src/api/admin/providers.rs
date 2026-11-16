@@ -1244,7 +1244,10 @@ pub async fn fetch_upstream_models(
     let adapter =
         crate::channel::registry().resolve(req.channel_kind.as_deref().unwrap_or("").trim());
     let url = adapter.models_url(&base_url, protocol);
-    let upstream_req = adapter.apply_auth(client.get(&url), &api_key, protocol);
+    let mut upstream_req = client.get(&url);
+    for (k, v) in adapter.auth_headers(&api_key, protocol) {
+        upstream_req = upstream_req.header(k, v);
+    }
 
     match upstream_req.send().await {
         Ok(resp) => {

@@ -5,10 +5,9 @@
 //! 并把 selector 改为吃快照的纯函数;适配器的类型注册表因此放在
 //! `adapter/registry.rs`,避免与之重名。
 
-pub mod adapter;
 pub mod health;
 pub mod model_test;
 pub mod selector;
 pub mod transport;
 
-pub use adapter::{ChannelAdapter, adapter_for, registry};
+pub use aikun_channels::{ChannelAdapter, registry};
