@@ -233,6 +233,27 @@ fn spawn_child(
         .expect("failed to spawn aikun binary")
 }
 
+/// 探测服务就绪;子进程提前退出(端口被抢注 → bind panic 秒退)立即返回 false,
+/// 供调用方换端口重拉。60s 上限覆盖冷启动竞争。
+async fn probe_ready(child: &mut Child, base: &str) -> bool {
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Ok(Some(_)) = child.try_wait() {
+            return false;
+        }
+        if let Ok(r) = client.get(format!("{}/api/health", base)).send().await
+            && r.status().is_success()
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 impl TestApp {
     /// 拉起真实 aikun 二进制:独立临时目录作为 cwd(避免读到仓库的
     /// .env)、独立 SQLite、随机端口、超长健康检查间隔(不干扰断言)。
@@ -248,9 +269,29 @@ impl TestApp {
             .collect();
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let port = free_port();
-        let child = spawn_child(dir.path(), &db_path, port, &extra_env);
-        let app = Self {
+        // 端口竞态根治:free_port() 释放端口后、子进程 bind 前的窗口里,端口可能
+        // 被并行测试抢注,子进程 bind 失败秒退。表现为偶发 readiness 超时
+        // (全量套件 33 测试并行时可复现)。对策:探测到子进程早退或超时,换端口
+        // 重拉,至多 3 次——正常路径零额外开销。
+        let mut port = free_port();
+        let mut child = spawn_child(dir.path(), &db_path, port, &extra_env);
+        let mut ready = false;
+        for attempt in 0..3 {
+            if probe_ready(&mut child, &format!("http://127.0.0.1:{}", port)).await {
+                ready = true;
+                break;
+            }
+            assert!(
+                attempt < 2,
+                "aikun did not become ready after 3 spawn attempts (port race or startup failure)"
+            );
+            let _ = child.kill();
+            let _ = child.wait();
+            port = free_port();
+            child = spawn_child(dir.path(), &db_path, port, &extra_env);
+        }
+        assert!(ready);
+        let mut app = Self {
             base: format!("http://127.0.0.1:{}", port),
             db_path: db_path.clone(),
             port,
@@ -274,21 +315,11 @@ impl TestApp {
         self.wait_ready().await;
     }
 
-    async fn wait_ready(&self) {
-        let client = reqwest::Client::new();
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if let Ok(r) = client.get(format!("{}/api/health", self.base)).send().await
-                && r.status().is_success()
-            {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "aikun did not become ready within 15s"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+    async fn wait_ready(&mut self) {
+        assert!(
+            probe_ready(&mut self.child, &self.base).await,
+            "aikun did not become ready within 60s"
+        );
     }
 
     pub fn db(&self) -> rusqlite::Connection {

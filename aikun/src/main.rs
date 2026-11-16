@@ -353,6 +353,7 @@ async fn shutdown_signal(shutdown: tokio_util::sync::CancellationToken) {
 async fn health_check() -> impl IntoResponse {
     Json(json!({
         "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
         "timestamp": chrono::Utc::now().to_rfc3339()
     }))
 }

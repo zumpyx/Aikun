@@ -48,7 +48,7 @@ aikun-protocol,aikun-channels,aikun-admin,aikun-store}`)与 API spec / 生成管
   变体,旧"DB 故障 → 500 internal_error/query_failed"过渡期 fail-closed 映射为
   枚举可得的 4xx(Admin 批 403/400/404、User 批写 400/删 404),body `code`
   保留真实 500 词表短码;`listApiKeys` / `getWalletStats` / `listPublicPrices`
-  / `login` 四 op 仅退 401(body code=`internal_error`)—— 前端对 401 会清
+  / `login` 四 op 仅退 401(login 存储不可用分支为 `invalid_credentials`,防枚举口径;其余三 op 为 `internal_error`)—— 前端对 401 会清
   token,存储抖动可能误杀会话,待 spec 补 5xx 后重生成根治
   (详见 `docs/api-mapping.md` 备注 13)。
 - **providers PATCH 原子性**:并发 PATCH 由服务级串行锁互斥(读库存 → 最终状态
