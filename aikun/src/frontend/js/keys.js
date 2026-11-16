@@ -58,11 +58,13 @@ function showApiKeyModal(id) {
       max_concurrent: Math.max(0, parseInt(document.getElementById('kf-concurrent').value, 10) || 0),
     };
     if (key) {
+      // 0.5:PATCH 成功返回更新后的资源(不再 {message:'updated'})
       const r = await api('PATCH', `/api/api-keys/${key.id}`, body);
       if (r.ok) { toast('密钥已更新'); overlay.remove(); await loadApiKeys(); }
-      else toast(r.data.message || r.data.error || '更新失败', 'error');
+      else toast(r.data.detail || r.data.code || '更新失败', 'error');
     } else {
       if (!body.expires_at) delete body.expires_at;
+      // 201;完整明文 key 仅此一次返回
       const r = await api('POST', '/api/api-keys', body);
       if (r.ok) {
         const newKey = r.data.key;
@@ -70,7 +72,7 @@ function showApiKeyModal(id) {
         toast('密钥已创建');
         showKeyCreatedModal(newKey);
         await loadApiKeys();
-      } else toast(r.data.message || r.data.error || '创建失败', 'error');
+      } else toast(r.data.detail || r.data.code || '创建失败', 'error');
     }
     } finally {
       btn.disabled = false;
@@ -105,7 +107,8 @@ async function loadApiKeys() {
   if (!list) return;
   if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
 
-  const data = r.data;
+  // 0.5:响应由裸数组改为 {items, total} 信封
+  const data = Array.isArray(r.data.items) ? r.data.items : [];
   state.apiKeys = data;
   if (data.length === 0) {
     list.innerHTML = '<div class="card"><div class="empty"><p>暂无密钥，点击上方创建</p></div></div>';
@@ -152,14 +155,15 @@ async function loadApiKeys() {
 async function toggleApiKey(id, active) {
   const r = await api('PATCH', `/api/api-keys/${id}`, { is_active: active });
   if (r.ok) { toast(active ? '密钥已启用' : '密钥已禁用'); await loadApiKeys(); }
-  else toast(r.data.message || r.data.error || '操作失败', 'error');
+  else toast(r.data.detail || r.data.code || '操作失败', 'error');
 }
 
 async function deleteApiKey(id) {
   if (!confirm('确定要删除此密钥吗？')) return;
+  // 0.5:删除成功 204 无 body
   const r = await api('DELETE', `/api/api-keys/${id}`);
   if (r.ok) { toast('密钥已删除'); await loadApiKeys(); }
-  else toast(r.data.message || r.data.error || '删除失败', 'error');
+  else toast(r.data.detail || r.data.code || '删除失败', 'error');
 }
 
 

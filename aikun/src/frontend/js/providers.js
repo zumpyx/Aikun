@@ -112,7 +112,7 @@ function installChannelPresets({ prefix, provider, protoBoxes, defaultRadios, sy
       lastAuto = modelsEl.value.trim();
       if (statusEl) statusEl.textContent = `已获取 ${r.data.models.length} 个模型（官方当前列表）`;
     } else if (statusEl) {
-      statusEl.textContent = r.data?.message || r.data?.error || '未能获取模型列表，可点「获取模型列表」重试';
+      statusEl.textContent = r.data?.detail || r.data?.code || '未能获取模型列表，可点「获取模型列表」重试';
     }
   }
 
@@ -163,16 +163,17 @@ function installChannelPresets({ prefix, provider, protoBoxes, defaultRadios, sy
   select(selected ? selected.id : 'custom', false);
 }
 
-// 渠道类型(适配器)下拉:选项来自后端注册表 /api/admin/channel-kinds。
-// generic 的取值为空串(库里 channel_kind='' 即 generic,编辑时不产生 diff)。
+// 渠道类型(适配器)下拉:选项来自后端注册表 /api/channel-kinds
+// ({items,total} 信封,目录型无分页)。generic 的取值为空串
+// (库里 channel_kind='' 即 generic,编辑时不产生 diff)。
 let CHANNEL_KINDS_CACHE = null;
 async function fillChannelKinds(prefix, current) {
   const sel = document.getElementById(`${prefix}-kind`);
   const hint = document.getElementById(`${prefix}-kind-hint`);
   if (!sel) return;
   if (!CHANNEL_KINDS_CACHE) {
-    const r = await api('GET', '/api/admin/channel-kinds');
-    CHANNEL_KINDS_CACHE = r.ok && Array.isArray(r.data) ? r.data : [{ kind: 'generic', label: '通用', description: '' }];
+    const r = await api('GET', '/api/channel-kinds');
+    CHANNEL_KINDS_CACHE = r.ok && Array.isArray(r.data.items) ? r.data.items : [{ kind: 'generic', label: '通用', description: '' }];
   }
   const kinds = CHANNEL_KINDS_CACHE;
   const valueOf = k => (k.kind === 'generic' ? '' : k.kind);
@@ -204,12 +205,12 @@ async function renderProviders(container) {
 }
 
 async function loadProviders() {
-  const r = await api('GET', '/api/admin/providers');
+  const r = await api('GET', '/api/providers');
   const list = document.getElementById('providers-list');
   if (!list) return;
   if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
 
-  const data = r.data;
+  const data = (r.data.items || []);
   if (data.length === 0) {
     list.innerHTML = '<div class="card"><div class="empty"><p>暂无渠道，点击上方按钮添加</p></div></div>';
     return;
@@ -239,7 +240,7 @@ async function loadProviders() {
                 <td>
                   ${!p.is_active
                     ? `<span class="badge badge-red" title="${esc(p.disabled_reason || '已手动禁用')}">已禁用</span>`
-                    : `<span class="badge ${p.health_status === 'healthy' ? 'badge-green' : p.health_status === 'degraded' ? 'badge-yellow' : p.health_status === 'unhealthy' ? 'badge-red' : 'badge-gray'}" title="${esc(p.disabled_reason || '')}">${esc(p.health_status)}</span>`}
+                    : `<span class="badge ${p.health_status === 'healthy' ? 'badge-green' : p.health_status === 'degraded' ? 'badge-yellow' : p.health_status === 'down' ? 'badge-red' : 'badge-gray'}" title="${esc(p.disabled_reason || '')}">${esc(p.health_status)}</span>`}
                 </td>
                 <td>${p.latency_ms > 0 ? Math.round(p.latency_ms) + 'ms' : '-'}</td>
                 <td>${p.priority}</td>
@@ -262,9 +263,9 @@ async function loadProviders() {
 async function showProviderModal(id) {
   let provider = null;
   if (id) {
-    const r = await api('GET', `/api/admin/providers/${id}`);
+    const r = await api('GET', `/api/providers/${id}`);
     // 详情加载失败时直接报错退出，避免误当新建渠道覆盖
-    if (!r.ok) return toast(r.data.message || r.data.error || '加载渠道详情失败', 'error');
+    if (!r.ok) return toast(r.data.detail || r.data.code || '加载渠道详情失败', 'error');
     provider = r.data;
   }
 
@@ -368,7 +369,7 @@ async function showProviderModal(id) {
     syncProtoRows,
     pullModels: () => {
       const proto = (defaultRadios.find(r => r.checked && !r.disabled) || {}).value || 'openai';
-      return api('POST', '/api/admin/providers/fetch-models', {
+      return api('POST', '/api/providers/fetch-models', {
         base_url: urlFor(proto),
         api_key: document.getElementById('pf-key').value,
         protocol: proto,
@@ -391,7 +392,7 @@ async function showProviderModal(id) {
     btn.disabled = true; btn.textContent = '获取中…';
     try {
       const proto = (defaultRadios.find(r => r.checked && !r.disabled) || {}).value || 'openai';
-      const r = await api('POST', '/api/admin/providers/fetch-models', {
+      const r = await api('POST', '/api/providers/fetch-models', {
         base_url: urlFor(proto),
         api_key: document.getElementById('pf-key').value,
         protocol: proto,
@@ -403,7 +404,7 @@ async function showProviderModal(id) {
         document.getElementById('pf-models').value = r.data.models.join(', ');
         toast(`获取到 ${r.data.models.length} 个模型`);
       } else {
-        toast(r.data.message || r.data.error || '未获取到模型列表', 'error');
+        toast(r.data.detail || r.data.code || '未获取到模型列表', 'error');
       }
     } finally {
       btn.disabled = false; btn.textContent = '获取模型列表';
@@ -466,12 +467,12 @@ async function showProviderModal(id) {
         if (nv !== ov) upd[k] = body[k];
       }
       if (Object.keys(upd).length === 0) return toast('没有修改', 'info');
-      const r = await api('PATCH', `/api/admin/providers/${provider.id}`, upd);
-      if (!r.ok) return toast(r.data.message || r.data.error || '操作失败', 'error');
+      const r = await api('PATCH', `/api/providers/${provider.id}`, upd);
+      if (!r.ok) return toast(r.data.detail || r.data.code || '操作失败', 'error');
       toast('渠道已更新');
     } else {
-      const r = await api('POST', '/api/admin/providers', body);
-      if (!r.ok) return toast(r.data.message || r.data.error || '操作失败', 'error');
+      const r = await api('POST', '/api/providers', body);
+      if (!r.ok) return toast(r.data.detail || r.data.code || '操作失败', 'error');
       toast('渠道已创建');
     }
     overlay.remove();
@@ -580,7 +581,7 @@ function showBatchProviderModal() {
     syncProtoRows,
     pullModels: () => {
       const proto = (defaultRadios.find(r => r.checked && !r.disabled) || {}).value || 'openai';
-      return api('POST', '/api/admin/providers/fetch-models', {
+      return api('POST', '/api/providers/fetch-models', {
         base_url: urlFor(proto),
         api_key: firstKey(),
         protocol: proto,
@@ -601,7 +602,7 @@ function showBatchProviderModal() {
     btn.disabled = true; btn.textContent = '获取中…';
     try {
       const proto = (defaultRadios.find(r => r.checked && !r.disabled) || {}).value || 'openai';
-      const r = await api('POST', '/api/admin/providers/fetch-models', {
+      const r = await api('POST', '/api/providers/fetch-models', {
         base_url: urlFor(proto),
         api_key: firstKey(),
         protocol: proto,
@@ -613,7 +614,7 @@ function showBatchProviderModal() {
         document.getElementById('bf-models').value = r.data.models.join(', ');
         toast(`获取到 ${r.data.models.length} 个模型`);
       } else {
-        toast(r.data.message || r.data.error || '未获取到模型列表', 'error');
+        toast(r.data.detail || r.data.code || '未获取到模型列表', 'error');
       }
     } finally {
       btn.disabled = false; btn.textContent = '获取模型列表';
@@ -661,8 +662,8 @@ function showBatchProviderModal() {
     if ((protocols.includes('openai') || protocols.includes('responses')) && !body.openai_base_url) return toast('已勾选 OpenAI/Responses 协议，请填写 OPENAI_BASE_URL', 'error');
     if (protocols.includes('anthropic') && !body.anthropic_base_url) return toast('已勾选 Anthropic 协议，请填写 ANTHROPIC_BASE_URL', 'error');
 
-    const r = await api('POST', '/api/admin/providers/batch', body);
-    if (!r.ok && !r.data.providers) return toast(r.data.message || r.data.error || '批量创建失败', 'error');
+    const r = await api('POST', '/api/providers/batch', body);
+    if (!r.ok && !r.data.providers) return toast(r.data.detail || r.data.code || '批量创建失败', 'error');
     overlay.remove();
     await loadProviders();
     showBatchResultModal(r.data);
@@ -682,7 +683,7 @@ function showBatchResultModal(data) {
     <div class="modal" style="max-width:560px">
       <h2>批量创建完成:成功 ${created.length} 个${failed.length ? `,失败 ${failed.length} 个` : ''}</h2>
       ${failed.length ? `<div style="margin-bottom:10px">${failed.map(f =>
-        `<div style="font-size:12.5px;color:var(--danger,#f43f5e)">第 ${f.index + 1} 个 key:${esc(f.message || f.error || '创建失败')}</div>`).join('')}</div>` : ''}
+        `<div style="font-size:12.5px;color:var(--danger,#f43f5e)">第 ${f.index + 1} 个 key:${esc(f.message || f.code || '创建失败')}</div>`).join('')}</div>` : ''}
       <div id="batch-test-results" style="max-height:300px;overflow:auto;font-size:12.5px">
         ${created.map(p => `<div id="btr-${esc(p.id)}" style="padding:4px 0">${esc(p.name)} <span style="color:var(--muted)">测试排队中…</span></div>`).join('')}
       </div>
@@ -698,26 +699,26 @@ function showBatchResultModal(data) {
       const row = document.getElementById('btr-' + p.id);
       if (!row) return; // 弹窗已关闭
       row.innerHTML = `${esc(p.name)} <span style="color:var(--muted)">测试中…</span>`;
-      const r = await api('POST', `/api/admin/providers/${p.id}/test`);
+      const r = await api('POST', `/api/providers/${p.id}/tests`);
       const ok = r.ok && r.data.status === 'healthy';
-      row.innerHTML = `${esc(p.name)} <span style="color:${ok ? '#14b8a6' : 'var(--danger,#f43f5e)'}">${ok ? '✓ ' : '✗ '}${esc(r.data.message || r.data.error || (r.ok ? r.data.status : '测试失败'))}</span>`;
+      row.innerHTML = `${esc(p.name)} <span style="color:${ok ? '#14b8a6' : 'var(--danger,#f43f5e)'}">${ok ? '✓ ' : '✗ '}${esc(r.data.message || r.data.status || '测试失败')}</span>`;
     }
     loadProviders();
   })();
 }
 
 async function toggleProvider(id, active) {
-  const r = await api('PATCH', `/api/admin/providers/${id}`, { is_active: active });
+  const r = await api('PATCH', `/api/providers/${id}`, { is_active: active });
   if (r.ok) { toast(active ? '渠道已启用' : '渠道已禁用'); await loadProviders(); }
-  else toast(r.data.message || r.data.error || '操作失败', 'error');
+  else toast(r.data.detail || r.data.code || '操作失败', 'error');
 }
 
 async function duplicateProvider(id, btn) {
   btn.disabled = true;
   try {
-    const r = await api('POST', `/api/admin/providers/${id}/duplicate`);
+    const r = await api('POST', `/api/providers/${id}/duplicates`);
     if (r.ok) { toast(`已创建副本: ${r.data.name || '新渠道'}`); await loadProviders(); }
-    else toast('复制失败: ' + (r.data.message || r.data.error || '未知错误'), 'error');
+    else toast('复制失败: ' + (r.data.detail || r.data.code || '未知错误'), 'error');
   } finally {
     btn.disabled = false;
   }
@@ -726,11 +727,11 @@ async function duplicateProvider(id, btn) {
 async function testProvider(id, btn) {
   btn.disabled = true; btn.textContent = '…';
   try {
-    const r = await api('POST', `/api/admin/providers/${id}/test`);
+    const r = await api('POST', `/api/providers/${id}/tests`);
     if (r.ok) {
       toast(r.data.message || '测试完成', r.data.status === 'healthy' ? 'success' : 'info');
     } else {
-      toast('测试失败: ' + (r.data.message || r.data.error || '未知错误'), 'error');
+      toast('测试失败: ' + (r.data.detail || r.data.code || '未知错误'), 'error');
     }
     await loadProviders();
   } finally {
@@ -740,9 +741,9 @@ async function testProvider(id, btn) {
 
 async function deleteProvider(id) {
   if (!confirm('确定要删除此渠道吗？')) return;
-  const r = await api('DELETE', `/api/admin/providers/${id}`);
+  const r = await api('DELETE', `/api/providers/${id}`);
   if (r.ok) { toast('渠道已删除'); await loadProviders(); }
-  else toast(r.data.message || r.data.error || '删除失败', 'error');
+  else toast(r.data.detail || r.data.code || '删除失败', 'error');
 }
 
 

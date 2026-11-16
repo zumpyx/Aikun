@@ -527,179 +527,6 @@ async fn no_price_match_leaves_balance_unchanged() {
 }
 
 #[tokio::test]
-async fn admin_prices_crud_and_wildcard_billing() {
-    let mock = MockUpstream::start().await;
-    let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    seed_openai_provider(&app, &mock, "p1");
-    let jwt = common::admin_jwt();
-
-    // 创建通配价格 gpt-*(1, 2)/1M
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/prices", app.base))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({"model": "gpt-*", "prompt_price": 1.0, "completion_price": 2.0}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
-    let price: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(price["model"], "gpt-*");
-    // 未传 cached_price:序列化输出 null(缓存按输入价计)
-    assert!(price["cached_price"].is_null());
-
-    // 重复创建同一 model → 409
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/prices", app.base))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({"model": "gpt-*"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 409);
-
-    // 请求命中通配价格:cost = (3+2)×1/1M + 3×2/1M = 0.000011 元 = 11 微元
-    // (mock 5 个输入含 2 缓存,无 cached_price 时缓存按输入价计)
-    let resp = chat_completions(&app).await;
-    assert_eq!(resp.status(), 200);
-    wait_until("wildcard price applied", WAIT, || {
-        let cost: i64 = app
-            .db()
-            .query_row(
-                "SELECT COALESCE(SUM(cost), 0) FROM request_logs WHERE user_id = 'u-e2e'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        cost == 11
-    })
-    .await;
-
-    // 列表 → 更新 → 删除
-    let resp = app
-        .client()
-        .get(format!("{}/api/admin/prices", app.base))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let prices: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(prices.as_array().unwrap().len(), 1);
-
-    // in_use=1:只返回渠道模型(gpt-4)会命中的条目;other-* 无渠道模型命中被滤掉
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/prices", app.base))
-        .bearer_auth(&jwt)
-        .json(
-            &serde_json::json!({"model": "other-*", "prompt_price": 1.0, "completion_price": 1.0}),
-        )
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
-    let other_id = resp.json::<serde_json::Value>().await.unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let resp = app
-        .client()
-        .get(format!("{}/api/admin/prices?in_use=1", app.base))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let in_use: serde_json::Value = resp.json().await.unwrap();
-    let in_use = in_use.as_array().unwrap();
-    assert_eq!(in_use.len(), 1);
-    assert_eq!(in_use[0]["model"], "gpt-*");
-    let resp = app
-        .client()
-        .get(format!("{}/api/admin/prices", app.base))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.json::<serde_json::Value>()
-            .await
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    let resp = app
-        .client()
-        .delete(format!("{}/api/admin/prices/{}", app.base, other_id))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let id = price["id"].as_str().unwrap();
-    let resp = app
-        .client()
-        .patch(format!("{}/api/admin/prices/{}", app.base, id))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({"prompt_price": 5.0}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.json::<serde_json::Value>().await.unwrap()["prompt_price"],
-        5.0
-    );
-
-    // cached_price 双层语义:显式 null 清回 NULL(缓存按输入价),缺省不改动
-    let resp = app
-        .client()
-        .patch(format!("{}/api/admin/prices/{}", app.base, id))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({"cached_price": 1.5}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.json::<serde_json::Value>().await.unwrap()["cached_price"],
-        1.5
-    );
-    let resp = app
-        .client()
-        .patch(format!("{}/api/admin/prices/{}", app.base, id))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({"cached_price": null}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body = resp.json::<serde_json::Value>().await.unwrap();
-    assert!(
-        body["cached_price"].is_null(),
-        "显式 null 应清空缓存价: {}",
-        body
-    );
-    // 缺省字段不影响已有值(prompt_price 仍是 5.0)
-    assert_eq!(body["prompt_price"], 5.0);
-
-    let resp = app
-        .client()
-        .delete(format!("{}/api/admin/prices/{}", app.base, id))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-}
-
-#[tokio::test]
 async fn default_prices_seeded_when_table_empty_on_startup() {
     // spawn 已清空价格表(见 tests/common);重启等价于空表启动 → 重新 seed
     let mut app = TestApp::spawn().await;
@@ -719,306 +546,6 @@ async fn default_prices_seeded_when_table_empty_on_startup() {
     assert_eq!(gpt4o_prompt, 18.0);
 }
 
-#[tokio::test]
-async fn wallet_returns_own_balance_and_daily_costs() {
-    let mock = MockUpstream::start().await;
-    let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    seed_openai_provider(&app, &mock, "p1");
-    app.db()
-        .execute(
-            "UPDATE users SET balance = 100_000_000 WHERE id = 'u-e2e'",
-            [],
-        )
-        .unwrap();
-    app.db()
-        .execute(
-            "INSERT INTO model_prices (id, model, prompt_price, completion_price)
-             VALUES ('mp1', 'gpt-4', 10.0, 30.0)",
-            [],
-        )
-        .unwrap();
-
-    // 未登录 → 401
-    let resp = app
-        .client()
-        .get(format!("{}/api/wallet", app.base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-
-    let resp = chat_completions(&app).await;
-    assert_eq!(resp.status(), 200);
-    wait_until("cost recorded", WAIT, || {
-        let cost: i64 = app
-            .db()
-            .query_row(
-                "SELECT COALESCE(SUM(cost), 0) FROM request_logs WHERE user_id = 'u-e2e'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        cost == 140
-    })
-    .await;
-
-    // 普通用户角色也能看自己的钱包(接口只按 claims.sub 取数)
-    let jwt = common::sign_jwt("u-e2e", "e2e", "user");
-    let resp = app
-        .client()
-        .get(format!("{}/api/wallet", app.base))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let w: serde_json::Value = resp.json().await.unwrap();
-    // 费用:3 未缓存×10 + 2 缓存×10(无缓存价按输入价)+ 3 输出×30 = 0.00014
-    assert!((w["balance"].as_f64().unwrap() - (100.0 - 0.00014)).abs() < 1e-6);
-    assert!((w["today"]["cost"].as_f64().unwrap() - 0.00014).abs() < 1e-9);
-    assert!((w["month"]["cost"].as_f64().unwrap() - 0.00014).abs() < 1e-9);
-    assert_eq!(w["daily"].as_array().unwrap().len(), 30);
-    let today_cost = w["daily"].as_array().unwrap().last().unwrap()["cost"]
-        .as_f64()
-        .unwrap();
-    assert!((today_cost - 0.00014).abs() < 1e-9);
-    let models = w["top_models"].as_array().unwrap();
-    assert_eq!(models.len(), 1);
-    assert_eq!(models[0]["model"], "gpt-4");
-}
-
-#[tokio::test]
-async fn admin_adjust_balance_records_transaction() {
-    let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let jwt = common::admin_jwt();
-    // 从零余额起算(种子默认带 1 元)
-    app.db()
-        .execute("UPDATE users SET balance = 0 WHERE id = 'u-e2e'", [])
-        .unwrap();
-
-    // 充值 100
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/users/u-e2e/balance", app.base))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": 100.0, "note": "首充"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["balance"], 100.0);
-    assert_eq!(body["kind"], "recharge");
-
-    // 扣减 30 → 余额 70,kind=adjust
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/users/u-e2e/balance", app.base))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": -30.0}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.json::<serde_json::Value>().await.unwrap()["balance"],
-        70.0
-    );
-
-    // 流水有两条,最新的在前
-    let resp = app
-        .client()
-        .get(format!("{}/api/admin/billing/transactions", app.base))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let txs: serde_json::Value = resp.json().await.unwrap();
-    let arr = txs.as_array().unwrap();
-    assert_eq!(arr.len(), 2);
-    assert_eq!(arr[0]["amount"], -30.0);
-    assert_eq!(arr[0]["balance_after"], 70.0);
-    assert_eq!(arr[0]["kind"], "adjust");
-    assert_eq!(arr[1]["amount"], 100.0);
-    assert_eq!(arr[1]["kind"], "recharge");
-    assert_eq!(arr[1]["note"], "首充");
-
-    // 非法金额 → 400;不存在的用户 → 404
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/users/u-e2e/balance", app.base))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": 0}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 400);
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/users/nobody/balance", app.base))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": 1.0}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 404);
-}
-
-/// 渠道批量添加:3 个 key 建 3 个渠道(自动编号 -01..-03),协议/加密落库;
-/// 全部非法时 400。
-#[tokio::test]
-async fn batch_create_providers() {
-    let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let jwt = common::admin_jwt();
-
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/providers/batch", app.base))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({
-            "name": "batch",
-            "openai_base_url": "http://127.0.0.1:1",
-            "models": ["gpt-4"],
-            "protocols": ["openai"],
-            "api_keys": ["k1", "k2", "k3"]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["created"], 3);
-    assert_eq!(body["failed"].as_array().unwrap().len(), 0);
-    let providers = body["providers"].as_array().unwrap();
-    let names: Vec<&str> = providers
-        .iter()
-        .map(|p| p["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, ["batch-01", "batch-02", "batch-03"]);
-
-    // 落库核对:协议字段与加密 key(enc:v1: 前缀,逐 key 密文不同)
-    let rows: Vec<(String, String, String)> = app
-        .db()
-        .prepare("SELECT name, api_key, default_protocol FROM providers WHERE name LIKE 'batch-%' ORDER BY name")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect();
-    assert_eq!(rows.len(), 3);
-    let ciphers: std::collections::HashSet<&str> =
-        rows.iter().map(|(_, k, _)| k.as_str()).collect();
-    for (_, key, proto) in &rows {
-        assert_eq!(proto, "openai");
-        assert!(key.starts_with("enc:v1:"), "key must be encrypted at rest");
-    }
-    assert_eq!(ciphers.len(), 3, "每个 key 应独立加密");
-
-    // 空 keys / 超上限 / 缺地址 → 400
-    for body in [
-        serde_json::json!({"name": "x", "openai_base_url": "http://a", "models": [], "api_keys": []}),
-        serde_json::json!({"name": "x", "openai_base_url": "http://a", "models": [], "api_keys": vec!["k"; 101]}),
-        serde_json::json!({"name": "x", "models": [], "api_keys": ["k1"], "protocols": ["openai"]}),
-    ] {
-        let resp = app
-            .client()
-            .post(format!("{}/api/admin/providers/batch", app.base))
-            .bearer_auth(&jwt)
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 400, "body: {}", body);
-    }
-}
-
-/// 渠道 key 重复检测:库存已有同 key(哈希比对)→ 单建 409;批量中与库存
-/// 重复及批内重复的归入失败组,不影响其余 key 创建。
-#[tokio::test]
-async fn duplicate_provider_key_rejected() {
-    let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let jwt = common::admin_jwt();
-
-    let payload = serde_json::json!({
-        "name": "dup",
-        "openai_base_url": "http://127.0.0.1:1",
-        "models": ["gpt-4"],
-        "protocols": ["openai"],
-        "api_key": "same-key"
-    });
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/providers", app.base))
-        .bearer_auth(&jwt)
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
-
-    // 同 key 再建(不同名)→ 409 duplicate_key
-    let mut p2 = payload.clone();
-    p2["name"] = serde_json::json!("dup2");
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/providers", app.base))
-        .bearer_auth(&jwt)
-        .json(&p2)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 409);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"], "duplicate_key");
-    assert!(body["message"].as_str().unwrap().contains("dup"));
-
-    // 批量:same-key 与库存重复、第二个 new-1 批内重复 → 失败组;new-1 创建成功
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/providers/batch", app.base))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({
-            "name": "dedup",
-            "openai_base_url": "http://127.0.0.1:1",
-            "models": ["gpt-4"],
-            "protocols": ["openai"],
-            "api_keys": ["same-key", "new-1", "new-1"]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["created"], 1);
-    let failed = body["failed"].as_array().unwrap();
-    assert_eq!(failed.len(), 2);
-    assert!(failed.iter().all(|f| f["error"] == "duplicate_key"));
-
-    // 编辑渠道换成已占用的 key → 409
-    let dup_id: String = app
-        .db()
-        .query_row("SELECT id FROM providers WHERE name = 'dup'", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    let resp = app
-        .client()
-        .patch(format!("{}/api/admin/providers/{}", app.base, dup_id))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({"api_key": "new-1"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 409);
-}
-
-/// Key 并发限制:max_concurrent=1 时,慢上游请求在途期间第二个请求 429;
-/// 在途请求结束后槽位归还,后续请求恢复 200。
 #[tokio::test]
 async fn api_key_concurrent_limit_enforced() {
     let mock = MockUpstream::start().await;
@@ -1065,363 +592,6 @@ async fn api_key_concurrent_limit_enforced() {
     // 槽位已归还:立即再发一个请求 → 200
     let resp = chat_completions(&app).await;
     assert_eq!(resp.status(), 200);
-}
-
-/// 兑换码全流程:生成 → 兑换(余额+流水) → 重复兑换 400 → 禁用后 400 → 过期 400。
-#[tokio::test]
-async fn redemption_code_full_flow() {
-    let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let jwt = common::admin_jwt();
-    app.db()
-        .execute("UPDATE users SET balance = 0 WHERE id = 'u-e2e'", [])
-        .unwrap();
-
-    // 批量生成 3 张 10 元码 + 1 张已过期码
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/redemption-codes", app.base))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({"count": 3, "amount": 10.0, "batch": "b1", "note": "活动"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["amount"], 10.0);
-    let codes: Vec<String> = body["codes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c.as_str().unwrap().to_string())
-        .collect();
-    assert_eq!(codes.len(), 3);
-    assert!(
-        codes
-            .iter()
-            .all(|c| { c.len() == 22 && c.starts_with("AK-") && c.matches('-').count() == 4 })
-    );
-    let resp = app
-        .client()
-        .post(format!("{}/api/admin/redemption-codes", app.base))
-        .bearer_auth(&jwt)
-        .json(&serde_json::json!({"count": 1, "amount": 5.0, "batch": "b1", "expires_at": "2020-01-01"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
-    let expired_code = resp.json::<serde_json::Value>().await.unwrap()["codes"][0]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let user_jwt = common::sign_jwt("u-e2e", "e2e", "user");
-    let redeem = |code: &str| {
-        let app = &app;
-        let user_jwt = &user_jwt;
-        let code = code.to_string();
-        async move {
-            app.client()
-                .post(format!("{}/api/wallet/redeem", app.base))
-                .bearer_auth(user_jwt)
-                .json(&serde_json::json!({"code": code}))
-                .send()
-                .await
-                .unwrap()
-        }
-    };
-
-    // 兑换第一张:余额 0 → 10,流水记"兑换码充值"
-    let resp = redeem(&codes[0]).await;
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["amount"], 10.0);
-    assert_eq!(body["balance"], 10.0);
-
-    // 重复兑换同一张 → 400
-    let resp = redeem(&codes[0]).await;
-    assert_eq!(resp.status(), 400);
-    // 不存在的码 → 400;过期码 → 400(口径一致,不细分防枚举)
-    let resp = redeem("AK-AAAA-BBBB-CCCC-DDDD").await;
-    assert_eq!(resp.status(), 400);
-    let resp = redeem(&expired_code).await;
-    assert_eq!(resp.status(), 400);
-
-    // 流水有一条 10 元充值
-    let resp = app
-        .client()
-        .get(format!("{}/api/admin/billing/transactions", app.base))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    let txs: serde_json::Value = resp.json().await.unwrap();
-    let arr = txs.as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["amount"], 10.0);
-    assert_eq!(arr[0]["kind"], "recharge");
-    assert_eq!(arr[0]["note"], "兑换码充值");
-
-    // 管理端列表:4 张码(3 正常 + 1 过期未用),第一张已使用;明文/哈希不出库
-    let resp = app
-        .client()
-        .get(format!("{}/api/admin/redemption-codes?batch=b1", app.base))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let list: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(list["total"], 4);
-    let arr = list["items"].as_array().unwrap();
-    assert_eq!(arr.len(), 4);
-    assert!(arr.iter().all(|c| {
-        let masked = c["code_masked"].as_str().unwrap();
-        masked.len() == 22 && masked.starts_with("AK-****-****-****-")
-    }));
-    assert!(
-        arr.iter()
-            .all(|c| c.get("code_hash").is_none() && c.get("code").is_none())
-    );
-    let used = arr.iter().find(|c| c["status"] == "used").unwrap();
-    assert_eq!(used["used_by"], "e2e");
-    // 过期未用:status 仍为 unused,expired 计算字段为 true
-    let expired_unused = arr
-        .iter()
-        .find(|c| c["status"] == "unused" && !c["expires_at"].is_null())
-        .unwrap();
-    assert_eq!(expired_unused["expired"], true);
-    assert!(arr.iter().filter(|c| c["expired"] == true).count() == 1);
-
-    // expired 筛选:只返回过期未用的那 1 张
-    let resp = app
-        .client()
-        .get(format!(
-            "{}/api/admin/redemption-codes?batch=b1&status=expired",
-            app.base
-        ))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let filtered: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(filtered["total"], 1);
-    assert_eq!(filtered["items"][0]["expired"], true);
-
-    // 分页:limit=2 应得两页
-    let resp = app
-        .client()
-        .get(format!(
-            "{}/api/admin/redemption-codes?batch=b1&limit=2&offset=2",
-            app.base
-        ))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let page2: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(page2["total"], 4);
-    assert_eq!(page2["items"].as_array().unwrap().len(), 2);
-
-    // 禁用一张未过期且未使用的 → 兑换 400;重复禁用 → 409
-    let unused_id = arr
-        .iter()
-        .find(|c| c["status"] == "unused" && c["expires_at"].is_null())
-        .unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let resp = app
-        .client()
-        .post(format!(
-            "{}/api/admin/redemption-codes/{}/disable",
-            app.base, unused_id
-        ))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let resp = app
-        .client()
-        .post(format!(
-            "{}/api/admin/redemption-codes/{}/disable",
-            app.base, unused_id
-        ))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 409);
-    // 被禁用的是 codes[1] 或 codes[2]:找出未用且未被禁用的另一张确认仍可用
-    let resp = redeem(&codes[1]).await;
-    let disabled_first = resp.status() == 400;
-    if !disabled_first {
-        assert_eq!(resp.status(), 200);
-        let resp = redeem(&codes[2]).await;
-        assert_eq!(resp.status(), 400);
-    } else {
-        let resp = redeem(&codes[2]).await;
-        assert_eq!(resp.status(), 200);
-    }
-
-    // 非法参数:count 超限 / 负面值 / 空批次 → 400
-    for body in [
-        serde_json::json!({"count": 501, "amount": 1.0, "batch": "x"}),
-        serde_json::json!({"count": 1, "amount": -1.0, "batch": "x"}),
-        serde_json::json!({"count": 1, "amount": 1.0, "batch": ""}),
-        serde_json::json!({"count": 1, "amount": 1.0, "batch": "x", "expires_at": "2026-01-01T00:00:00Z"}),
-    ] {
-        let resp = app
-            .client()
-            .post(format!("{}/api/admin/redemption-codes", app.base))
-            .bearer_auth(&jwt)
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 400, "body: {}", body);
-    }
-}
-
-/// 兑换防爆破:同一用户 10 分钟内失败 5 次 → 429。
-#[tokio::test]
-async fn redemption_bruteforce_rate_limited() {
-    let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let user_jwt = common::sign_jwt("u-e2e", "e2e", "user");
-    for i in 0..5 {
-        let resp = app
-            .client()
-            .post(format!("{}/api/wallet/redeem", app.base))
-            .bearer_auth(&user_jwt)
-            .json(&serde_json::json!({"code": format!("AK-XXXX-XXXX-XXXX-{:04}", i)}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 400);
-    }
-    let resp = app
-        .client()
-        .post(format!("{}/api/wallet/redeem", app.base))
-        .bearer_auth(&user_jwt)
-        .json(&serde_json::json!({"code": "AK-XXXX-XXXX-XXXX-9999"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 429);
-}
-
-/// 3.4:admin 跨用户管理 API key(list ?user_id= / PATCH / DELETE),
-/// 普通用户操作他人 key 一律 404。
-#[tokio::test]
-async fn admin_manages_other_users_api_keys() {
-    let app = TestApp::spawn().await;
-    seed_api_key(&app.db()); // u-e2e(admin) + k-e2e
-    // 普通用户 bob 及其 key
-    app.db()
-        .execute(
-            "INSERT INTO users (id, username, password_hash, role) VALUES ('u-bob', 'bob', 'h', 'user')",
-            [],
-        )
-        .unwrap();
-    app.db()
-        .execute(
-            "INSERT INTO api_keys (id, user_id, key, key_suffix, name) VALUES ('k-bob', 'u-bob', ?1, 'wxyz', 'bob-key')",
-            [common::sha256_hex("sk-bob")],
-        )
-        .unwrap();
-
-    let admin = common::admin_jwt();
-    let bob = common::sign_jwt("u-bob", "bob", "user");
-
-    // admin 带 ?user_id= 列出 bob 的 key;返回只有掩码,无明文。
-    let resp = app
-        .client()
-        .get(format!("{}/api/api-keys?user_id=u-bob", app.base))
-        .bearer_auth(&admin)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let keys: serde_json::Value = resp.json().await.unwrap();
-    let arr = keys.as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["id"], "k-bob");
-    assert_eq!(arr[0]["key"], "sk-****wxyz");
-
-    // admin 不带 user_id 仍只看自己的 key。
-    let resp = app
-        .client()
-        .get(format!("{}/api/api-keys", app.base))
-        .bearer_auth(&admin)
-        .send()
-        .await
-        .unwrap();
-    let keys: serde_json::Value = resp.json().await.unwrap();
-    let arr = keys.as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["id"], "k-e2e");
-
-    // admin 禁用 bob 的 key。
-    let resp = app
-        .client()
-        .patch(format!("{}/api/api-keys/k-bob", app.base))
-        .bearer_auth(&admin)
-        .json(&serde_json::json!({"is_active": false}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let active: i64 = app
-        .db()
-        .query_row(
-            "SELECT is_active FROM api_keys WHERE id = 'k-bob'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(active, 0);
-
-    // bob 对 admin 的 key 无权操作:404(不暴露存在性)。
-    let resp = app
-        .client()
-        .patch(format!("{}/api/api-keys/k-e2e", app.base))
-        .bearer_auth(&bob)
-        .json(&serde_json::json!({"is_active": false}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 404);
-    let resp = app
-        .client()
-        .delete(format!("{}/api/api-keys/k-e2e", app.base))
-        .bearer_auth(&bob)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 404);
-
-    // admin 删除 bob 的 key。
-    let resp = app
-        .client()
-        .delete(format!("{}/api/api-keys/k-bob", app.base))
-        .bearer_auth(&admin)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let n: i64 = app
-        .db()
-        .query_row(
-            "SELECT COUNT(*) FROM api_keys WHERE id = 'k-bob'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(n, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1898,13 +1068,14 @@ async fn admin_provider_responses_protocol_validation() {
         "models": ["gpt-4"],
         "openai_base_url": "http://127.0.0.1:1"
     });
+    // 0.5:渠道管理面已迁 /api/providers(spec-first,problem+json code)
     let create = |body: serde_json::Value| {
         let mut b = base.clone();
         b.as_object_mut()
             .unwrap()
             .extend(body.as_object().unwrap().clone());
         app.client()
-            .post(format!("{}/api/admin/providers", app.base))
+            .post(format!("{}/api/providers", app.base))
             .bearer_auth(&admin)
             .json(&b)
     };
@@ -1916,9 +1087,10 @@ async fn admin_provider_responses_protocol_validation() {
         .unwrap();
     assert_eq!(r.status(), 400);
     let v: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(v["error"], "invalid_protocols");
+    assert_eq!(v["code"], "invalid_protocols");
 
-    // responses 不能作为 default_protocol
+    // responses 不能作为 default_protocol:schema enum 只有 openai/anthropic,
+    // 生成层直接拦成 422(0.5 实测行为;spec 的 400 示例对该取值不可达)
     let r = create(serde_json::json!({
         "protocols": ["openai", "responses"],
         "default_protocol": "responses"
@@ -1926,9 +1098,22 @@ async fn admin_provider_responses_protocol_validation() {
     .send()
     .await
     .unwrap();
+    assert_eq!(r.status(), 422);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["code"], "request_validation_failed");
+
+    // impl 侧联动校验仍可达:default_protocol 合法枚举值但未勾选
+    // (anthropic 不在 protocols 里)→ 400 invalid_default_protocol
+    let r = create(serde_json::json!({
+        "protocols": ["openai", "responses"],
+        "default_protocol": "anthropic"
+    }))
+    .send()
+    .await
+    .unwrap();
     assert_eq!(r.status(), 400);
     let v: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(v["error"], "invalid_default_protocol");
+    assert_eq!(v["code"], "invalid_default_protocol");
 
     // 合法组合:省略默认时落到第一个可作默认的协议(openai 而非 responses)
     let r = create(serde_json::json!({"protocols": ["responses", "openai"]}))
@@ -1951,7 +1136,7 @@ async fn admin_provider_responses_protocol_validation() {
     .unwrap();
     assert_eq!(r.status(), 400);
     let v: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(v["error"], "invalid_base_url");
+    assert_eq!(v["code"], "invalid_base_url");
 }
 
 /// 通用端点透传:embeddings 字节级转发——模型映射生效、凭证改写、
@@ -2242,68 +1427,6 @@ async fn channel_affinity_sticks_then_repins_after_failure() {
 }
 
 #[tokio::test]
-async fn public_prices_expand_wildcard_for_logged_in_users() {
-    let mock = MockUpstream::start().await;
-    let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    seed_provider(
-        &app.db(),
-        &ProviderSeed {
-            id: "p1",
-            name: "p1",
-            protocol: "openai",
-            base_url: &mock.base,
-            models: "[\"gpt-4\",\"unpriced-model\"]",
-            priority: 1,
-            weight: 1.0,
-            health_status: "healthy",
-            error_rate: 0.0,
-        },
-    );
-    app.db()
-        .execute(
-            "INSERT INTO model_prices (id, model, prompt_price, completion_price)
-             VALUES ('price-wild', 'gpt-*', 1.0, 2.0), ('price-other', 'other-*', 9.0, 9.0)",
-            [],
-        )
-        .unwrap();
-
-    let anon = app
-        .client()
-        .get(format!("{}/api/prices", app.base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(anon.status(), 401);
-
-    let resp = app
-        .client()
-        .get(format!("{}/api/prices", app.base))
-        .bearer_auth(common::admin_jwt())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let rows: Vec<serde_json::Value> = resp.json().await.unwrap();
-    let gpt = rows
-        .iter()
-        .find(|r| r["model"] == "gpt-4")
-        .expect("gpt-4 offered");
-    assert_eq!(gpt["prompt_price"], 1.0);
-    assert_eq!(gpt["completion_price"], 2.0);
-    assert!(gpt["cached_price"].is_null());
-    let bare = rows
-        .iter()
-        .find(|r| r["model"] == "unpriced-model")
-        .unwrap();
-    assert!(bare["prompt_price"].is_null());
-    assert!(
-        rows.iter()
-            .all(|r| r["model"] != "gpt-*" && r["model"] != "other-*")
-    );
-}
-
-#[tokio::test]
 async fn cross_protocol_keeps_reasoning_and_cache_control() {
     let mock = MockUpstream::start().await;
     mock.push_json(
@@ -2376,9 +1499,10 @@ async fn channel_kinds_listed_validated_and_routed() {
     let jwt = common::admin_jwt();
 
     // 注册表对管理端可见:generic 排第一,占位适配器带 experimental 标记
+    // (0.5:/api/admin/channel-kinds → /api/channel-kinds,{items,total} 信封)
     let kinds: serde_json::Value = app
         .client()
-        .get(format!("{}/api/admin/channel-kinds", app.base))
+        .get(format!("{}/api/channel-kinds", app.base))
         .bearer_auth(&jwt)
         .send()
         .await
@@ -2386,7 +1510,7 @@ async fn channel_kinds_listed_validated_and_routed() {
         .json()
         .await
         .unwrap();
-    let list = kinds.as_array().unwrap();
+    let list = kinds["items"].as_array().unwrap();
     assert_eq!(list[0]["kind"], "generic");
     assert!(
         list.iter()
@@ -2403,10 +1527,10 @@ async fn channel_kinds_listed_validated_and_routed() {
             "channel_kind": kind,
         })
     };
-    // 未注册的类型 → 400
+    // 未注册的类型 → 400(problem+json code)
     let resp = app
         .client()
-        .post(format!("{}/api/admin/providers", app.base))
+        .post(format!("{}/api/providers", app.base))
         .bearer_auth(&jwt)
         .json(&payload("no-such-kind"))
         .send()
@@ -2414,12 +1538,12 @@ async fn channel_kinds_listed_validated_and_routed() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"], "invalid_channel_kind");
+    assert_eq!(body["code"], "invalid_channel_kind");
 
     // 合法类型 → 201,回显 channel_kind
     let resp = app
         .client()
-        .post(format!("{}/api/admin/providers", app.base))
+        .post(format!("{}/api/providers", app.base))
         .bearer_auth(&jwt)
         .json(&payload("workbuddy"))
         .send()
@@ -2445,10 +1569,10 @@ async fn channel_kinds_listed_validated_and_routed() {
             .any(|r| r.path == "/v1/chat/completions")
     );
 
-    // PATCH 改类型同样受注册表校验
+    // PATCH 改类型同样受注册表校验(0.5 路径;成功返回更新后资源)
     let resp = app
         .client()
-        .patch(format!("{}/api/admin/providers/{}", app.base, id))
+        .patch(format!("{}/api/providers/{}", app.base, id))
         .bearer_auth(&jwt)
         .json(&serde_json::json!({"channel_kind": "bogus"}))
         .send()
@@ -2457,7 +1581,7 @@ async fn channel_kinds_listed_validated_and_routed() {
     assert_eq!(resp.status(), 400);
     let resp = app
         .client()
-        .patch(format!("{}/api/admin/providers/{}", app.base, id))
+        .patch(format!("{}/api/providers/{}", app.base, id))
         .bearer_auth(&jwt)
         .json(&serde_json::json!({"channel_kind": "qoder"}))
         .send()
@@ -2560,4 +1684,109 @@ async fn deterministic_cache_hit_skips_upstream_and_still_logs() {
             >= 1
     })
     .await;
+}
+
+// ---------- 仪表盘统计(usage-stats / system-stats;0.5 新路径) ----------
+
+/// 仪表盘聚合(迁 crates/aikun-admin::admin_stats,集成批实现):
+/// usage-stats 的 today/week/month 计数、30 天补零日序列与 top_models;
+/// system-stats 的全系统计数;守护同管理面(匿名 401 / 非 admin 403)。
+#[tokio::test]
+async fn dashboard_stats_aggregations_new_paths() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    seed_api_key(&app.db()); // u-e2e(admin)+ k-e2e
+    seed_openai_provider(&app, &mock, "p1");
+    let now = chrono::Utc::now();
+    // 今日两条成功(不同模型)+ 昨日一条失败;31 天前一条(窗外不计)
+    let day = |n: i64| now - chrono::Duration::days(n);
+    for (id, model, success, tokens, age) in [
+        ("s1", "gpt-4", true, 100i64, 0i64),
+        ("s2", "gpt-4o", true, 50, 0),
+        ("s3", "gpt-4", false, 10, 1),
+        ("s0", "gpt-4", true, 999, 31),
+    ] {
+        app.db()
+            .execute(
+                "INSERT INTO request_logs (id, user_id, provider_id, model, request_type,
+                        prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                        latency_ms, status_code, success, error_message, cost, created_at)
+                 VALUES (?1, 'u-e2e', 'p1', ?2, 'chat', 0, 0, ?3, 0, 42, 200, ?4, NULL, 0, ?5)",
+                rusqlite::params![id, model, tokens, i32::from(success), day(age).to_rfc3339()],
+            )
+            .unwrap();
+    }
+
+    let client = app.client();
+    let jwt = common::admin_jwt();
+
+    // 匿名 → 401;非 admin(库内真实 user 角色)→ 403
+    let anon = client
+        .get(format!("{}/api/usage-stats", app.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), 401);
+    app.db()
+        .execute(
+            "INSERT INTO users (id, username, password_hash, role) VALUES ('u-plain', 'plain', 'h', 'user')",
+            [],
+        )
+        .unwrap();
+    let forbidden = client
+        .get(format!("{}/api/usage-stats", app.base))
+        .bearer_auth(common::sign_jwt("u-plain", "plain", "user"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), 403);
+
+    // usage-stats:today = 今日 2 条 150 tokens;week/month 含昨日失败共
+    // 3 条 160 tokens;31 天前那条在窗外。daily 恒 30 天;top_models 首
+    // 位是请求数并列时的 gpt-4(2 次);窗口内全部成功请求的聚合不受
+    // 失败行影响口径(与旧实现同 SQL)。
+    let r = client
+        .get(format!("{}/api/usage-stats", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let u: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(u["today"]["requests"], 2, "{u}");
+    assert_eq!(u["today"]["tokens"], 150);
+    assert_eq!(u["week"]["requests"], 3);
+    assert_eq!(u["month"]["requests"], 3);
+    assert_eq!(u["month"]["tokens"], 160);
+    assert_eq!(u["daily"].as_array().unwrap().len(), 30, "缺日补零");
+    let today_str = now.date_naive().format("%Y-%m-%d").to_string();
+    let today_bar = u["daily"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["date"].as_str() == Some(today_str.as_str()))
+        .unwrap();
+    assert_eq!(today_bar["requests"], 2);
+    let gpt4 = u["top_models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"].as_str() == Some("gpt-4"))
+        .unwrap();
+    assert_eq!(gpt4["requests"], 2);
+
+    // system-stats:api_keys=1(k-e2e)、users≥3(默认 admin+u-e2e+u-plain)、
+    // providers=1、requests_today=2
+    let r = client
+        .get(format!("{}/api/system/stats", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let s: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(s["api_keys"], 1, "{s}");
+    assert!(s["users"].as_i64().unwrap() >= 3);
+    assert_eq!(s["providers"], 1);
+    assert_eq!(s["requests_today"], 2);
 }

@@ -14,12 +14,15 @@ async function renderUsers(container) {
   document.getElementById('add-user-btn').onclick = () => showUserModal();
   document.getElementById('batch-user-btn').onclick = () => showBatchUserModal();
 
-  const r = await api('GET', '/api/admin/users');
+  // 新路径 /api/users(管理面前缀 /admin 已取消,api-mapping 全局 #1);
+  // 响应 {items,total} 信封。limit=200 是 API 上限(clamp 1..=200):
+  // 本页无翻页 UI,取满一页。
+  const r = await api('GET', '/api/users?limit=200');
   const list = document.getElementById('users-list');
   if (!list) return;
-  if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
+  if (!r.ok) { list.innerHTML = `<div class="empty"><p>加载失败:${esc(r.data.detail || r.data.code || 'unknown')}</p></div>`; return; }
 
-  const data = r.data;
+  const data = r.data.items || [];
   state.users = data;
   if (data.length === 0) {
     list.innerHTML = '<div class="card"><div class="empty"><p>暂无用户</p></div></div>';
@@ -57,9 +60,9 @@ async function renderUsers(container) {
 async function showUserModal(id) {
   let user = null;
   if (id) {
-    const r = await api('GET', `/api/admin/users/${id}`);
+    const r = await api('GET', `/api/users/${id}`);
     // 详情加载失败时直接报错退出，避免误当新建用户覆盖
-    if (!r.ok) return toast(r.data.message || r.data.error || '加载用户详情失败', 'error');
+    if (!r.ok) return toast(r.data.detail || r.data.code || '加载用户详情失败', 'error');
     user = r.data;
   }
 
@@ -96,8 +99,8 @@ async function showUserModal(id) {
       const role = document.getElementById('uf-role').value;
       if (role !== user.role) upd.role = role;
       if (Object.keys(upd).length === 0) return toast('没有修改', 'info');
-      const r = await api('PATCH', `/api/admin/users/${user.id}`, upd);
-      if (!r.ok) return toast(r.data.message || r.data.error || '操作失败', 'error');
+      const r = await api('PATCH', `/api/users/${user.id}`, upd);
+      if (!r.ok) return toast(r.data.detail || r.data.code || '操作失败', 'error');
       toast('用户已更新');
     } else {
       const u = document.getElementById('uf-user').value;
@@ -105,8 +108,8 @@ async function showUserModal(id) {
       const n = document.getElementById('uf-name').value;
       const r = document.getElementById('uf-role').value;
       if (!u || !p) return toast('请填写用户名和密码', 'error');
-      const res = await api('POST', '/api/admin/users', { username: u, password: p, display_name: n || u, role: r });
-      if (!res.ok) return toast(res.data.message || res.data.error || '操作失败', 'error');
+      const res = await api('POST', '/api/users', { username: u, password: p, display_name: n || u, role: r });
+      if (!res.ok) return toast(res.data.detail || res.data.code || '操作失败', 'error');
       toast('用户已创建');
     }
     overlay.remove();
@@ -119,9 +122,9 @@ async function showUserModal(id) {
 }
 
 async function toggleUser(id, active) {
-  const r = await api('PATCH', `/api/admin/users/${id}`, { is_active: active });
+  const r = await api('PATCH', `/api/users/${id}`, { is_active: active });
   if (r.ok) { toast(active ? '用户已启用' : '用户已禁用'); if (document.getElementById('users-list')) await renderUsers(document.getElementById('main-content')); }
-  else toast(r.data.message || r.data.error || '操作失败', 'error');
+  else toast(r.data.detail || r.data.code || '操作失败', 'error');
 }
 
 function showBatchUserModal() {
@@ -167,15 +170,15 @@ function showBatchUserModal() {
 
     btn.disabled = true; btn.textContent = '创建中…';
     try {
-      const r = await api('POST', '/api/admin/users/batch', { users });
-      if (!r.ok) { toast(r.data.message || r.data.error || '操作失败', 'error'); return; }
+      const r = await api('POST', '/api/users/batch', { users });
+      if (!r.ok) { toast(r.data.detail || r.data.code || '操作失败', 'error'); return; }
       const { created, failed, results } = r.data;
       toast(`创建完成:成功 ${created} 个,失败 ${failed} 个`);
       document.getElementById('batch-result').innerHTML = `
         <div style="max-height:240px;overflow:auto;margin-top:10px;border:1px solid var(--border,#e5e7eb);border-radius:8px;padding:10px;font-size:12.5px">
           ${results.map(x => x.ok
             ? `<div>✅ <strong>${esc(x.username)}</strong>${x.password ? ` — 密码:<code>${esc(x.password)}</code>` : ''}</div>`
-            : `<div>❌ <strong>${esc(x.username)}</strong> — ${esc(x.error)}</div>`).join('')}
+            : `<div>❌ <strong>${esc(x.username)}</strong> — ${esc(x.code)}</div>`).join('')}
         </div>
         ${results.some(x => x.ok && x.password) ? '<p style="font-size:12.5px;color:var(--danger);margin-top:6px">自动生成的密码仅在此显示一次,请立即保存。</p>' : ''}`;
       document.getElementById('batch-input').value = '';
@@ -210,8 +213,9 @@ async function loadUserKeys(userId) {
   const body = document.getElementById('user-keys-body');
   if (!body) return;
   const r = await api('GET', `/api/api-keys?user_id=${encodeURIComponent(userId)}`);
-  if (!r.ok) { body.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
-  const data = r.data;
+  if (!r.ok) { body.innerHTML = `<div class="empty"><p>加载失败:${esc(r.data.detail || r.data.code || 'unknown')}</p></div>`; return; }
+  // 列表响应 {items,total} 信封(旧裸数组)
+  const data = r.data.items || [];
   if (data.length === 0) { body.innerHTML = '<div class="empty"><p>该用户暂无密钥</p></div>'; return; }
 
   const isExpired = k => k.expires_at && new Date(k.expires_at) < new Date();
@@ -248,14 +252,15 @@ async function loadUserKeys(userId) {
 async function toggleUserKey(id, active, userId) {
   const r = await api('PATCH', `/api/api-keys/${id}`, { is_active: active });
   if (r.ok) { toast(active ? '密钥已启用' : '密钥已禁用'); await loadUserKeys(userId); }
-  else toast(r.data.message || r.data.error || '操作失败', 'error');
+  else toast(r.data.detail || r.data.code || '操作失败', 'error');
 }
 
 async function deleteUserKey(id, userId) {
   if (!confirm('确定要删除此密钥吗？')) return;
+  // 删除成功 204 无 body;core.js 的 api() 对空体已兜底
   const r = await api('DELETE', `/api/api-keys/${id}`);
   if (r.ok) { toast('密钥已删除'); await loadUserKeys(userId); }
-  else toast(r.data.message || r.data.error || '删除失败', 'error');
+  else toast(r.data.detail || r.data.code || '删除失败', 'error');
 }
 
 

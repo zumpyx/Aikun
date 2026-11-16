@@ -109,6 +109,62 @@ async function renderChat(container) {
   };
 }
 
+// 管理端模型测试:POST /api/providers/{id}/model-tests。
+// stream=true 时响应是 SSE(201 text/event-stream):delta 事件为增量文本,
+// 末条 result 事件是完整结果(与 JSON 模式同形);这里手动解析事件流,
+// 增量经 onDelta 渐进上屏。
+async function adminModelTest(pid, body, onDelta) {
+  if (!body.stream) return api('POST', `/api/providers/${pid}/model-tests`, body);
+  const headers = { 'Content-Type': 'application/json' };
+  if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
+  try {
+    const res = await fetch(`/api/providers/${pid}/model-tests`, {
+      method: 'POST', headers, body: JSON.stringify(body),
+      signal: AbortSignal.timeout(180000),
+    });
+    let data = {};
+    try { data = await res.clone().json(); } catch { /* SSE 流体不是 JSON */ }
+    if (res.status === 204 || !res.ok) {
+      // 校验失败(problem+json)在流开始前返回:按统一信封透传
+      if (!res.ok && !data.code && !data.detail && !data.error && !data.message) data = { error: 'unknown_error' };
+      return { ok: res.ok, status: res.status, data };
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', result = null;
+    const dispatch = (frame) => {
+      let event = 'message', dataLines = [];
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+      }
+      if (!dataLines.length) return;
+      const payload = dataLines.join('\n');
+      if (event === 'result') {
+        try { result = JSON.parse(payload); } catch { result = { ok: false, error: payload }; }
+      } else if (event === 'delta') {
+        try { onDelta && onDelta(JSON.parse(payload).text || ''); } catch { /* 忽略坏帧 */ }
+      }
+    };
+    // SSE 帧以空行分隔;流读完后再冲刷残帧
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        if (frame.trim()) dispatch(frame);
+      }
+    }
+    if (buf.trim()) dispatch(buf);
+    return { ok: res.ok, status: res.status, data: result || {} };
+  } catch {
+    return { ok: false, status: 0, data: { error: 'network_error' } };
+  }
+}
+
 // Admin request tester: channel → model → protocol cascading selects. The
 // first channel and its first model are pre-selected, and the protocol
 // defaults to the channel's default_protocol, so a quick test is one click.
@@ -122,10 +178,10 @@ async function initTestCascade() {
   const sendBtn = document.getElementById('chat-send');
   if (sendBtn) sendBtn.disabled = true;
 
-  const r = await api('GET', '/api/admin/providers');
+  const r = await api('GET', '/api/providers');
   // await 期间页面可能已切换，选择器已不在文档中就直接放弃
   if (!provSel.isConnected) return;
-  const provs = (r.ok ? (r.data || []) : []).filter(p => (p.models || []).length > 0);
+  const provs = (r.ok ? (r.data.items || []) : []).filter(p => (p.models || []).length > 0);
   // 实测探针只支持 chat 形状请求,responses 协议不进测试选项(由 /v1/responses 端点覆盖)。
   const protosOf = p => ((p.protocols && p.protocols.length) ? p.protocols : [p.provider_type]).filter(t => t !== 'responses');
 
@@ -169,16 +225,24 @@ async function initTestCascade() {
     result.style.display = 'none';
 
     try {
-      const r = await api('POST', `/api/admin/providers/${pid}/test-model`, {
-        model, messages, protocol: protoSel.value,
-        stream: document.getElementById('chat-stream')?.value === '1',
-      });
+      const stream = document.getElementById('chat-stream')?.value === '1';
       const resp = document.getElementById('chat-response');
+      if (resp && stream) {
+        // 流式:增量渐进上屏,结束后由 result 事件补全统计
+        result.style.display = 'block';
+        resp.textContent = '';
+      }
+      const r = await adminModelTest(pid, {
+        model, messages, protocol: protoSel.value, stream,
+      }, (text) => { if (resp) resp.textContent += text; });
       if (!resp) return;
       result.style.display = 'block';
-      resp.textContent = JSON.stringify(r.data.response || r.data, null, 2);
+      // 非流式 response 是上游原文(JSON 文本);流式是增量拼接的回复
+      resp.textContent = resp.textContent || (typeof r.data.response === 'string'
+        ? r.data.response
+        : JSON.stringify(r.data.response || r.data, null, 2));
       if (r.ok && r.data.ok) toast(`请求成功（${Math.round(r.data.latency_ms)}ms）`);
-      else toast(r.data.error || r.data.message || '请求失败', 'error');
+      else toast(r.data.error || r.data.detail || r.data.code || '请求失败', 'error');
     } finally {
       btn.disabled = false; btn.textContent = '发送请求';
     }
@@ -192,7 +256,7 @@ function provHealthBadge(p) {
   }
   const cls = p.health_status === 'healthy' ? 'badge-green'
     : p.health_status === 'degraded' ? 'badge-yellow'
-    : p.health_status === 'unhealthy' ? 'badge-red' : 'badge-gray';
+    : p.health_status === 'down' ? 'badge-red' : 'badge-gray';
   return `<span class="badge ${cls}">${esc(p.health_status)}</span>`;
 }
 
@@ -205,17 +269,17 @@ async function loadTestMatrix() {
   const host = document.getElementById('mt-matrix');
   if (!host) return;
   const [r, hr] = await Promise.all([
-    api('GET', '/api/admin/providers'),
-    api('GET', '/api/admin/model-health'),
+    api('GET', '/api/providers'),
+    api('GET', '/api/model-health'),
   ]);
   if (!r.ok) { host.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
 
   const healthMap = {};
-  if (hr.ok && Array.isArray(hr.data)) {
-    for (const h of hr.data) healthMap[h.provider_id + '|' + h.model] = h;
+  if (hr.ok && Array.isArray(hr.data.items)) {
+    for (const h of hr.data.items) healthMap[h.provider_id + '|' + h.model] = h;
   }
 
-  const provs = (r.data || []).filter(p => (p.models || []).length > 0);
+  const provs = (r.data.items || []).filter(p => (p.models || []).length > 0);
   if (provs.length === 0) {
     host.innerHTML = '<div class="empty"><p>暂无配置了模型的渠道，请先在渠道页添加</p></div>';
     return;
@@ -232,7 +296,7 @@ async function loadTestMatrix() {
     if (h) {
       cls = h.status === 'healthy' ? 'mbox-green' : h.status === 'unhealthy' ? 'mbox-red' : 'mbox-gray';
       tip = `${m} — ${h.status === 'healthy' ? '✓' : h.status === 'unhealthy' ? '✗' : '?'} ` +
-        `${h.checked_at || ''}${h.latency_ms > 0 ? ' · ' + Math.round(h.latency_ms) + 'ms' : ''}${h.error ? ' · ' + h.error : ''}`.trim();
+        `${h.checked_at ? fmtTime(h.checked_at) : ''}${h.latency_ms > 0 ? ' · ' + Math.round(h.latency_ms) + 'ms' : ''}${h.error ? ' · ' + h.error : ''}`.trim();
     }
     return `<span class="mbox ${cls} mt-cell" data-pid="${esc(p.id)}" data-model="${esc(m)}" title="${esc(tip)}">${esc(truncModel(m))}</span>`;
   };
@@ -286,12 +350,12 @@ async function runCellTest(cell) {
   const label = cell.textContent;
   try {
     const message = document.getElementById('mt-message')?.value.trim() || 'Say OK';
-    const r = await api('POST', `/api/admin/providers/${cell.dataset.pid}/test-model`, { model, message });
+    const r = await api('POST', `/api/providers/${cell.dataset.pid}/model-tests`, { model, message });
     if (r.ok && r.data.ok) {
       cell.className = 'mbox mbox-green mt-cell';
       cell.title = `${model} ✓ ${Math.round(r.data.latency_ms)}ms${r.data.snippet ? ' · ' + r.data.snippet : ''}`;
     } else {
-      const err = String(r.data.error || r.data.message || '请求失败').slice(0, 120);
+      const err = String(r.data.error || r.data.detail || r.data.code || '请求失败').slice(0, 120);
       cell.className = 'mbox mbox-red mt-cell';
       cell.title = `${model} ✗${r.data.status ? ' [' + r.data.status + ']' : ''} ${err}`;
     }

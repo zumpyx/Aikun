@@ -71,8 +71,9 @@ async function api(method, path, body) {
     catch { data = {}; }
     if (data === null || typeof data !== 'object') data = {};
     // 旧端点错误体是 {error, message};新 spec 端点是 problem+json
-    // ({code, detail})。两类都原样透传,只有两者皆缺(空体/纯文本)才兜底。
-    if (!res.ok && !data.error && !data.message && !data.code && !data.detail) data = { error: 'unknown_error' };
+    // ({code, detail})。两类都原样透传,只有两者皆缺(空体/纯文本)才兜底;
+    // 兜底同时带两类键,迁移中/未迁移页面的 toast 都能读到短码。
+    if (!res.ok && !data.error && !data.message && !data.code && !data.detail) data = { error: 'unknown_error', code: 'unknown_error' };
     if (res.status === 401 && path !== '/api/auth/login') {
       state.token = null;
       state.user = null;
@@ -94,8 +95,9 @@ function toast(msg, type = 'success') {
 }
 
 // 版本号接口需要授权,登录态就绪后调用;结果存入 state.version 供侧栏展示
+// (0.5:GET /api/version → GET /api/system/version,归入 /system 单例族)
 async function loadVersion() {
-  const r = await api('GET', '/api/version');
+  const r = await api('GET', '/api/system/version');
   if (r.ok && r.data.version) state.version = r.data.version;
 }
 

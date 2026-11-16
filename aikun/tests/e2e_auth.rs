@@ -35,7 +35,7 @@ async fn assert_problem(res: reqwest::Response, status: u16, code: &str) -> serd
 
 /// 登录链路(核心行为锚点,断言强度不低于迁移前基线):
 /// 错误密码 401 invalid_credentials(problem+json)→ 正确密码 200 签发
-/// token+user(无 password_hash;时间为 RFC3339)→ /api/me 可用 →
+/// token+user(无 password_hash;时间为 RFC3339)→ /api/users/me 可用 →
 /// 管理员改密后旧 token 401(踢会话)→ 旧密码 401、新密码可登录 →
 /// 禁用账户:密码正确也 403 account_disabled,已签发 token 失效 →
 /// 匿名访问受保护接口 401。
@@ -47,7 +47,7 @@ async fn login_flow_and_session_revocation() {
     let admin = common::admin_jwt();
 
     let created = client
-        .post(format!("{}/api/admin/users", app.base))
+        .post(format!("{}/api/users", app.base))
         .bearer_auth(&admin)
         .json(
             &serde_json::json!({"username": "alice", "password": "old-password-1", "role": "user"}),
@@ -77,7 +77,7 @@ async fn login_flow_and_session_revocation() {
     };
     let me = |token: String| {
         let client = client.clone();
-        let url = format!("{}/api/me", app.base);
+        let url = format!("{}/api/users/me", app.base);
         async move { client.get(url).bearer_auth(token).send().await.unwrap() }
     };
 
@@ -107,7 +107,7 @@ async fn login_flow_and_session_revocation() {
 
     // 管理员改密 → token_version + 1,旧 token 立即失效
     let patched = client
-        .patch(format!("{}/api/admin/users/{}", app.base, user_id))
+        .patch(format!("{}/api/users/{}", app.base, user_id))
         .bearer_auth(&admin)
         .json(&serde_json::json!({"password": "new-password-2"}))
         .send()
@@ -128,7 +128,7 @@ async fn login_flow_and_session_revocation() {
 
     // 禁用账户:密码正确也 403 problem+json account_disabled;已签发 token 同样失效
     let disabled = client
-        .patch(format!("{}/api/admin/users/{}", app.base, user_id))
+        .patch(format!("{}/api/users/{}", app.base, user_id))
         .bearer_auth(&admin)
         .json(&serde_json::json!({"is_active": false}))
         .send()
@@ -140,7 +140,7 @@ async fn login_flow_and_session_revocation() {
 
     // 未带凭证访问受保护接口 → 401
     let anon = client
-        .get(format!("{}/api/me", app.base))
+        .get(format!("{}/api/users/me", app.base))
         .send()
         .await
         .unwrap();
@@ -157,7 +157,7 @@ async fn login_rate_limited_by_username() {
     let client = app.client();
 
     let created = client
-        .post(format!("{}/api/admin/users", app.base))
+        .post(format!("{}/api/users", app.base))
         .bearer_auth(common::admin_jwt())
         .json(&serde_json::json!({"username": "bob", "password": "right-password", "role": "user"}))
         .send()

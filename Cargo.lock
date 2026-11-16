@@ -71,6 +71,7 @@ dependencies = [
  "aikun-protocol",
  "argon2",
  "async-stream",
+ "async-trait",
  "axum",
  "base64",
  "chrono",

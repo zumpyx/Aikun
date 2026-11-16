@@ -35,9 +35,10 @@ async function renderBilling(container) {
   document.getElementById('tx-filter-user').onchange = () => loadTransactions();
 
   // 筛选下拉复用用户页缓存的 state.users,未访问过用户页时先拉一次
+  // (0.5:GET /api/users,{items,total} 信封;下拉只取一页够用)
   if (!state.users.length) {
-    api('GET', '/api/admin/users').then(r => {
-      if (r.ok) state.users = r.data;
+    api('GET', '/api/users?limit=200').then(r => {
+      if (r.ok) state.users = r.data.items || [];
       fillTxUserFilter();
     });
   } else fillTxUserFilter();
@@ -60,11 +61,13 @@ function fillTxUserFilter() {
 }
 
 async function loadPrices() {
-  const r = await api('GET', '/api/admin/prices' + (priceShowAll ? '' : '?in_use=1'));
+  // 0.5:GET /api/prices,{items,total} 信封;limit=200 拉满一页(价格表
+  // 本无分页 UI,取 clamp 上限近似旧行为,前端分页治理在阶段 4)
+  const r = await api('GET', '/api/prices?limit=200' + (priceShowAll ? '' : '&in_use=1'));
   const list = document.getElementById('prices-list');
   if (!list) return;
   if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
-  const data = r.data;
+  const data = r.data.items || [];
   state.prices = data;
   if (data.length === 0) {
     list.innerHTML = `<div class="card"><div class="empty"><p>${priceShowAll ? '暂无价格,未计费的请求按 0 元记账' : '渠道模型暂无价格条目,可切换"显示全部价格"或添加'}</p></div></div>`;
@@ -128,10 +131,10 @@ function showPriceModal(id) {
         cached_price: cachedRaw === '' ? null : (parseFloat(cachedRaw) || 0),
       };
       const r = price
-        ? await api('PATCH', `/api/admin/prices/${price.id}`, body)
-        : await api('POST', '/api/admin/prices', body);
+        ? await api('PATCH', `/api/prices/${price.id}`, body)
+        : await api('POST', '/api/prices', body);
       if (r.ok) { toast(price ? '价格已更新' : '价格已创建'); overlay.remove(); await loadPrices(); }
-      else toast(r.data.message || r.data.error || '操作失败', 'error');
+      else toast(r.data.detail || r.data.code || '操作失败', 'error');
     } finally {
       btn.disabled = false;
     }
@@ -140,9 +143,9 @@ function showPriceModal(id) {
 
 async function deletePrice(id) {
   if (!confirm('确定要删除此价格吗?')) return;
-  const r = await api('DELETE', `/api/admin/prices/${id}`);
+  const r = await api('DELETE', `/api/prices/${id}`);
   if (r.ok) { toast('价格已删除'); await loadPrices(); }
-  else toast(r.data.message || r.data.error || '删除失败', 'error');
+  else toast(r.data.detail || r.data.code || '删除失败', 'error');
 }
 
 const TX_PAGE_SIZE = 200;
@@ -166,11 +169,13 @@ function txRow(t) {
 }
 
 async function loadTransactions() {
-  const r = await api('GET', '/api/admin/billing/transactions?offset=0' + txQuerySuffix());
+  // 0.5:GET /api/balance-transactions,{items,total} 信封;"加载更多"
+  // 按页累加 offset,页大小取 clamp 上限 200(旧固定 200)
+  const r = await api('GET', '/api/balance-transactions?limit=200&offset=0' + txQuerySuffix());
   const list = document.getElementById('transactions-list');
   if (!list) return;
   if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
-  const data = r.data;
+  const data = r.data.items || [];
   txOffset = 0;
   if (data.length === 0) {
     list.innerHTML = '<div class="card"><div class="empty"><p>暂无调账记录</p></div></div>';
@@ -202,12 +207,13 @@ async function loadMoreTransactions() {
   btn.disabled = true;
   try {
     const next = txOffset + TX_PAGE_SIZE;
-    const r = await api('GET', `/api/admin/billing/transactions?offset=${next}` + txQuerySuffix());
-    if (!r.ok) { toast(r.data.message || r.data.error || '加载失败', 'error'); return; }
+    const r = await api('GET', `/api/balance-transactions?limit=${TX_PAGE_SIZE}&offset=${next}` + txQuerySuffix());
+    if (!r.ok) { toast(r.data.detail || r.data.code || '加载失败', 'error'); return; }
     if (!document.getElementById('tx-tbody')) return; // 等待期间已切页/重筛
+    const data = r.data.items || [];
     txOffset = next;
-    tbody.insertAdjacentHTML('beforeend', r.data.map(txRow).join(''));
-    if (r.data.length < TX_PAGE_SIZE) document.getElementById('tx-more-wrap')?.remove();
+    tbody.insertAdjacentHTML('beforeend', data.map(txRow).join(''));
+    if (data.length < TX_PAGE_SIZE) document.getElementById('tx-more-wrap')?.remove();
   } finally {
     btn.disabled = false;
   }
@@ -239,7 +245,8 @@ function showAdjustBalanceModal(id) {
     if (!Number.isFinite(amount) || amount === 0) return toast('金额必须是非零数字', 'error');
     btn.disabled = true;
     try {
-      const r = await api('POST', `/api/admin/users/${id}/balance`, {
+      // 0.5:POST /api/users/{id}/balance-transactions,200 → 201(创建流水)
+      const r = await api('POST', `/api/users/${id}/balance-transactions`, {
         amount,
         note: document.getElementById('bf-note').value,
       });
@@ -247,7 +254,7 @@ function showAdjustBalanceModal(id) {
         toast(`调账成功,当前余额 ${fmtCost(r.data.balance)} 元`);
         overlay.remove();
         if (document.getElementById('users-list')) await renderUsers(document.getElementById('main-content'));
-      } else toast(r.data.message || r.data.error || '调账失败', 'error');
+      } else toast(r.data.detail || r.data.code || '调账失败', 'error');
     } finally {
       btn.disabled = false;
     }

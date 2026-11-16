@@ -16,6 +16,9 @@ aikun-admin = { path = "../crates/aikun-admin" }
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+# main.rs 的过渡期端口适配器实现 aikun-admin 的 async_trait 端口
+# (ProviderStore / ProviderProbes),与 aikun-admin 同版本
+async-trait = "0.1"
 
 # Database
 rusqlite = { version = "0.34", features = ["bundled"] }

@@ -133,13 +133,13 @@ Content-Type: application/json
         兑换码由管理员在「计费」页批量生成。同一用户 10 分钟内连续兑换失败 5 次将被限流(429);
         无效、已使用、已过期的码统一返回 <code>invalid_code</code>(400),不区分原因。
       </p>
-      <div class="code-block">POST ${baseUrl}/api/wallet/redeem
+      <div class="code-block">POST ${baseUrl}/api/users/me/redemptions
 Authorization: Bearer <管理端登录令牌>(/api/* 仅接受登录会话,API Key 不适用)
 Content-Type: application/json
 
 {"code": "AK-XXXX-XXXX-XXXX-XXXX"}
 
-→ 200
+→ 201
 {"amount": 10.0, "balance": 25.5}</div>
     </div>
 

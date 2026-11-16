@@ -10,18 +10,21 @@ async function renderDashboard(container) {
 
   try {
     const isAdmin = state.user && state.user.role === 'admin';
+    // 0.5 路径:管理面去 /admin 段(资源化),列表统一 {items,total} 信封;
+    // admin 密钥数来自全局计数快照(system/stats),普通用户用自己密钥页 total。
     const [providers, users, keys, usage] = await Promise.all([
-      api('GET', '/api/admin/providers'),
-      api('GET', '/api/admin/users'),
-      // admin 用全系统密钥总数,普通用户用自己的密钥列表
-      isAdmin ? api('GET', '/api/admin/stats') : api('GET', '/api/api-keys'),
-      api('GET', '/api/admin/usage-stats'),
+      api('GET', '/api/providers'),
+      api('GET', '/api/users'),
+      isAdmin ? api('GET', '/api/system/stats') : api('GET', '/api/api-keys'),
+      api('GET', '/api/usage-stats'),
     ]);
     if (seq !== dashboardSeq) return; // 已有更新的渲染在进行，丢弃旧响应
 
-    const pData = providers.ok ? providers.data : [];
-    const uData = users.ok ? users.data : [];
-    const kCount = isAdmin ? (keys.ok ? keys.data.api_keys ?? 0 : 0) : (keys.ok ? keys.data.length : 0);
+    const pData = providers.ok ? (providers.data.items || []) : [];
+    const uData = users.ok ? (users.data.items || []) : [];
+    const kCount = isAdmin
+      ? (keys.ok ? keys.data.api_keys ?? 0 : 0)
+      : (keys.ok ? (keys.data.total ?? (keys.data.items || []).length) : 0);
     const usageData = usage.ok ? usage.data : null;
 
     const healthy = pData.filter(p => p.is_active && p.health_status === 'healthy').length;

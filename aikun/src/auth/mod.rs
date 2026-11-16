@@ -283,6 +283,30 @@ fn authenticate_jwt(pool: &crate::db::DbPool, mut claims: Claims) -> Option<(Cla
     ))
 }
 
+/// 管理面(/api/**)鉴权失败统一 problem+json(spec-first 新契约,
+/// RFC 9457):装配层守卫的对外错误体与生成路由对齐(401 invalid_token /
+/// unauthorized,403 forbidden);/v1 中继面(OpenAI 兼容)维持旧扁平体,
+/// 契约冻结不随管理面迁移变化。
+fn auth_error(status: StatusCode, code: &str, detail: &str) -> Response {
+    use axum::http::header;
+    let mut resp = (
+        status,
+        Json(json!({
+            "code": code,
+            "detail": detail,
+            "status": status.as_u16(),
+            "title": status.canonical_reason().unwrap_or_default(),
+            "type": "about:blank",
+        })),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/problem+json"),
+    );
+    resp
+}
+
 /// Auth middleware — validates JWT or API key from Authorization header.
 /// Injects Claims and AuthContext into request extensions for downstream handlers.
 /// Uses `from_fn_with_state` to access AppState.
@@ -292,6 +316,7 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Response {
     let config = &state.config;
+    let on_api = req.uri().path().starts_with("/api/");
 
     let auth_header = req
         .headers()
@@ -313,7 +338,7 @@ pub async fn auth_middleware(
                         .ok()
                         .flatten()
                 }
-                Err(_) if !req.uri().path().starts_with("/api/") => {
+                Err(_) if !on_api => {
                     let pool = state.pool.clone();
                     let key = token.to_string();
                     tokio::task::spawn_blocking(move || authenticate_api_key(&pool, &key))
@@ -329,6 +354,11 @@ pub async fn auth_middleware(
                     req.extensions_mut().insert(ctx);
                     next.run(req).await
                 }
+                None if on_api => auth_error(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_token",
+                    "Invalid or expired token",
+                ),
                 None => (
                     StatusCode::UNAUTHORIZED,
                     Json(json!({
@@ -341,7 +371,7 @@ pub async fn auth_middleware(
         }
         // Anthropic clients send the key as `x-api-key` instead of a Bearer
         // token; accept it on the relay endpoints (never on management APIs).
-        _ if !req.uri().path().starts_with("/api/") => {
+        _ if !on_api => {
             let key = req
                 .headers()
                 .get("x-api-key")
@@ -374,6 +404,11 @@ pub async fn auth_middleware(
                     .into_response(),
             }
         }
+        _ if on_api => auth_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Missing or invalid Authorization header",
+        ),
         _ => (
             StatusCode::UNAUTHORIZED,
             Json(json!({
@@ -391,22 +426,12 @@ pub async fn require_admin(req: Request, next: Next) -> Response {
 
     match claims {
         Some(claims) if claims.role == "admin" => next.run(req).await,
-        Some(_) => (
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "error": "forbidden",
-                "message": "Admin access required"
-            })),
-        )
-            .into_response(),
-        None => (
+        Some(_) => auth_error(StatusCode::FORBIDDEN, "forbidden", "Admin access required"),
+        None => auth_error(
             StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "error": "unauthorized",
-                "message": "Authentication required"
-            })),
-        )
-            .into_response(),
+            "unauthorized",
+            "Authentication required",
+        ),
     }
 }
 #[cfg(test)]

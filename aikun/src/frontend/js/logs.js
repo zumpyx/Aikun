@@ -62,11 +62,12 @@ async function renderLogs(container) {
   });
 
   if (isAdmin) {
-    api('GET', '/api/admin/users').then(usersR => {
-      if (!usersR.ok || !Array.isArray(usersR.data)) return;
+    // 0.5:用户列表迁新路径(去 /admin 段),响应改 {items, total} 信封
+    api('GET', '/api/users').then(usersR => {
+      if (!usersR.ok || !Array.isArray(usersR.data.items)) return;
       const sel = document.getElementById('log-filter-user');
       if (!sel) return;
-      usersR.data.forEach(u => {
+      usersR.data.items.forEach(u => {
         const o = document.createElement('option');
         o.value = u.id; o.textContent = u.username;
         sel.appendChild(o);
@@ -157,7 +158,8 @@ async function loadLogs(isAdmin) {
   if (!document.getElementById('logs-list')) return;
   if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
 
-  const data = r.data;
+  // 0.5:响应由裸数组改为 {items, total} 信封
+  const data = Array.isArray(r.data.items) ? r.data.items : [];
   if (data.length === 0) {
     list.innerHTML = '<div class="card"><div class="empty"><p>暂无匹配的调用记录</p></div></div>';
     return;
@@ -201,11 +203,13 @@ async function loadMoreLogs(isAdmin) {
   try {
     const next = logsOffset + LOG_PAGE_SIZE;
     const r = await api('GET', `/api/logs?limit=${LOG_PAGE_SIZE}&offset=${next}` + logFilterQuery(isAdmin));
-    if (!r.ok) { toast(r.data.message || r.data.error || '加载失败', 'error'); return; }
+    if (!r.ok) { toast(r.data.detail || r.data.code || '加载失败', 'error'); return; }
     if (!document.getElementById('logs-tbody')) return; // 等待期间已切页/重筛
     logsOffset = next;
-    tbody.insertAdjacentHTML('beforeend', r.data.map(l => logRow(l, isAdmin)).join(''));
-    if (r.data.length < LOG_PAGE_SIZE) document.getElementById('logs-more-wrap')?.remove();
+    // {items, total} 信封
+    const more = Array.isArray(r.data.items) ? r.data.items : [];
+    tbody.insertAdjacentHTML('beforeend', more.map(l => logRow(l, isAdmin)).join(''));
+    if (more.length < LOG_PAGE_SIZE) document.getElementById('logs-more-wrap')?.remove();
   } finally {
     btn.disabled = false;
   }

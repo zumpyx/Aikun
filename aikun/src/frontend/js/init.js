@@ -2,7 +2,8 @@
 (async function init() {
   try {
     if (state.token) {
-      const r = await api('GET', '/api/me');
+      // 0.5:GET /api/me → GET /api/users/me(资源化路径,响应形状不变)
+      const r = await api('GET', '/api/users/me');
       if (r.ok) {
         state.user = r.data;
         await loadVersion();

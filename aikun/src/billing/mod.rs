@@ -17,6 +17,9 @@ pub fn yuan_to_micro(yuan: f64) -> i64 {
 }
 
 /// 微元(i64)→ 元(f64)。微元整除 1e6 在 f64 下精确,无需再修约。
+/// 生产调用面已迁 crates/aikun-admin(impl 各自持有同口径助手);本函数
+/// 由本模块单测与 yuan_to_micro 成对保留(store 收编时统一)。
+#[allow(dead_code)]
 pub fn micro_to_yuan(micro: i64) -> f64 {
     micro as f64 / 1_000_000.0
 }

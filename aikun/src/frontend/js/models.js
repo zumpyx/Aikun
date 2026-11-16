@@ -6,7 +6,7 @@ function healthCellClass(p) {
   if (!p.is_active) return 'mcell-gray';
   return p.health_status === 'healthy' ? 'mcell-green'
     : p.health_status === 'degraded' ? 'mcell-yellow'
-    : p.health_status === 'unhealthy' ? 'mcell-red'
+    : p.health_status === 'down' ? 'mcell-red'
     : 'mcell-gray';
 }
 
@@ -18,7 +18,7 @@ function modelCell(p, m, healthMap) {
   if (h) {
     const cls = h.status === 'healthy' ? 'mcell-green' : h.status === 'unhealthy' ? 'mcell-red' : 'mcell-gray';
     const tip = `${p.name} — 实测${h.status === 'healthy' ? '通过' : h.status === 'unhealthy' ? '失败' : '未知'}` +
-      `${h.checked_at ? ' · ' + h.checked_at : ''}${h.latency_ms > 0 ? ' · ' + Math.round(h.latency_ms) + 'ms' : ''}${h.error ? ' · ' + h.error : ''}`;
+      `${h.checked_at ? ' · ' + fmtTime(h.checked_at) : ''}${h.latency_ms > 0 ? ' · ' + Math.round(h.latency_ms) + 'ms' : ''}${h.error ? ' · ' + h.error : ''}`;
     return `<span class="mcell ${cls}" title="${esc(tip)}"></span>`;
   }
   const tip = `${p.name} — ${p.health_status}（未实测）${p.latency_ms > 0 ? ' · ' + Math.round(p.latency_ms) + 'ms' : ''}`;
@@ -55,19 +55,19 @@ async function renderModels(container) {
   let healthMap = {};
   if (isAdmin) {
     const [pr, hr] = await Promise.all([
-      api('GET', '/api/admin/providers'),
-      api('GET', '/api/admin/model-health'),
+      api('GET', '/api/providers'),
+      api('GET', '/api/model-health'),
     ]);
-    if (pr.ok && Array.isArray(pr.data)) {
+    if (pr.ok && Array.isArray(pr.data.items)) {
       provMap = {};
-      for (const p of pr.data) {
+      for (const p of pr.data.items) {
         for (const m of (p.models || [])) {
           (provMap[m] = provMap[m] || []).push(p);
         }
       }
     }
-    if (hr.ok && Array.isArray(hr.data)) {
-      for (const h of hr.data) healthMap[h.provider_id + '|' + h.model] = h;
+    if (hr.ok && Array.isArray(hr.data.items)) {
+      for (const h of hr.data.items) healthMap[h.provider_id + '|' + h.model] = h;
     }
   }
   if (seq !== modelsSeq || !list.isConnected) return;

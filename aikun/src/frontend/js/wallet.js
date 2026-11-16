@@ -1,6 +1,6 @@
 // ============ Wallet ============
-// 余额与近 30 天消费分析(数据来自 /api/wallet,任意角色仅本人数据)。
-// 防止快速切换页面时乱序响应写脏 DOM:只有最后一次 render 可以落地。
+// 余额与近 30 天消费分析(数据来自 GET /api/users/me/wallet,任意角色仅
+// 本人数据)。防止快速切换页面时乱序响应写脏 DOM:只有最后一次 render 可以落地。
 let walletSeq = 0;
 
 // 钱包页展示最多保留两位小数;后台仍按整数微元精确计费。
@@ -17,14 +17,16 @@ async function renderWallet(container) {
     <div class="stats-grid" id="wallet-grid"><div class="stat-card"><div class="spinner"></div><div class="label" style="margin-left:10px">加载中...</div></div></div>`;
 
   try {
+    // 0.5 路径:GET /api/wallet → GET /api/users/me/wallet;
+    // GET /api/prices(用户只读价目)→ GET /api/models/prices(响应 {items,total})
     const [r, pricesRes] = await Promise.all([
-      api('GET', '/api/wallet'),
-      api('GET', '/api/prices'),
+      api('GET', '/api/users/me/wallet'),
+      api('GET', '/api/models/prices'),
     ]);
     if (seq !== walletSeq) return; // 已有更新的渲染在进行,丢弃旧响应
     if (!r.ok) {
       container.insertAdjacentHTML('beforeend',
-        `<div class="card"><div class="empty"><p>加载失败: ${esc(r.data.message || r.data.error || r.status)}</p></div></div>`);
+        `<div class="card"><div class="empty"><p>加载失败: ${esc(r.data.detail || r.data.code || r.status)}</p></div></div>`);
       return;
     }
     const w = r.data;
@@ -59,12 +61,14 @@ async function renderWallet(container) {
       if (!code) { toast('请输入兑换码', 'error'); return; }
       btn.disabled = true;
       try {
-        const r = await api('POST', '/api/wallet/redeem', { code });
+        // 0.5:POST /api/wallet/redeem → POST /api/users/me/redemptions,
+        // 成功 201(创建"我的兑换记录"),失败 problem+json 读 code/detail
+        const r = await api('POST', '/api/users/me/redemptions', { code });
         if (r.ok) {
           toast(`充值成功 +¥${fmtWalletCost(r.data.amount)},当前余额 ¥${fmtWalletCost(r.data.balance)}`);
           renderWallet(container);
         } else {
-          toast(r.data.message || r.data.error || '兑换失败', 'error');
+          toast(r.data.detail || r.data.code || '兑换失败', 'error');
         }
       } finally {
         btn.disabled = false;
@@ -93,12 +97,15 @@ async function renderWallet(container) {
 }
 
 // 只读价目。prompt_price 为 null 表示没有命中任何价格条目,请求按 0 元记账。
+// 0.5:响应由裸数组改为 {items, total} 信封。
 function renderPublicPrices(pricesRes) {
-  if (!pricesRes || !pricesRes.ok || !Array.isArray(pricesRes.data)) {
+  const data = pricesRes && pricesRes.ok && Array.isArray(pricesRes.data.items)
+    ? pricesRes.data.items : null;
+  if (!data) {
     return '<div class="empty"><p>价格加载失败</p></div>';
   }
-  if (pricesRes.data.length === 0) return '<div class="empty"><p>暂无在售模型</p></div>';
-  const rows = pricesRes.data.map(p => {
+  if (data.length === 0) return '<div class="empty"><p>暂无在售模型</p></div>';
+  const rows = data.map(p => {
     if (p.prompt_price == null) {
       return `<tr><td><strong>${esc(p.model)}</strong></td><td colspan="3" style="color:var(--faint)">未定价,按 0 元记账</td></tr>`;
     }

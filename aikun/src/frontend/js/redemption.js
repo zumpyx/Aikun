@@ -45,7 +45,8 @@ async function loadRedemptionCodes() {
   if (status) qs.set('status', status);
   qs.set('limit', REDEMPTION_PAGE_SIZE);
   qs.set('offset', redemptionPage * REDEMPTION_PAGE_SIZE);
-  const r = await api('GET', `/api/admin/redemption-codes?${qs}`);
+  // 0.5:GET /api/redemption-codes(去 /admin 段),{items,total} 信封不变
+  const r = await api('GET', `/api/redemption-codes?${qs}`);
   const list = document.getElementById('codes-list');
   if (!list) return;
   if (!r.ok) { list.innerHTML = '<div class="empty"><p>加载失败</p></div>'; return; }
@@ -135,13 +136,13 @@ function showGenerateCodesModal() {
         note: document.getElementById('gc-note').value.trim(),
       };
       if (expires) body.expires_at = expires;
-      const r = await api('POST', '/api/admin/redemption-codes', body);
+      const r = await api('POST', '/api/redemption-codes', body);
       if (r.ok) {
         overlay.remove();
         showGeneratedCodesResult(r.data);
         loadRedemptionCodes();
       } else {
-        toast(r.data.message || r.data.error || '生成失败', 'error');
+        toast(r.data.detail || r.data.code || '生成失败', 'error');
       }
     } finally {
       btn.disabled = false;
@@ -170,11 +171,13 @@ function showGeneratedCodesResult(data) {
 }
 
 async function disableRedemptionCode(id) {
-  const r = await api('POST', `/api/admin/redemption-codes/${id}/disable`);
+  // 0.5:动作端点 POST .../disable → DELETE /api/redemption-codes/{id}
+  // (生命周期单调:unused → used/disabled,禁用即终结);200 → 204
+  const r = await api('DELETE', `/api/redemption-codes/${id}`);
   if (r.ok) {
     toast('已禁用');
     loadRedemptionCodes();
   } else {
-    toast(r.data.message || r.data.error || '禁用失败', 'error');
+    toast(r.data.detail || r.data.code || '禁用失败', 'error');
   }
 }
