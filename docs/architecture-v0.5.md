@@ -71,8 +71,8 @@ aikun/                                # 仓库根
 │   └── tests/                        # e2e(真实二进制 + mock 上游)+ common 基建
 │
 ├── docs/                             # roadmap-v0.5 / architecture-v0.5(本文)/ refactor-plan / adr
-├── .github/workflows/                # ci.yml(lint: fmt+clippy / test)+ release.yml
-│                                     #   待加:regenerate 守卫 job(重生成 + git diff --exit-code)
+├── .github/workflows/                # ci.yml(lint: fmt+clippy / test / regenerate 守卫)+ release.yml
+│                                     #   regenerate 守卫已上:重生成 + git diff --exit-code,漂移即失败
 ├── Dockerfile  docker-compose.yml  env.example  CHANGELOG.md
 ```
 
@@ -135,7 +135,7 @@ admin_providers,admin_billing,store}.rs` + `e2e.rs`(旧管理面用例随旧 han
 
 本次落地验证(2026-11-16 实跑):`cargo check -p aikun-openapi --locked` 通过;`cargo fmt --all --check` 通过;`crates/aikun-openapi/Cargo.toml` 直接依赖无 reqwest / rusqlite / tokio(axum 的 `tokio` feature 系服务端脚手所需,经由 axum 引入,非直接依赖)。
 
-CI 变化(已落地部分):lint job 保持并升级为全 workspace——`cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked`;test job 改 `cargo test --locked --workspace`。待加:regenerate 守卫 job——生成器是 openapi-to-rust(Rust 原生,**无需 Java 运行时**),跑 `bash scripts/gen-api.sh` 后 `git diff --exit-code`,任何差异即失败。
+CI 变化(已全部落地):lint job 升级为全 workspace——`cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked`;test job 改 `cargo test --locked --workspace`;regenerate 守卫 job 已上(`ci.yml` 的 `regenerate` job,plan 步骤 2)——生成器是 openapi-to-rust(Rust 原生,**无需 Java 运行时**),跑 `bash scripts/gen-api.sh` 后 `git diff --exit-code`,任何差异即失败。
 
 ## 六、检验标准(结构是否"还对"的判据)
 

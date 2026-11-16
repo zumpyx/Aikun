@@ -117,8 +117,9 @@ roadmap 阶段 2(pipeline 显式化)与步骤 3–5 无冲突,可并行推进
 
 ## 步骤 6:crates/aikun-admin 落位 + Auth tag 试点 → 逐 tag 迁移 ✅(2026-11-17 全批完成回写)
 
-- **验收核对(2026-11-17)**:`grep -rn "api/admin" aikun/src/` 仅余注释、
-  `grep -rn "/api/admin" aikun/src/frontend/` 归零;行为变化已单列 CHANGELOG
+- **验收核对(2026-11-17)**:`grep -rn "api/admin" aikun/src/` 命中 **7 处、
+  全为注释**(main.rs 6 处 + models/mod.rs 1 处)、`grep -rn "/api/admin"
+  aikun/src/frontend/` **0 命中**(收尾当日实测复核同值);行为变化已单列 CHANGELOG
   (路径 / 201 / 204 / PATCH 回资源 / problem+json / batch 200 / last_admin
   409 / 429 码与 Retry-After / 5xx→4xx 过渡映射,后者详见 api-mapping
   备注 13);二进制版本升 **0.5.0**(`aikun/Cargo.toml`),版本门禁可用。
@@ -155,7 +156,7 @@ roadmap 阶段 2(pipeline 显式化)与步骤 3–5 无冲突,可并行推进
     错误体 problem+json);
   - 全部批完成后版本门禁可用:`GET /api/system/version` 主次版本 ≥ 0.5。
 
-## 步骤 7:前端路径按 api-mapping 切换 ✅(随步骤 6 各批同步完成;`grep /api/admin aikun/src/frontend/` 归零)
+## 步骤 7:前端路径按 api-mapping 切换 ✅(随步骤 6 各批同步完成;收尾实测 `grep -rn "/api/admin" aikun/src/frontend/` 0 命中)
 
 - **依赖**:步骤 6(逐批跟进:每迁一个 tag,管理端对应页面同步切)。
 - **对应**:architecture §五.5 伴随项、决策 7(前端保持 vanilla);
@@ -171,7 +172,7 @@ roadmap 阶段 2(pipeline 显式化)与步骤 3–5 无冲突,可并行推进
   - `grep -rn "/api/admin" aikun/src/frontend/` 为 0;
   - `grep -rn` 前端无残留裸数组解析与 `{error,message}` 读取。
 
-## 步骤 8:aikun-store 层(阶段 3)✅(2026-11-17 回写:`crates/aikun-store` 就位,`grep conn.lock() aikun/src/api/` 归零;registry 快照 / 价格缓存世代失效 / `api_key_usage_daily` 计数器同批落地,防御测试见 `aikun/tests/e2e_store.rs`;`scripts/bench.js` 对比以 CI / 人工复跑为准)
+## 步骤 8:aikun-store 层(阶段 3)✅(2026-11-17 回写:`crates/aikun-store` 就位,`grep -rn "conn.lock()" aikun/src/api/` 收尾实测 0 命中;registry 快照 / 价格缓存世代失效 / `api_key_usage_daily` 计数器同批落地,防御测试见 `aikun/tests/e2e_store.rs`;`scripts/bench.js` 对比以 CI / 人工复跑为准)
 
 - **依赖**:步骤 6(admin 迁移期用 db 模块;store 建立后逐步吸收)。
 - **对应**:roadmap **阶段 3**(性能与状态归位);architecture §五.6、§二

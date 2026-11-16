@@ -5,11 +5,16 @@
 
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
-## [Unreleased]
+## [0.5.0] - 2026-11-17
 
-`refactor/modular-gateway` 分支,对应 roadmap-v0.5 阶段 0(可作为 0.4.5 发布)与阶段 1;
-另含 architecture-v0.5 结构迁移:workspace 根包变体 + API spec / 生成管线(首批,无运行时
-行为变化),以及**管理面 API spec-first 重建全批落地(行为变化,见下节;版本升至 0.5.0)**。
+`refactor/modular-gateway` 分支的还债版:roadmap-v0.5 阶段 0、阶段 1 与阶段 3 主体
+(store 层与热路径归位)落地;architecture-v0.5 结构迁移(plan 步骤 1–8)全部完成——
+多 crate workspace(根虚拟清单 + 二进制 `aikun/` + `crates/{aikun-openapi,
+aikun-protocol,aikun-channels,aikun-admin,aikun-store}`)与 API spec / 生成管线;
+**管理面 API spec-first 全量重建(对外行为变化,见下节)**。二进制版本 0.4.4 → 0.5.0,
+版本门禁可用(`GET /api/system/version` 主次版本 ≥ 0.5,api-mapping 备注 11)。
+阶段 2(pipeline 显式化)与阶段 4(发布整理)未开始。总结见
+`docs/refactor-0.5-summary.md`。
 
 ### 变更(管理面 API spec-first 重建,plan 步骤 6;对外行为变化)
 
@@ -85,21 +90,36 @@
 
 - **渠道适配器**:`channel::adapter::ChannelAdapter` 编译期静态注册
   (generic / workbuddy / qoder 占位),渠道新增 `channel_kind` 列与管理端下拉,
-  `GET /api/admin/channel-kinds`。空值 = generic,与旧行为完全一致。不是运行时插件系统。
+  目录端点 `GET /api/channel-kinds`(0.5.0 新路径;阶段 0 引入时为
+  `GET /api/admin/channel-kinds`,随管理面迁移去 `/admin` 段)。
+  空值 = generic,与旧行为完全一致。不是运行时插件系统。
 - **响应缓存**:进程内内存缓存,默认 `AIKUN_CACHE_MODE=off`;可选 `deterministic` / `always`,
   按用户隔离,命中默认照常计费,响应头 `x-aikun-cache`。
 
-### 工程(architecture-v0.5 结构迁移首批,无运行时行为变化)
+### 工程(结构迁移:多 crate workspace 与生成管线,plan 步骤 2–8;无运行时行为变化)
 
-- **多 crate workspace(根包变体)**:根 `Cargo.toml` 声明 `[workspace]`
-  (`members = ["crates/*"]`,`resolver = "3"`),生成 crate 统一进门禁;
-  二进制仍在根包(包名与构建产物路径不变),移入 `aikun/` 属后续步骤。
-- **`openapi.yaml`**:仓库根新增手写 OpenAPI 3.2.1 全景 spec(单一真相):
+- **多 crate workspace 完整化**(步骤 3):根 `Cargo.toml` 为虚拟清单
+  (`members = ["aikun", "crates/*"]`,`default-members = ["aikun"]`,
+  `resolver = "3"`),二进制移入 `aikun/`(包名与 `target/<T>/release/aikun`
+  产物路径不变),`src/` `tests/` 随迁;根目录裸 `cargo build / test` 行为
+  与迁移前一致。
+- **`crates/aikun-protocol`**(步骤 4):`src/protocol/` 16 文件纯移动,
+  deps 收敛为 `serde_json`(仅此);契约测试雏形建在最终位置
+  `crates/aikun-protocol/tests/fixtures/`(非流式 OpenAI ↔ Anthropic 双向
+  黄金样本 + OpenAI 官方 spec 快照参照;流式样本留阶段 2)。
+- **`crates/aikun-channels`**(步骤 5):`src/channel/adapter/` 纯移动;
+  `apply_auth` 改 `auth_headers` 纯数据签名;deps:`aikun-protocol` +
+  `serde_json`,无 reqwest / rusqlite / tokio。
+- **`crates/aikun-admin`**(步骤 6):管理面业务实现的家(impl 生成 trait),
+  上述行为变化全部落在这里;装配在二进制 `main.rs`(Auth 裸挂、User 包
+  `auth_middleware`、Admin 包 `auth_middleware + require_admin`)。
+- **`crates/aikun-store`**(步骤 8):见下节"阶段 3"。
+- **`openapi.yaml`**:仓库根手写 OpenAPI 3.2.1 全景 spec(单一真相):
   管理面(Auth / User / Admin 三层 tag)进生成白名单,`/v1` 代理面仅作文档
-  (loose schema,不镜像厂商契约),`/api/health` 不入。目标口径(统一
-  `{items,total}` 信封、创建 201 / 删除 204、PATCH 返回资源、RFC 9457
-  problem+json 错误体、ID int64 等)与现行实现的逐条对照见 `docs/api-mapping.md`;
-  spec 本身尚未接线,不改任何运行时行为。
+  (loose schema,不镜像厂商契约),`/api/health` 不入。统一口径
+  (`{items,total}` 信封、创建 201 / 删除 204、PATCH 返回资源、RFC 9457
+  problem+json 错误体、ID 不透明 string)与 0.4.4 实现的逐条对照见
+  `docs/api-mapping.md`(含"全局语义变化"表 12 条)。
 - **`crates/aikun-openapi`**:管理面服务端脚手架,由 openapi-to-rust(钉版
   0.24.0,Rust 原生、无 Java)从 `openapi.yaml` 生成,43 个 operation 白名单
   (`/v1` 绝不入白名单);生成物提交进仓库(构建不依赖外部生成器),
@@ -110,12 +130,40 @@
   生成物时拒绝组装。
 - CI 门禁覆盖全 workspace:`cargo fmt --all --check`、
   `cargo clippy --workspace --all-targets --locked`、
-  `cargo test --locked --workspace`。
+  `cargo test --locked --workspace`;新增 **regenerate 守卫 job**
+  (钉版生成器重生成 + `git diff --exit-code`,生成物漂移即失败)。
+
+### 工程(阶段 3,store 层与热路径归位;对外契约不变)
+
+- **`crates/aikun-store` 落位**(plan 步骤 8):吸收二进制的连接池 / schema
+  迁移 / 行映射 / 静态加密 / 口令哈希 / 默认价格播种(db 层不再反向调用
+  billing),按**能力 trait** 暴露,签名零 SQL 方言(无 rusqlite 类型 /
+  `?N` / `ON CONFLICT` / `PRAGMA`,为 SurrealDB 第二实现留缝)。
+  `SCHEMA_VERSION` 仍为 3(新表幂等 `CREATE TABLE IF NOT EXISTS`);
+  计费记账事务本体(`billing/ledger.rs`)仍留二进制(红线:计费事务不改)。
+- **管理面 DB 访问收口 `spawn_blocking`**(Argon2 验密与 SQL 不占 async
+  executor);`aikun/src/api/` 下 `conn.lock()` 清零。
+- **渠道拓扑快照**(选路热路径,roadmap 决策"拓扑走缓存、事实走 DB"):
+  启用渠道行 + 预解析模型清单建内存快照,选路零全表扫描、零逐行解密、
+  零重复 JSON parse,命中渠道后解一次密;失效检测走表令牌 + 世代计数,
+  EMA 镜像与自动禁用同步进快照。
+- **价格缓存世代失效**:计费热路径查价先比对 (池, 世代, 表令牌),一致走
+  内存通配匹配(免两次通配 SQL);管理端写价格推进世代,兜底同秒
+  `updated_at` 撞值。
+- **日额度计数器 `api_key_usage_daily`**:与记账同事务维护的日用量计数器,
+  准入的日额度检查从 `SUM(request_logs)` 改为计数器点查;e2e 锚定计数器
+  与日志明细合计一致。
+- e2e 新增 `aikun/tests/e2e_store.rs` 3 项:管理端渠道 PATCH 对下一次请求
+  生效、管理端改价对下一次计费生效、计数器与日志合计一致。
 
 ### 测试 / 工程
 
-- e2e:登录链路(`/api/login` → `/api/me`、错误密码、改密踢下线、禁用账户)。
+- e2e:登录链路用例(错误密码、改密踢下线、禁用账户;阶段 0 补于旧路径
+  `/api/login` → `/api/me`,步骤 6 随新路径改写为 `/api/auth/login` →
+  `/api/users/me`)。
 - 回归测试:上述 ①②③ 各一。
+- e2e 布局:随二进制移入 `aikun/tests/` 并按 tag 拆分(见上节管理面条目);
+  静态统计 65 个 `#[tokio::test]`,全绿以 CI 门禁为准。
 - rustfmt 全库格式化(51 文件)与 clippy 告警清零(32 条,自动修复);
   CI 新增独立 `lint` job:`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`。
 - 依赖钉版以支持 rustc 1.85(`idna_adapter 1.2.0`、`time 0.3.41`、`simple_asn1 0.6.3`)。
@@ -126,6 +174,7 @@
 - 新增 `docs/architecture-v0.5.md`(0.5 目标结构定稿:多 crate workspace、管理面 API spec-first)与 `docs/api-mapping.md`(现有 API → 新 spec 逐条对照,前端与 impl 迁移清单);
   `roadmap-v0.5.md` 标注"目标架构"一节由前者取代。
 - 新增 `docs/plan-next-steps.md`(结构迁移后续步骤,按依赖排序、每步带验收标准)。
+- 新增 `docs/refactor-0.5-summary.md`(0.5 重构收尾总结:结构前后对照、crate 清单、遗留项)。
 
 ## [0.4.4] - 2026-10-19
 
@@ -174,7 +223,7 @@
 - **计费整数微元化**:金额列改为整数微元(1 元 = 1e6),启动时幂等迁移,API 边界仍为元。
 - 余额 ≤ 0 时代理入口直接 402 `insufficient_quota`。
 
-[Unreleased]: https://github.com/zumpyx/Aikun/compare/v0.4.4...refactor/modular-gateway
+[0.5.0]: https://github.com/zumpyx/Aikun/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/zumpyx/Aikun/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/zumpyx/Aikun/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/zumpyx/Aikun/compare/v0.4.1...v0.4.2

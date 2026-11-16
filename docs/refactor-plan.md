@@ -231,7 +231,7 @@ pub trait ChannelAdapter: Send + Sync + 'static {
 | 修复 ① O→A usage 口径 | ✅ | `protocol/openai/response.rs`、`openai/stream.rs`(`OaStreamState::anthropic_usage`);回归测试 `response_openai_to_anthropic_splits_cached_tokens`、`stream_openai_to_anthropic_splits_cached_tokens` |
 | 修复 ② wallet_stats 读 usage_daily | ✅ | `api/logs.rs::wallet_daily` 按日合并两表(purge 在同一事务里移动明细,不会重复计数);回归测试 `wallet_daily_survives_log_purge`。注意:模型分布仍只统计未清理的明细(usage_daily 没有模型维度) |
 | 修复 ③ 日志清理分批 DELETE | ✅ | `channel/health.rs`:每批 5000 行,批间释放写锁,截止时间只算一次;回归测试 `purge_in_small_batches_matches_single_pass` |
-| 建 CHANGELOG.md | ✅ | 补录 0.4.0–0.4.4,Unreleased 记录本分支全部变化 |
+| 建 CHANGELOG.md | ✅ | 补录 0.4.0–0.4.4;本分支全部变化已归整为 [0.5.0] 段(2026-11-17) |
 | e2e 补登录链路 | ✅ | `login_me_and_password_change_revokes_sessions`:登录、/api/me、错误密码、改密踢下线、禁用账户、匿名访问 |
 
 ### 7.2 阶段 1:结构重组(纯移动)
