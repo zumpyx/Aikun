@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use crate::db::DbPool;
 use crate::models::Provider;
 use crate::channel::transport::send_request;
-use crate::protocol::{parse_sse_events, PROTOCOL_ANTHROPIC};
+use crate::protocol::{parse_sse_events, Protocol};
 
 /// How often the background loop re-tests every (channel, model) pair.
 pub const MODEL_TEST_INTERVAL_SECS: u64 = 1800;
@@ -52,13 +52,13 @@ pub struct ModelProbe {
 /// responses look broken). For OpenAI both field names are sent: newer
 /// o-series models reject `max_tokens`, older OpenAI-compatible servers
 /// ignore unknown fields.
-fn build_probe_body(model: &str, protocol: &str, messages: &[Value], max_tokens: u32, stream: bool) -> Value {
+fn build_probe_body(model: &str, protocol: Protocol, messages: &[Value], max_tokens: u32, stream: bool) -> Value {
     let mut body = json!({
         "model": model,
         "max_tokens": max_tokens,
         "messages": messages,
     });
-    if protocol != PROTOCOL_ANTHROPIC {
+    if protocol != Protocol::Anthropic {
         body["max_completion_tokens"] = json!(max_tokens);
     }
     if stream {
@@ -68,8 +68,8 @@ fn build_probe_body(model: &str, protocol: &str, messages: &[Value], max_tokens:
 }
 
 /// Extract the visible text from a completed (non-stream) upstream body.
-fn extract_text(protocol: &str, v: &Value) -> String {
-    if protocol == PROTOCOL_ANTHROPIC {
+fn extract_text(protocol: Protocol, v: &Value) -> String {
+    if protocol == Protocol::Anthropic {
         v["content"]
             .as_array()
             .map(|blocks| {
@@ -90,12 +90,12 @@ fn extract_text(protocol: &str, v: &Value) -> String {
 }
 
 /// Extract incremental text from one SSE event's data payload.
-fn extract_delta(protocol: &str, data: &str) -> String {
+fn extract_delta(protocol: Protocol, data: &str) -> String {
     let v: Value = match serde_json::from_str(data) {
         Ok(v) => v,
         Err(_) => return String::new(),
     };
-    if protocol == PROTOCOL_ANTHROPIC {
+    if protocol == Protocol::Anthropic {
         if v["type"].as_str() == Some("content_block_delta") {
             return v["delta"]["text"].as_str().unwrap_or("").to_string();
         }
@@ -133,7 +133,7 @@ pub async fn read_json_limited(resp: reqwest::Response, max_bytes: usize) -> Res
 pub async fn probe_model(
     clients: &std::sync::Mutex<std::collections::HashMap<String, reqwest::Client>>,
     provider: &Provider,
-    protocol: &str,
+    protocol: Protocol,
     model: &str,
     messages: Vec<Value>,
     max_tokens: u32,

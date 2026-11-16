@@ -53,33 +53,30 @@ pub enum StreamConverter {
 }
 
 impl StreamConverter {
-    pub fn new(client_protocol: &str, provider_protocol: &str, model: &str) -> Self {
+    pub fn new(client_protocol: Protocol, provider_protocol: Protocol, model: &str) -> Self {
+        use Protocol::*;
         match (client_protocol, provider_protocol) {
-            (PROTOCOL_OPENAI, PROTOCOL_OPENAI) => StreamConverter::PassOpenAi {
+            (OpenAi, OpenAi) => StreamConverter::PassOpenAi {
                 usage: (0, 0, 0, 0),
                 strip_usage_chunk: false,
                 model: model.to_string(),
             },
-            (PROTOCOL_ANTHROPIC, PROTOCOL_ANTHROPIC) => {
+            (Anthropic, Anthropic) => {
                 StreamConverter::PassAnthropic { usage: (0, 0, 0, 0), model: model.to_string() }
             }
-            (PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI) => {
-                StreamConverter::OpenAiToAnthropic(OaStreamState::new(model))
-            }
-            (PROTOCOL_OPENAI, PROTOCOL_ANTHROPIC) => {
-                StreamConverter::AnthropicToOpenAi(AnStreamState::new(model))
-            }
-            (PROTOCOL_RESPONSES, PROTOCOL_RESPONSES) => {
+            (Anthropic, OpenAi) => StreamConverter::OpenAiToAnthropic(OaStreamState::new(model)),
+            (OpenAi, Anthropic) => StreamConverter::AnthropicToOpenAi(AnStreamState::new(model)),
+            (Responses, Responses) => {
                 StreamConverter::PassResponses { usage: (0, 0, 0, 0), model: model.to_string() }
             }
-            (PROTOCOL_RESPONSES, PROTOCOL_OPENAI) => {
-                StreamConverter::OpenAiToResponses(OarStreamState::new(model))
-            }
-            (PROTOCOL_RESPONSES, PROTOCOL_ANTHROPIC) => StreamConverter::AnthropicToResponses {
+            (Responses, OpenAi) => StreamConverter::OpenAiToResponses(OarStreamState::new(model)),
+            (Responses, Anthropic) => StreamConverter::AnthropicToResponses {
                 an: AnStreamState::new(model),
                 oar: OarStreamState::new(model),
             },
-            _ => StreamConverter::PassOpenAi {
+            // Responses 上游只服务 Responses 客户端(models::upstream_protocol_for),
+            // 以下组合不会被路由选中;显式列出保持穷举,行为同 0.4(按 OpenAI 直通)。
+            (OpenAi, Responses) | (Anthropic, Responses) => StreamConverter::PassOpenAi {
                 usage: (0, 0, 0, 0),
                 strip_usage_chunk: false,
                 model: model.to_string(),
@@ -255,7 +252,7 @@ mod tests {
 
     #[test]
     fn stream_pass_openai_captures_usage() {
-        let mut c = StreamConverter::new("openai", "openai", "m");
+        let mut c = StreamConverter::new(Protocol::OpenAi, Protocol::OpenAi, "m");
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"x"}}]}"#));
         assert_eq!(outs.len(), 1);
         assert_eq!(c.usage(), (0, 0, 0, 0));
@@ -267,7 +264,7 @@ mod tests {
     #[test]
     fn stream_pass_openai_strips_unrequested_usage_chunk() {
         // 客户端未请求 include_usage(由网关注入):usage chunk 只记账、不转发。
-        let mut c = StreamConverter::new("openai", "openai", "m").strip_usage_chunk(true);
+        let mut c = StreamConverter::new(Protocol::OpenAi, Protocol::OpenAi, "m").strip_usage_chunk(true);
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"x"}}]}"#));
         assert_eq!(outs.len(), 1);
         let outs = c.push(&sse(r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#));
@@ -277,7 +274,7 @@ mod tests {
 
     #[test]
     fn stream_pass_anthropic_captures_usage() {
-        let mut c = StreamConverter::new("anthropic", "anthropic", "m");
+        let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::Anthropic, "m");
         c.push(&sse_typed("message_start", r#"{"type":"message_start","message":{"usage":{"input_tokens":7}}}"#));
         assert_eq!(c.usage(), (7, 0, 7, 0));
         c.push(&sse_typed("message_delta", r#"{"type":"message_delta","usage":{"output_tokens":4}}"#));
@@ -288,7 +285,7 @@ mod tests {
     fn stream_pass_anthropic_splits_cache_usage() {
         // message_start 携带缓存字段:cache_creation 并入未缓存输入,
         // cache_read 记入缓存维度;total = 三者之和
-        let mut c = StreamConverter::new("anthropic", "anthropic", "m");
+        let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::Anthropic, "m");
         c.push(&sse_typed("message_start", r#"{"type":"message_start","message":{"usage":{"input_tokens":7,"cache_creation_input_tokens":3,"cache_read_input_tokens":5}}}"#));
         assert_eq!(c.usage(), (10, 0, 15, 5));
         c.push(&sse_typed("message_delta", r#"{"type":"message_delta","usage":{"output_tokens":4}}"#));
@@ -298,7 +295,7 @@ mod tests {
     #[test]
     fn stream_pass_openai_rewrites_chunk_model() {
         // 映射场景:chunk 里的上游真实模型名回写为请求模型名。
-        let mut c = StreamConverter::new("openai", "openai", "gpt-4");
+        let mut c = StreamConverter::new(Protocol::OpenAi, Protocol::OpenAi, "gpt-4");
         let outs = c.push(&sse(r#"{"model":"real-gpt-4-2024","choices":[{"delta":{"content":"x"}}]}"#));
         assert_eq!(outs.len(), 1);
         let chunk: Value = serde_json::from_str(&outs[0].data).unwrap();
@@ -311,7 +308,7 @@ mod tests {
 
     #[test]
     fn stream_pass_anthropic_rewrites_message_model() {
-        let mut c = StreamConverter::new("anthropic", "anthropic", "claude-alias");
+        let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::Anthropic, "claude-alias");
         let outs = c.push(&sse_typed(
             "message_start",
             r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-real","usage":{"input_tokens":7}}}"#,
@@ -323,12 +320,12 @@ mod tests {
 
     #[test]
     fn stream_converters_ignore_garbage() {
-        let mut c1 = StreamConverter::new("anthropic", "openai", "m");
+        let mut c1 = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "m");
         assert!(c1.push(&sse("not json")).is_empty());
-        let mut c2 = StreamConverter::new("openai", "anthropic", "m");
+        let mut c2 = StreamConverter::new(Protocol::OpenAi, Protocol::Anthropic, "m");
         assert!(c2.push(&sse_typed("ping", "not json")).is_empty());
         // Unstarted converter finalizes to nothing.
-        let mut c3 = StreamConverter::new("anthropic", "openai", "m");
+        let mut c3 = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "m");
         assert!(c3.push(&sse("[DONE]")).is_empty());
     }
 
@@ -336,7 +333,7 @@ mod tests {
 
     #[test]
     fn stream_pass_responses_captures_usage_and_rewrites_model() {
-        let mut c = StreamConverter::new("responses", "responses", "client-model");
+        let mut c = StreamConverter::new(Protocol::Responses, Protocol::Responses, "client-model");
         let outs = c.push(&sse_typed(
             "response.created",
             r#"{"type":"response.created","response":{"id":"r1","model":"upstream-real","status":"in_progress"}}"#,
@@ -364,7 +361,7 @@ mod tests {
 
     #[test]
     fn stream_anthropic_to_responses_composition() {
-        let mut c = StreamConverter::new("responses", "anthropic", "claude-4");
+        let mut c = StreamConverter::new(Protocol::Responses, Protocol::Anthropic, "claude-4");
         let outs = c.push(&sse_typed("message_start", r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":9}}}"#));
         // an → chat chunk → oar:response.created/in_progress
         assert_eq!(out_types(&outs), vec!["response.created", "response.in_progress"]);

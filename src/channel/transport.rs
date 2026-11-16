@@ -146,7 +146,7 @@ pub fn cached_client(
 pub async fn send_request(
     clients: &Mutex<HashMap<String, Client>>,
     provider: &Provider,
-    protocol: &str,
+    protocol: crate::protocol::Protocol,
     mut request_body: Value,
     stream: bool,
     fallback_timeout_secs: u64,

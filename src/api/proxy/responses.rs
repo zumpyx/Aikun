@@ -2,7 +2,7 @@ use axum::{extract::State, response::Response, Json};
 use serde_json::Value;
 
 use crate::auth::{AuthContext, Claims};
-use crate::protocol::PROTOCOL_RESPONSES;
+use crate::protocol::Protocol;
 use crate::AppState;
 
 /// OpenAI Responses API endpoint.
@@ -16,5 +16,5 @@ pub async fn responses(
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    crate::pipeline::proxy_completion(state, claims, auth_ctx, PROTOCOL_RESPONSES, body, &headers).await
+    crate::pipeline::proxy_completion(state, claims, auth_ctx, Protocol::Responses, body, &headers).await
 }

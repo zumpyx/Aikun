@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::protocol::Protocol;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Provider {
     pub id: String,
@@ -125,11 +127,12 @@ pub fn first_defaultable_protocol(protocols: &[String]) -> String {
 
 /// The protocol used to talk to this channel upstream: its configured
 /// default, falling back to the legacy provider_type mapping.
-pub fn channel_protocol(p: &Provider) -> &'static str {
-    match p.default_protocol.as_str() {
-        "anthropic" => crate::protocol::PROTOCOL_ANTHROPIC,
-        "openai" => crate::protocol::PROTOCOL_OPENAI,
-        _ => crate::protocol::provider_protocol(&p.provider_type),
+pub fn channel_protocol(p: &Provider) -> Protocol {
+    // responses 不可作 default_protocol(DEFAULTABLE_PROTOCOLS),
+    // 空值 / 非法值按旧 provider_type 映射兜底(未迁移行)。
+    match Protocol::parse(&p.default_protocol) {
+        Some(proto @ (Protocol::OpenAi | Protocol::Anthropic)) => proto,
+        Some(Protocol::Responses) | None => Protocol::for_provider_type(&p.provider_type),
     }
 }
 
@@ -137,11 +140,11 @@ pub fn channel_protocol(p: &Provider) -> &'static str {
 /// 时原生直通;否则回退渠道默认协议,由 convert 层做协议转换降级。
 /// responses 只作支持协议声明,不作 default_protocol,故此处只需处理
 /// 客户端协议为 responses 的情形。
-pub fn upstream_protocol_for(p: &Provider, client_protocol: &str) -> &'static str {
-    if client_protocol == crate::protocol::PROTOCOL_RESPONSES
-        && channel_protocols(p).iter().any(|x| x == "responses")
+pub fn upstream_protocol_for(p: &Provider, client_protocol: Protocol) -> Protocol {
+    if client_protocol == Protocol::Responses
+        && channel_protocols(p).iter().any(|x| x == Protocol::Responses.as_str())
     {
-        return crate::protocol::PROTOCOL_RESPONSES;
+        return Protocol::Responses;
     }
     channel_protocol(p)
 }
@@ -149,8 +152,8 @@ pub fn upstream_protocol_for(p: &Provider, client_protocol: &str) -> &'static st
 /// 按上游协议选择对应的 base URL:有些供应商对 OpenAI / Anthropic 两种协议
 /// 提供不同路由。协议专属地址为空时回退另一个,保证只配了一个地址的
 /// 渠道照常工作。
-pub fn base_url_for<'a>(p: &'a Provider, protocol: &str) -> &'a str {
-    if protocol == crate::protocol::PROTOCOL_ANTHROPIC {
+pub fn base_url_for<'a>(p: &'a Provider, protocol: Protocol) -> &'a str {
+    if protocol == Protocol::Anthropic {
         if p.anthropic_base_url.is_empty() {
             &p.openai_base_url
         } else {
@@ -170,7 +173,7 @@ pub fn channel_protocols(p: &Provider) -> Vec<String> {
     if valid_protocol_list(&list) {
         return list;
     }
-    vec![crate::protocol::provider_protocol(&p.provider_type).to_string()]
+    vec![Protocol::for_provider_type(&p.provider_type).as_str().to_string()]
 }
 
 /// Map a row of the standard providers-table select order (id, name,
@@ -384,24 +387,24 @@ pub(crate) mod tests {
     fn base_url_for_picks_protocol_url_with_fallback() {
         let mut p = bare_provider();
         // 未配 anthropic 地址时两种协议都落到 openai 地址
-        assert_eq!(base_url_for(&p, "openai"), "http://x");
-        assert_eq!(base_url_for(&p, "anthropic"), "http://x");
+        assert_eq!(base_url_for(&p, Protocol::OpenAi), "http://x");
+        assert_eq!(base_url_for(&p, Protocol::Anthropic), "http://x");
         // 配了独立的 anthropic 地址后按协议分开
         p.anthropic_base_url = "http://y".into();
-        assert_eq!(base_url_for(&p, "anthropic"), "http://y");
-        assert_eq!(base_url_for(&p, "openai"), "http://x");
+        assert_eq!(base_url_for(&p, Protocol::Anthropic), "http://y");
+        assert_eq!(base_url_for(&p, Protocol::OpenAi), "http://x");
         // openai 地址为空时回退 anthropic 地址(anthropic-only 渠道)
         p.openai_base_url = String::new();
-        assert_eq!(base_url_for(&p, "openai"), "http://y");
+        assert_eq!(base_url_for(&p, Protocol::OpenAi), "http://y");
     }
 
     #[test]
     fn legacy_rows_fall_back_to_provider_type() {
         let mut p = bare_provider();
-        assert_eq!(channel_protocol(&p), "openai");
+        assert_eq!(channel_protocol(&p), Protocol::OpenAi);
         assert_eq!(channel_protocols(&p), vec!["openai".to_string()]);
         p.provider_type = "anthropic".into();
-        assert_eq!(channel_protocol(&p), "anthropic");
+        assert_eq!(channel_protocol(&p), Protocol::Anthropic);
         assert_eq!(channel_protocols(&p), vec!["anthropic".to_string()]);
     }
 
@@ -410,7 +413,7 @@ pub(crate) mod tests {
         let mut p = bare_provider();
         p.protocols = "[\"openai\",\"anthropic\"]".into();
         p.default_protocol = "anthropic".into();
-        assert_eq!(channel_protocol(&p), "anthropic");
+        assert_eq!(channel_protocol(&p), Protocol::Anthropic);
         assert_eq!(
             channel_protocols(&p),
             vec!["openai".to_string(), "anthropic".to_string()]
@@ -424,16 +427,16 @@ pub(crate) mod tests {
     fn upstream_protocol_prefers_native_responses() {
         let mut p = bare_provider();
         // 未声明 responses:responses 客户端走渠道默认协议(转换降级)
-        assert_eq!(upstream_protocol_for(&p, "responses"), "openai");
+        assert_eq!(upstream_protocol_for(&p, Protocol::Responses), Protocol::OpenAi);
         // 声明后:responses 客户端原生直通
         p.protocols = "[\"openai\",\"responses\"]".into();
-        assert_eq!(upstream_protocol_for(&p, "responses"), "responses");
+        assert_eq!(upstream_protocol_for(&p, Protocol::Responses), Protocol::Responses);
         // 其他客户端协议不受 responses 声明影响
-        assert_eq!(upstream_protocol_for(&p, "openai"), "openai");
+        assert_eq!(upstream_protocol_for(&p, Protocol::OpenAi), Protocol::OpenAi);
         // anthropic 默认协议渠道:responses 客户端也走 anthropic(组合转换)
         p.default_protocol = "anthropic".into();
         p.protocols = "[\"anthropic\"]".into();
-        assert_eq!(upstream_protocol_for(&p, "responses"), "anthropic");
+        assert_eq!(upstream_protocol_for(&p, Protocol::Responses), Protocol::Anthropic);
     }
 
     #[test]

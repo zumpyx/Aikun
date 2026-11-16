@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use crate::auth::{AuthContext, Claims};
 use crate::pipeline::admission::model_allowed;
 use crate::pipeline::proxy_completion;
-use crate::protocol::PROTOCOL_OPENAI;
+use crate::protocol::Protocol;
 use crate::channel::selector::list_available_models_async;
 use crate::AppState;
 
@@ -21,7 +21,7 @@ pub async fn chat_completion(
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    proxy_completion(state, claims, auth_ctx, PROTOCOL_OPENAI, body, &headers).await
+    proxy_completion(state, claims, auth_ctx, Protocol::OpenAi, body, &headers).await
 }
 
 /// List available models aggregated from all healthy providers.

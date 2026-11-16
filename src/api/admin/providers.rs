@@ -8,6 +8,7 @@ use rusqlite::params;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::protocol::Protocol;
 use crate::AppState;
 use crate::models::{
     channel_protocol, channel_protocols, first_defaultable_protocol, has_defaultable_protocol,
@@ -881,8 +882,10 @@ pub async fn test_provider(
     // api_key 出库解密(enc:v1: 前缀密文,明文兼容)
     let api_key = crate::crypto::decrypt_or_plain(&state.pool.cipher, &api_key);
 
+    // 默认协议列为空时退回 provider_type(azure/custom 等讲 OpenAI)。
+    let protocol = Protocol::parse(&protocol).unwrap_or_else(|| Protocol::for_provider_type(&protocol));
     // 按渠道的默认协议选对应的上游地址;留空的一路回退到另一个。
-    let base_url = if protocol == "anthropic" {
+    let base_url = if protocol == Protocol::Anthropic {
         if anthropic_url.is_empty() { &openai_url } else { &anthropic_url }
     } else if openai_url.is_empty() {
         &anthropic_url
@@ -891,7 +894,7 @@ pub async fn test_provider(
     };
 
     // Step 2: Make health check request (async, no lock held)
-    let (status, latency) = check_provider_health(&state.clients, base_url, &api_key, &protocol, timeout.clamp(1, 600) as u64, &proxy_url, &channel_kind).await;
+    let (status, latency) = check_provider_health(&state.clients, base_url, &api_key, protocol, timeout.clamp(1, 600) as u64, &proxy_url, &channel_kind).await;
 
     // Step 3: Re-lock DB to update status
     {
@@ -1004,12 +1007,15 @@ pub async fn fetch_upstream_models(
         .protocol
         .or(req.provider_type)
         .unwrap_or_else(|| "openai".to_string());
-    if !matches!(protocol.as_str(), "openai" | "anthropic") {
-        return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": "invalid_protocol",
-            "message": "protocol 仅支持 openai / anthropic"
-        })));
-    }
+    let protocol = match Protocol::parse(&protocol) {
+        Some(p @ (Protocol::OpenAi | Protocol::Anthropic)) => p,
+        Some(Protocol::Responses) | None => {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "error": "invalid_protocol",
+                "message": "protocol 仅支持 openai / anthropic"
+            })));
+        }
+    };
     let mut proxy_url = req.proxy_url.unwrap_or_default();
 
     // 编辑表单里 api_key / 代理都是"留空不修改":任一为空且有 provider_id
@@ -1053,8 +1059,8 @@ pub async fn fetch_upstream_models(
     let client = crate::channel::transport::cached_client(&state.clients, &proxy_url, "fetch-models", 15);
     // URL 与鉴权头由渠道插件决定,与对话 / 健康检查路径同一口径。
     let adapter = crate::channel::registry().resolve(req.channel_kind.as_deref().unwrap_or("").trim());
-    let url = adapter.models_url(&base_url, &protocol);
-    let upstream_req = adapter.apply_auth(client.get(&url), &api_key, &protocol);
+    let url = adapter.models_url(&base_url, protocol);
+    let upstream_req = adapter.apply_auth(client.get(&url), &api_key, protocol);
 
     match upstream_req.send().await {
         Ok(resp) => {
@@ -1172,15 +1178,15 @@ pub async fn test_provider_model(
     };
 
     let protocol = match req.protocol.as_deref() {
-        Some(p) => {
-            if !channel_protocols(&provider).iter().any(|s| s == p) {
+        Some(p) => match Protocol::parse(p) {
+            Some(proto) if channel_protocols(&provider).iter().any(|s| s == p) => proto,
+            _ => {
                 return (StatusCode::BAD_REQUEST, Json(json!({
                     "error": "unsupported_protocol",
                     "message": format!("该渠道不支持 {} 协议", p)
                 })));
             }
-            p
-        }
+        },
         None => channel_protocol(&provider),
     };
     // Both protocols share the same minimal shape for a smoke test.

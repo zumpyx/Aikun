@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn stream_anthropic_to_openai_keeps_requested_model() {
         // 转换路径:上游 message_start 的真实模型名不覆盖请求模型名。
-        let mut c = StreamConverter::new("openai", "anthropic", "claude-alias");
+        let mut c = StreamConverter::new(Protocol::OpenAi, Protocol::Anthropic, "claude-alias");
         let outs = c.push(&sse_typed(
             "message_start",
             r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-real","usage":{"input_tokens":9}}}"#,
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn stream_anthropic_to_openai_text_flow() {
-        let mut c = StreamConverter::new("openai", "anthropic", "claude-3");
+        let mut c = StreamConverter::new(Protocol::OpenAi, Protocol::Anthropic, "claude-3");
 
         let outs = c.push(&sse_typed("message_start", r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-3","usage":{"input_tokens":9}}}"#));
         assert_eq!(outs.len(), 1);
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn stream_anthropic_to_openai_thinking_delta() {
-        let mut c = StreamConverter::new("openai", "anthropic", "m");
+        let mut c = StreamConverter::new(Protocol::OpenAi, Protocol::Anthropic, "m");
         c.push(&sse_typed(
             "message_start",
             r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1}}}"#,
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn stream_anthropic_to_openai_tool_flow() {
-        let mut c = StreamConverter::new("openai", "anthropic", "m");
+        let mut c = StreamConverter::new(Protocol::OpenAi, Protocol::Anthropic, "m");
         c.push(&sse_typed("message_start", r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1}}}"#));
         let outs = c.push(&sse_typed("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu1","name":"fn"}}"#));
         let chunk: Value = serde_json::from_str(&outs[0].data).unwrap();
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn stream_anthropic_error_event_to_openai_and_responses() {
         // Anthropic type:"error" 事件 → OpenAI 形状 error data
-        let mut c = StreamConverter::new("openai", "anthropic", "m");
+        let mut c = StreamConverter::new(Protocol::OpenAi, Protocol::Anthropic, "m");
         let outs = c.push(&sse_typed(
             "error",
             r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
@@ -305,7 +305,7 @@ mod tests {
             .is_empty());
 
         // 组合链:Anthropic error → Responses error 事件
-        let mut c = StreamConverter::new("responses", "anthropic", "m");
+        let mut c = StreamConverter::new(Protocol::Responses, Protocol::Anthropic, "m");
         let outs = c.push(&sse_typed(
             "error",
             r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
@@ -324,7 +324,7 @@ mod tests {
     fn stream_anthropic_to_responses_carries_cached_tokens() {
         // Anthropic 流式带 cache_read:经 chat chunk 的 prompt_tokens_details
         // 传给 OarStreamState,response.completed 里 cached_tokens 正确拆分。
-        let mut c = StreamConverter::new("responses", "anthropic", "m");
+        let mut c = StreamConverter::new(Protocol::Responses, Protocol::Anthropic, "m");
         c.push(&sse_typed(
             "message_start",
             r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":9,"cache_creation_input_tokens":2,"cache_read_input_tokens":5}}}"#,

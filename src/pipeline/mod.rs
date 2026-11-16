@@ -24,10 +24,7 @@ use crate::billing::ledger::spawn_request_log;
 use crate::pipeline::admission::{enforce_key_limits, has_positive_balance, model_allowed};
 use crate::models::Provider;
 use crate::channel::transport::extract_model;
-use crate::protocol::{
-    anthropic_error_type, SseOut,
-    PROTOCOL_RESPONSES,
-};
+use crate::protocol::{protocol_error, Protocol};
 use crate::channel::selector::spawn_record_failure;
 use crate::AppState;
 
@@ -49,7 +46,7 @@ pub async fn proxy_completion(
     state: AppState,
     claims: Claims,
     auth_ctx: AuthContext,
-    client_protocol: &str,
+    client_protocol: Protocol,
     body: Value,
     headers: &axum::http::HeaderMap,
 ) -> Response {
@@ -58,7 +55,7 @@ pub async fn proxy_completion(
         // 缺 model 的 400 也写一条失败日志，保证审计完整
         spawn_request_log(
             &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-            model.clone(), client_protocol, 0, 0, 0, 0, 0, 400, false,
+            model.clone(), client_protocol.as_str(), 0, 0, 0, 0, 0, 400, false,
             Some("missing model in request body".to_string()),
         );
         return (
@@ -74,7 +71,7 @@ pub async fn proxy_completion(
         if !model_allowed(&auth_ctx.allowed_models, &model) {
             spawn_request_log(
                 &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-                model.clone(), client_protocol, 0, 0, 0, 0, 0, 403, false,
+                model.clone(), client_protocol.as_str(), 0, 0, 0, 0, 0, 403, false,
                 Some(format!("model '{}' not allowed for this API key", model)),
             );
             return (
@@ -98,7 +95,7 @@ pub async fn proxy_completion(
         let msg = "Insufficient balance: please top up before making more requests".to_string();
         spawn_request_log(
             &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-            model.clone(), client_protocol, 0, 0, 0, 0, 0, 402, false,
+            model.clone(), client_protocol.as_str(), 0, 0, 0, 0, 0, 402, false,
             Some(msg.clone()),
         );
         return (
@@ -116,7 +113,7 @@ pub async fn proxy_completion(
             Err(msg) => {
                 spawn_request_log(
                     &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), None,
-                    model.clone(), client_protocol, 0, 0, 0, 0, 0, 429, false,
+                    model.clone(), client_protocol.as_str(), 0, 0, 0, 0, 0, 429, false,
                     Some(msg.clone()),
                 );
                 return (
@@ -148,7 +145,7 @@ pub async fn proxy_completion(
             debug!("Cache hit: protocol={} model={} user={}", client_protocol, model, claims.username);
             crate::billing::ledger::record_cache_hit(
                 &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), model.clone(),
-                client_protocol, hit.usage,
+                client_protocol.as_str(), hit.usage,
                 state.cache.hit_billing == crate::config::CacheHitBilling::Full,
             )
             .await;
@@ -220,7 +217,7 @@ pub async fn proxy_completion(
             }
             spawn_request_log(
                 &state.pool, claims.sub.clone(), auth_ctx.api_key_id.clone(), last_provider,
-                model.clone(), client_protocol, 0, 0, 0, 0, 0, 504, false,
+                model.clone(), client_protocol.as_str(), 0, 0, 0, 0, 0, 504, false,
                 Some(format!("overall timeout after {}s", overall_timeout.as_secs())),
             );
             (
@@ -265,42 +262,6 @@ pub(crate) fn apply_model_mapping(provider: &Provider, upstream_body: &mut Value
     }
 }
 
-/// Build an error body in the client-facing protocol shape.
-pub(crate) fn protocol_error(client_protocol: &str, err_type: &str, message: &str) -> Value {
-    if client_protocol == crate::protocol::PROTOCOL_ANTHROPIC {
-        json!({
-            "type": "error",
-            "error": {"type": anthropic_error_type(err_type), "message": message}
-        })
-    } else {
-        // OpenAI 形状带 code 字段(与 type 同值),部分 SDK 按 error.code 分支。
-        json!({
-            "error": {"message": message, "type": err_type, "param": null, "code": err_type}
-        })
-    }
-}
-
-/// Convert an upstream error body to the client-facing protocol shape,
-/// preserving the original error message and type.
-fn convert_error(err_body: &Value, client_protocol: &str) -> Value {
-    let message = err_body["error"]["message"]
-        .as_str()
-        .unwrap_or("upstream error");
-    let err_type = err_body["error"]["type"]
-        .as_str()
-        .unwrap_or("upstream_error");
-    if client_protocol == crate::protocol::PROTOCOL_ANTHROPIC {
-        json!({
-            "type": "error",
-            "error": {"type": anthropic_error_type(err_type), "message": message}
-        })
-    } else {
-        json!({
-            "error": {"message": message, "type": err_type}
-        })
-    }
-}
-
 /// 上游响应体大小上限（8MB）：异常上游的超大 body 不再造成内存 DoS。
 const MAX_RESP_BODY: usize = 8 * 1024 * 1024;
 
@@ -326,56 +287,6 @@ pub(crate) async fn read_json_limited(resp: reqwest::Response) -> Result<Value, 
 fn truncate_json(v: &Value) -> String {
     let s = serde_json::to_string(v).unwrap_or_default();
     s.chars().take(200).collect()
-}
-
-/// 流中途失败时发给客户端的协议对应错误事件。
-fn stream_error_event(client_protocol: &str, message: &str) -> SseOut {
-    if client_protocol == crate::protocol::PROTOCOL_ANTHROPIC {
-        SseOut {
-            event: Some("error".to_string()),
-            data: json!({
-                "type": "error",
-                "error": {"type": "api_error", "message": message}
-            })
-            .to_string(),
-        }
-    } else if client_protocol == PROTOCOL_RESPONSES {
-        // Responses API 的错误事件本身就是终止帧(其后流直接结束)。
-        SseOut {
-            event: Some("error".to_string()),
-            data: json!({
-                "type": "error",
-                "code": "upstream_error",
-                "message": message
-            })
-            .to_string(),
-        }
-    } else {
-        SseOut {
-            event: None,
-            data: json!({
-                "error": {"message": message, "type": "upstream_error"}
-            })
-            .to_string(),
-        }
-    }
-}
-
-/// 协议对应的流终止帧：OpenAI 为 `[DONE]`，Anthropic 为 `message_stop`。
-/// Responses API 无终止帧(response.completed 或 error 事件后流直接结束),
-/// 调用方对 responses 客户端应跳过此函数。
-fn stream_terminal_event(client_protocol: &str) -> SseOut {
-    if client_protocol == crate::protocol::PROTOCOL_ANTHROPIC {
-        SseOut {
-            event: Some("message_stop".to_string()),
-            data: json!({"type": "message_stop"}).to_string(),
-        }
-    } else {
-        SseOut {
-            event: None,
-            data: "[DONE]".to_string(),
-        }
-    }
 }
 
 #[cfg(test)]

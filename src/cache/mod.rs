@@ -115,7 +115,7 @@ impl GatewayCache {
     /// 请求可缓存时返回缓存键,否则 None。
     pub fn key_for(
         &self,
-        client_protocol: &str,
+        client_protocol: crate::protocol::Protocol,
         user_id: &str,
         body: &Value,
         headers: &HeaderMap,
@@ -127,7 +127,7 @@ impl GatewayCache {
             CacheScope::User => user_id,
             CacheScope::Global => "*",
         };
-        Some(cache_key(scope, client_protocol, body))
+        Some(cache_key(scope, client_protocol.as_str(), body))
     }
 
     pub async fn get(&self, key: &str) -> Option<CacheEntry> {
@@ -274,8 +274,8 @@ mod tests {
         );
         let body = json!({"model": "m", "temperature": 0});
         let h = HeaderMap::new();
-        let k1 = cache.key_for("openai", "alice", &body, &h).unwrap();
-        let k2 = cache.key_for("openai", "bob", &body, &h).unwrap();
+        let k1 = cache.key_for(crate::protocol::Protocol::OpenAi, "alice", &body, &h).unwrap();
+        let k2 = cache.key_for(crate::protocol::Protocol::OpenAi, "bob", &body, &h).unwrap();
         assert_ne!(k1, k2, "user scope must isolate users");
         let entry = CacheEntry { body: json!({"ok": true}), usage: (1, 2, 3, 0) };
         cache.put(&k1, entry.clone()).await;

@@ -262,7 +262,7 @@ mod tests {
             "system": "sys",
             "messages": [{"role": "user", "content": "hi"}]
         });
-        let out = convert_request(&body, "anthropic", "openai");
+        let out = convert_request(&body, Protocol::Anthropic, Protocol::OpenAi);
         assert_eq!(out["max_tokens"], 50);
         assert_eq!(out["stream"], true);
         assert_eq!(out["stream_options"], json!({"include_usage": true}));
@@ -286,7 +286,7 @@ mod tests {
                 ]}
             ]
         });
-        let out = convert_request(&body, "anthropic", "openai");
+        let out = convert_request(&body, Protocol::Anthropic, Protocol::OpenAi);
         let msgs = out["messages"].as_array().unwrap();
         assert_eq!(msgs[0], json!({"role": "tool", "tool_call_id": "t1", "content": "result-text"}));
         assert_eq!(msgs[1], json!({"role": "user", "content": "follow-up"}));
@@ -312,7 +312,7 @@ mod tests {
                 ]}
             ]
         });
-        let out = convert_request(&body, "anthropic", "openai");
+        let out = convert_request(&body, Protocol::Anthropic, Protocol::OpenAi);
         assert_eq!(out["thinking"]["budget_tokens"], 1024);
         let msgs = out["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");

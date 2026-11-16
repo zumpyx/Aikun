@@ -112,7 +112,7 @@ mod tests {
             "stop_reason": "tool_use",
             "usage": {"input_tokens": 10, "output_tokens": 5}
         });
-        let out = convert_response(&resp, "anthropic", "openai", "claude-3");
+        let out = convert_response(&resp, Protocol::Anthropic, Protocol::OpenAi, "claude-3");
         assert_eq!(out["object"], "chat.completion");
         let choice = &out["choices"][0];
         assert_eq!(choice["message"]["content"], "calling");
@@ -130,7 +130,7 @@ mod tests {
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 3, "output_tokens": 2}
         });
-        let out = convert_response(&resp, "anthropic", "responses", "claude-4");
+        let out = convert_response(&resp, Protocol::Anthropic, Protocol::Responses, "claude-4");
         assert_eq!(out["object"], "response");
         assert_eq!(out["output"][0]["content"][0]["text"], "hello");
         assert_eq!(out["usage"]["input_tokens"], 3);
@@ -161,12 +161,12 @@ mod tests {
                 "cache_read_input_tokens": 5,
             }
         });
-        let out = convert_response(&resp, "anthropic", "openai", "claude-4");
+        let out = convert_response(&resp, Protocol::Anthropic, Protocol::OpenAi, "claude-4");
         assert_eq!(out["usage"]["prompt_tokens"], 16);
         assert_eq!(out["usage"]["prompt_tokens_details"]["cached_tokens"], 5);
         assert_eq!(out["usage"]["total_tokens"], 19);
         // 组合到 responses 后缓存拆分仍然正确
-        let out = convert_response(&resp, "anthropic", "responses", "claude-4");
+        let out = convert_response(&resp, Protocol::Anthropic, Protocol::Responses, "claude-4");
         assert_eq!(out["usage"]["input_tokens"], 16);
         assert_eq!(out["usage"]["input_tokens_details"]["cached_tokens"], 5);
     }

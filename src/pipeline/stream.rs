@@ -11,12 +11,11 @@ use axum::response::{
 use futures_util::StreamExt;
 use tracing::{debug, warn};
 
-use super::*;
 use crate::billing::ledger::{insert_request_log, request_log_sync, spawn_request_log};
 use crate::pipeline::admission::ConcurrencyGuard;
 use crate::protocol::{
-    parse_sse_events, parse_sse_remaining, StreamConverter, SseOut,
-    PROTOCOL_RESPONSES,
+    parse_sse_events, parse_sse_remaining, stream_error_event, stream_terminal_event, Protocol,
+    SseOut, StreamConverter,
 };
 use crate::channel::selector::{
     spawn_record_failure, spawn_record_result,
@@ -88,8 +87,8 @@ pub(super) fn stream_response(
     state: AppState,
     resp: reqwest::Response,
     adapter: Arc<dyn crate::channel::ChannelAdapter>,
-    client_protocol: &str,
-    provider_protocol: &str,
+    client_protocol: Protocol,
+    provider_protocol: Protocol,
     provider_id: String,
     idle_timeout_secs: i32,
     model: String,
@@ -114,8 +113,6 @@ pub(super) fn stream_response(
         state.config.request_timeout_secs
     };
     let idle_timeout = std::time::Duration::from_secs(idle_secs.clamp(1, 600));
-    let client_protocol = client_protocol.to_string();
-    let provider_protocol_owned = provider_protocol.to_string();
 
     // Abort the stream if the upstream sends more than this without a
     // complete SSE event boundary — an unbounded buffer is a memory risk.
@@ -132,7 +129,7 @@ pub(super) fn stream_response(
             api_key_id: api_key_id.clone(),
             provider_id: provider_id.clone(),
             model: model_log.clone(),
-            request_type: client_protocol.clone(),
+            request_type: client_protocol.as_str().to_string(),
             start,
             usage: usage_cell.clone(),
             finished: false,
@@ -175,7 +172,7 @@ pub(super) fn stream_response(
                 Ok(bytes) => {
                     buf.extend_from_slice(&bytes);
                     for mut ev in parse_sse_events(&mut buf) {
-                        adapter.normalize_stream_event(&provider_protocol_owned, &mut ev);
+                        adapter.normalize_stream_event(provider_protocol, &mut ev);
                         events += 1;
                         for out in converter.push(&ev) {
                             // 转换型 converter 的错误事件带 event: error;
@@ -215,7 +212,7 @@ pub(super) fn stream_response(
             let (p, c, t, k) = converter.usage();
             spawn_request_log(
                 &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
-                model_log.clone(), &client_protocol,
+                model_log.clone(), client_protocol.as_str(),
                 p, c, t, k, latency as i32, 502, false, Some(err_msg.clone()),
             );
             // 502 已记账,立即标记 guard 完成:否则客户端在下面 yield 期间
@@ -224,11 +221,11 @@ pub(super) fn stream_response(
             // 通知客户端流异常终止：协议对应的错误事件 + converter 收尾事件。
             // finish() 对转换型 converter 已含终止帧([DONE]/message_stop),
             // 仅在其缺失时补一个,避免客户端收到双重终止。
-            yield Ok(to_axum_event(stream_error_event(&client_protocol, &err_msg)));
+            yield Ok(to_axum_event(stream_error_event(client_protocol, &err_msg)));
             // responses 客户端:error 事件即终止,跳过 converter 收尾——收尾
             // 会产出与错误矛盾的 *.done/response.completed(部分输出被当成
             // 成功完成),codex 等客户端会误判流正常结束。
-            let finish_outs = if client_protocol == PROTOCOL_RESPONSES {
+            let finish_outs = if client_protocol == Protocol::Responses {
                 vec![]
             } else {
                 converter.finish()
@@ -239,14 +236,16 @@ pub(super) fn stream_response(
             for out in finish_outs {
                 yield Ok(to_axum_event(out));
             }
-            if !has_terminal && client_protocol != PROTOCOL_RESPONSES {
-                yield Ok(to_axum_event(stream_terminal_event(&client_protocol)));
+            if !has_terminal {
+                if let Some(term) = stream_terminal_event(client_protocol) {
+                    yield Ok(to_axum_event(term));
+                }
             }
             return;
         }
 
         if let Some(mut ev) = parse_sse_remaining(&mut buf) {
-            adapter.normalize_stream_event(&provider_protocol_owned, &mut ev);
+            adapter.normalize_stream_event(provider_protocol, &mut ev);
             events += 1;
             for out in converter.push(&ev) {
                 if out.event.as_deref() == Some("error")
@@ -265,14 +264,14 @@ pub(super) fn stream_response(
             spawn_record_failure(pool.clone(), provider_id.clone(), latency, 0, threshold, true);
             spawn_request_log(
                 &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
-                model_log.clone(), &client_protocol,
+                model_log.clone(), client_protocol.as_str(),
                 0, 0, 0, 0, latency as i32, 502, false, Some(err_msg.clone()),
             );
             // 同上面的 stream_error 路径:先标记完成再 yield,防止重复记账。
             guard.finish();
-            yield Ok(to_axum_event(stream_error_event(&client_protocol, &err_msg)));
-            if client_protocol != PROTOCOL_RESPONSES {
-                yield Ok(to_axum_event(stream_terminal_event(&client_protocol)));
+            yield Ok(to_axum_event(stream_error_event(client_protocol, &err_msg)));
+            if let Some(term) = stream_terminal_event(client_protocol) {
+                yield Ok(to_axum_event(term));
             }
             return;
         }
@@ -289,7 +288,7 @@ pub(super) fn stream_response(
             spawn_record_failure(pool.clone(), provider_id.clone(), latency, 0, threshold, true);
             request_log_sync(
                 &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
-                model_log.clone(), &client_protocol,
+                model_log.clone(), client_protocol.as_str(),
                 p, c, t, k, latency as i32, 502, false,
                 Some("upstream sent an in-stream error frame".to_string()),
             )
@@ -302,7 +301,7 @@ pub(super) fn stream_response(
         // fire-and-forget 在进程退出时会丢账。
         request_log_sync(
             &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
-            model_log.clone(), &client_protocol,
+            model_log.clone(), client_protocol.as_str(),
             p, c, t, k, latency as i32, 200, true, None,
         )
         .await;

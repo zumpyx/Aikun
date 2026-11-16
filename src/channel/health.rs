@@ -15,7 +15,7 @@ pub async fn check_provider_health(
     clients: &Mutex<HashMap<String, reqwest::Client>>,
     base_url: &str,
     api_key: &str,
-    provider_type: &str,
+    protocol: crate::protocol::Protocol,
     timeout_secs: u64,
     proxy_url: &str,
     channel_kind: &str,
@@ -25,11 +25,11 @@ pub async fn check_provider_health(
 
     // URL 与鉴权头由渠道插件决定(见 crate::channels)。
     let adapter = crate::channel::registry().resolve(channel_kind);
-    let url = adapter.models_url(base_url, provider_type);
+    let url = adapter.models_url(base_url, protocol);
     // 日志脱敏:URL 可能带 userinfo 或 query(如 ?key=...),不落明文。
     let log_url = sanitize_log_url(&url);
 
-    let req = adapter.apply_auth(client.get(&url), api_key, provider_type);
+    let req = adapter.apply_auth(client.get(&url), api_key, protocol);
 
     let result = req.send().await;
 
@@ -210,7 +210,10 @@ async fn run_health_check_round(
                     // API layer, but old rows may hold out-of-range values.
                     let probe_timeout = (*timeout).clamp(1, 600).min(60) as u64;
                     // 按默认协议选对应的上游地址,留空的一路回退到另一个。
-                    let base_url = if protocol == "anthropic" {
+                    // 默认协议列为空时退回 provider_type(azure/custom 等讲 OpenAI)。
+                    let protocol = crate::protocol::Protocol::parse(protocol)
+                        .unwrap_or_else(|| crate::protocol::Protocol::for_provider_type(protocol));
+                    let base_url = if protocol == crate::protocol::Protocol::Anthropic {
                         if anthropic_url.is_empty() { openai_url } else { anthropic_url }
                     } else if openai_url.is_empty() {
                         anthropic_url

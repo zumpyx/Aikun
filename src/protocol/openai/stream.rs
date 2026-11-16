@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn stream_openai_to_anthropic_text_flow() {
-        let mut c = StreamConverter::new("anthropic", "openai", "claude-x");
+        let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "claude-x");
 
         let outs = c.push(&sse(r#"{"id":"chatcmpl-1","choices":[{"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}"#));
         assert_eq!(out_types(&outs), vec!["message_start", "content_block_start", "content_block_delta"]);
@@ -692,7 +692,7 @@ mod tests {
 
     #[test]
     fn stream_openai_to_anthropic_finish_reason_mapping() {
-        let mut c = StreamConverter::new("anthropic", "openai", "m");
+        let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "m");
         c.push(&sse(r#"{"choices":[{"delta":{"content":"x"}}]}"#));
         c.push(&sse(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#));
         let outs = c.push(&sse("[DONE]"));
@@ -702,7 +702,7 @@ mod tests {
 
     #[test]
     fn stream_openai_to_anthropic_closes_block_before_new_one() {
-        let mut c = StreamConverter::new("anthropic", "openai", "m");
+        let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "m");
 
         // 文本块 → tool_use 块 → 第二个 tool_use 块 → 流结束
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"hi"}}]}"#));
@@ -739,7 +739,7 @@ mod tests {
 
     #[test]
     fn stream_openai_to_anthropic_text_after_tool_closes_tool_block() {
-        let mut c = StreamConverter::new("anthropic", "openai", "m");
+        let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "m");
         c.push(&sse(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t1","function":{"name":"f","arguments":"{}"}}]}}]}"#));
         // 工具块之后又出现文本：先停 tool_use 块再开新文本块
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"content":"tail"}}]}"#));
@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn stream_openai_to_anthropic_reasoning_before_text() {
-        let mut c = StreamConverter::new("anthropic", "openai", "m");
+        let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "m");
         let outs = c.push(&sse(
             r#"{"choices":[{"delta":{"reasoning_content":"think"}}]}"#,
         ));
@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn stream_openai_to_responses_text_flow() {
-        let mut c = StreamConverter::new("responses", "openai", "gpt-5");
+        let mut c = StreamConverter::new(Protocol::Responses, Protocol::OpenAi, "gpt-5");
 
         let outs = c.push(&sse(r#"{"id":"chatcmpl-1","choices":[{"delta":{"role":"assistant","content":""}}]}"#));
         assert_eq!(out_types(&outs), vec!["response.created", "response.in_progress"]);
@@ -816,7 +816,7 @@ mod tests {
 
     #[test]
     fn stream_openai_to_responses_tool_flow() {
-        let mut c = StreamConverter::new("responses", "openai", "m");
+        let mut c = StreamConverter::new(Protocol::Responses, Protocol::OpenAi, "m");
         c.push(&sse(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#));
         let outs = c.push(&sse(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"f","arguments":"{\"a\":"}}]}}]}"#));
         assert_eq!(
@@ -845,7 +845,7 @@ mod tests {
     #[test]
     fn stream_openai_to_responses_eof_without_done() {
         // 上游未发 [DONE] 直接 EOF:finish() 补齐收尾与 response.completed
-        let mut c = StreamConverter::new("responses", "openai", "m");
+        let mut c = StreamConverter::new(Protocol::Responses, Protocol::OpenAi, "m");
         c.push(&sse(r#"{"choices":[{"delta":{"content":"x"}}]}"#));
         let outs = c.finish();
         assert_eq!(
@@ -859,7 +859,7 @@ mod tests {
     #[test]
     fn stream_openai_error_chunk_to_anthropic_error_event() {
         // 中转上游 HTTP 200 + SSE 流内错误帧:不得先 message_start 再正常收尾
-        let mut c = StreamConverter::new("anthropic", "openai", "m");
+        let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "m");
         let outs = c.push(&sse(r#"{"error":{"message":"boom","type":"server_error"}}"#));
         assert_eq!(out_types(&outs), vec!["error"]);
         assert_eq!(outs[0].event.as_deref(), Some("error"));
@@ -878,7 +878,7 @@ mod tests {
     #[test]
     fn stream_openai_error_chunk_mid_stream_to_anthropic() {
         // 流中途出错:已 message_start,错误事件后不再 message_delta/message_stop
-        let mut c = StreamConverter::new("anthropic", "openai", "m");
+        let mut c = StreamConverter::new(Protocol::Anthropic, Protocol::OpenAi, "m");
         let outs = c.push(&sse(r#"{"id":"c1","choices":[{"delta":{"content":"Hel"}}]}"#));
         assert!(out_types(&outs).contains(&"message_start".to_string()));
         let outs = c.push(&sse(r#"{"error":{"message":"mid boom","type":"server_error"}}"#));
@@ -888,7 +888,7 @@ mod tests {
 
     #[test]
     fn stream_openai_error_chunk_to_responses_error_event() {
-        let mut c = StreamConverter::new("responses", "openai", "m");
+        let mut c = StreamConverter::new(Protocol::Responses, Protocol::OpenAi, "m");
         let outs = c.push(&sse(r#"{"error":{"message":"boom","type":"server_error"}}"#));
         // 无 response.created/in_progress
         assert_eq!(out_types(&outs), vec!["error"]);
@@ -904,7 +904,7 @@ mod tests {
 
     #[test]
     fn stream_openai_to_responses_incomplete_on_length() {
-        let mut c = StreamConverter::new("responses", "openai", "m");
+        let mut c = StreamConverter::new(Protocol::Responses, Protocol::OpenAi, "m");
         c.push(&sse(r#"{"choices":[{"delta":{"content":"partial"}}]}"#));
         c.push(&sse(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#));
         let outs = c.push(&sse("[DONE]"));

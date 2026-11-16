@@ -19,7 +19,8 @@ use crate::billing::ledger::{request_log_sync, spawn_request_log};
 use crate::pipeline::admission::ConcurrencyGuard;
 use crate::channel::transport::send_request;
 use crate::protocol::{
-    convert_request, convert_response, extract_usage_any, valid_response_shape,
+    convert_error, convert_request, convert_response, extract_usage_any, protocol_error,
+    valid_response_shape, Protocol,
 };
 use crate::channel::selector::{
     select_provider_async, spawn_pin_channel, spawn_record_failure, spawn_record_result,
@@ -31,7 +32,7 @@ use crate::AppState;
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn attempt_loop(
     state: AppState,
-    client_protocol: &str,
+    client_protocol: Protocol,
     model: String,
     body: Value,
     is_stream: bool,
@@ -124,7 +125,7 @@ pub(super) async fn attempt_loop(
                     spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold, failure_counted.insert(provider.id.clone()));
                     spawn_request_log(
                         &state.pool, user_id.clone(), api_key_id.clone(),
-                        Some(provider.id.clone()), model.clone(), client_protocol,
+                        Some(provider.id.clone()), model.clone(), client_protocol.as_str(),
                         0, 0, 0, 0, latency as i32, status as i32, false,
                         Some("upstream transport error".to_string()),
                     );
@@ -156,7 +157,7 @@ pub(super) async fn attempt_loop(
                         // 计费级:响应返回前日志与扣费已落库(await)。
                         request_log_sync(
                             &state.pool, user_id.clone(), api_key_id.clone(),
-                            Some(provider.id.clone()), model.clone(), client_protocol,
+                            Some(provider.id.clone()), model.clone(), client_protocol.as_str(),
                             p, c, t, k, latency as i32, 200, true, None,
                         )
                         .await;
@@ -200,7 +201,7 @@ pub(super) async fn attempt_loop(
                         spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold, failure_counted.insert(provider.id.clone()));
                         spawn_request_log(
                             &state.pool, user_id.clone(), api_key_id.clone(),
-                            Some(provider.id.clone()), model.clone(), client_protocol,
+                            Some(provider.id.clone()), model.clone(), client_protocol.as_str(),
                             0, 0, 0, 0, latency as i32, 502, false, Some(detail),
                         );
                         last_error = Some((
@@ -239,7 +240,7 @@ pub(super) async fn attempt_loop(
                 spawn_record_failure(state.pool.clone(), provider.id.clone(), latency, 0, threshold, failure_counted.insert(provider.id.clone()));
                 spawn_request_log(
                     &state.pool, user_id.clone(), api_key_id.clone(),
-                    Some(provider.id.clone()), model.clone(), client_protocol,
+                    Some(provider.id.clone()), model.clone(), client_protocol.as_str(),
                     0, 0, 0, 0, latency as i32, 502, false, Some(detail),
                 );
                 last_error = Some((
@@ -292,7 +293,7 @@ pub(super) async fn attempt_loop(
         };
         spawn_request_log(
             &state.pool, user_id.clone(), api_key_id.clone(),
-            Some(provider.id.clone()), model.clone(), client_protocol,
+            Some(provider.id.clone()), model.clone(), client_protocol.as_str(),
             0, 0, 0, 0, latency as i32, status as i32, false, Some(log_msg),
         );
 
@@ -335,7 +336,7 @@ pub(super) async fn attempt_loop(
             // ones.
             spawn_request_log(
                 &state.pool, user_id.clone(), api_key_id.clone(), None,
-                model.clone(), client_protocol, 0, 0, 0, 0, 0, 503, false,
+                model.clone(), client_protocol.as_str(), 0, 0, 0, 0, 0, 503, false,
                 Some(format!("no available provider for model '{}'", model)),
             );
             (

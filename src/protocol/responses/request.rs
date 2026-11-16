@@ -209,7 +209,7 @@ mod tests {
             ],
             "tool_choice": "auto"
         });
-        let out = convert_request(&body, "responses", "openai");
+        let out = convert_request(&body, Protocol::Responses, Protocol::OpenAi);
         assert_eq!(out["model"], "gpt-5");
         assert_eq!(out["stream"], true);
         assert_eq!(out["stream_options"], json!({"include_usage": true}));
@@ -246,7 +246,7 @@ mod tests {
             "input": "hello",
             "tool_choice": {"type": "function", "name": "f"}
         });
-        let out = convert_request(&body, "responses", "openai");
+        let out = convert_request(&body, Protocol::Responses, Protocol::OpenAi);
         assert_eq!(out["messages"], json!([{"role": "user", "content": "hello"}]));
         assert_eq!(out["tool_choice"], json!({"type": "function", "function": {"name": "f"}}));
         // 非流式不带 stream_options
@@ -261,7 +261,7 @@ mod tests {
             "max_output_tokens": 64,
             "input": [{"role": "user", "content": "hi"}]
         });
-        let out = convert_request(&body, "responses", "anthropic");
+        let out = convert_request(&body, Protocol::Responses, Protocol::Anthropic);
         assert_eq!(out["model"], "claude-4");
         assert_eq!(out["max_tokens"], 64);
         assert_eq!(out["system"], "sys");

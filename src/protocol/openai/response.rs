@@ -168,7 +168,7 @@ mod tests {
             "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "length"}],
             "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}
         });
-        let out = convert_response(&resp, "openai", "anthropic", "gpt-4");
+        let out = convert_response(&resp, Protocol::OpenAi, Protocol::Anthropic, "gpt-4");
         assert_eq!(out["type"], "message");
         assert_eq!(out["content"], json!([{"type": "text", "text": "hi"}]));
         assert_eq!(out["stop_reason"], "max_tokens"); // length → max_tokens
@@ -188,13 +188,13 @@ mod tests {
             }, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
         });
-        let an = convert_response(&oa, "openai", "anthropic", "m");
+        let an = convert_response(&oa, Protocol::OpenAi, Protocol::Anthropic, "m");
         assert_eq!(an["content"][0]["type"], "thinking");
         assert_eq!(an["content"][0]["thinking"], "think");
         assert_eq!(an["content"][0]["signature"], "sig");
         assert_eq!(an["content"][1]["text"], "ans");
 
-        let back = convert_response(&an, "anthropic", "openai", "m");
+        let back = convert_response(&an, Protocol::Anthropic, Protocol::OpenAi, "m");
         assert_eq!(back["choices"][0]["message"]["reasoning_content"], "think");
         assert_eq!(back["choices"][0]["message"]["content"], "ans");
     }
@@ -207,7 +207,7 @@ mod tests {
             json!({"choices": [{}]}),
             json!({"error": {"message": "boom"}}),
         ] {
-            let out = convert_response(&bad, "openai", "anthropic", "m");
+            let out = convert_response(&bad, Protocol::OpenAi, Protocol::Anthropic, "m");
             assert_eq!(out["type"], "error");
             assert_eq!(out["error"]["type"], "upstream_error");
         }
@@ -227,7 +227,7 @@ mod tests {
             "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14,
                       "prompt_tokens_details": {"cached_tokens": 6}}
         });
-        let out = convert_response(&resp, "openai", "responses", "gpt-5");
+        let out = convert_response(&resp, Protocol::OpenAi, Protocol::Responses, "gpt-5");
         assert_eq!(out["object"], "response");
         assert_eq!(out["status"], "completed");
         assert_eq!(out["model"], "gpt-5");
@@ -253,20 +253,20 @@ mod tests {
             "choices": [{"message": {"role": "assistant", "content": "partial"}, "finish_reason": "length"}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}
         });
-        let out = convert_response(&resp, "openai", "responses", "gpt-5");
+        let out = convert_response(&resp, Protocol::OpenAi, Protocol::Responses, "gpt-5");
         assert_eq!(out["status"], "incomplete");
         assert_eq!(out["incomplete_details"]["reason"], "max_output_tokens");
 
         // content_filter 同理;正常 stop 仍是 completed 且 incomplete_details 为 null
         let mut resp_cf = resp.clone();
         resp_cf["choices"][0]["finish_reason"] = json!("content_filter");
-        let out = convert_response(&resp_cf, "openai", "responses", "gpt-5");
+        let out = convert_response(&resp_cf, Protocol::OpenAi, Protocol::Responses, "gpt-5");
         assert_eq!(out["status"], "incomplete");
         assert_eq!(out["incomplete_details"]["reason"], "content_filter");
 
         let mut resp_ok = resp.clone();
         resp_ok["choices"][0]["finish_reason"] = json!("stop");
-        let out = convert_response(&resp_ok, "openai", "responses", "gpt-5");
+        let out = convert_response(&resp_ok, Protocol::OpenAi, Protocol::Responses, "gpt-5");
         assert_eq!(out["status"], "completed");
         assert!(out["incomplete_details"].is_null());
     }

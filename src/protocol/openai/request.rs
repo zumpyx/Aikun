@@ -292,7 +292,7 @@ mod tests {
                 {"role": "user", "content": "hello"}
             ]
         });
-        let out = convert_request(&body, "openai", "anthropic");
+        let out = convert_request(&body, Protocol::OpenAi, Protocol::Anthropic);
         assert_eq!(out["model"], "claude-3");
         assert_eq!(out["max_tokens"], 4096); // default
         assert_eq!(out["system"], "be nice");
@@ -312,7 +312,7 @@ mod tests {
                 {"role": "assistant", "content": "c"}
             ]
         });
-        let out = convert_request(&body, "openai", "anthropic");
+        let out = convert_request(&body, Protocol::OpenAi, Protocol::Anthropic);
         assert_eq!(out["max_tokens"], 100); // max_completion_tokens honored
         assert_eq!(out["stream"], true);
         let msgs = out["messages"].as_array().unwrap();
@@ -329,7 +329,7 @@ mod tests {
             "tools": [{"type": "function", "function": {"name": "f", "description": "d", "parameters": {"type": "object"}}}],
             "tool_choice": "required"
         });
-        let out = convert_request(&body, "openai", "anthropic");
+        let out = convert_request(&body, Protocol::OpenAi, Protocol::Anthropic);
         assert_eq!(out["stop_sequences"], json!(["END"]));
         assert_eq!(out["tools"][0]["name"], "f");
         assert_eq!(out["tools"][0]["input_schema"], json!({"type": "object"}));
@@ -351,7 +351,7 @@ mod tests {
                 {"role": "assistant", "content": "answer", "reasoning_content": "because", "reasoning_signature": "sig"}
             ]
         });
-        let out = convert_request(&body, "openai", "anthropic");
+        let out = convert_request(&body, Protocol::OpenAi, Protocol::Anthropic);
         assert_eq!(out["thinking"], json!({"type": "enabled"}));
         assert_eq!(out["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(out["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");

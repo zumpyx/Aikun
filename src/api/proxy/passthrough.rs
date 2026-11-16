@@ -19,10 +19,10 @@ use tracing::{debug, warn};
 
 use crate::billing::ledger::{request_log_sync, spawn_request_log};
 use crate::pipeline::admission::{enforce_key_limits, has_positive_balance};
-use crate::pipeline::{apply_model_mapping, protocol_error, read_json_limited};
+use crate::pipeline::{apply_model_mapping, read_json_limited};
 use crate::auth::{AuthContext, Claims};
 use crate::channel::transport::{build_api_url, cached_client};
-use crate::protocol::{extract_usage_any, PROTOCOL_OPENAI};
+use crate::protocol::{extract_usage_any, protocol_error, Protocol};
 use crate::channel::selector::{
     select_provider_async, spawn_pin_channel, spawn_record_failure, spawn_record_result,
 };
@@ -51,7 +51,7 @@ pub async fn passthrough(
         return (
             StatusCode::NOT_FOUND,
             Json(protocol_error(
-                PROTOCOL_OPENAI,
+                Protocol::OpenAi,
                 "not_found_error",
                 &format!("Endpoint /v1/{} is not supported by this gateway", path),
             )),
@@ -64,7 +64,7 @@ pub async fn passthrough(
         return (
             StatusCode::BAD_REQUEST,
             Json(protocol_error(
-                PROTOCOL_OPENAI,
+                Protocol::OpenAi,
                 "invalid_request_error",
                 "Model field is required in request body",
             )),
@@ -87,7 +87,7 @@ pub async fn passthrough(
             return (
                 StatusCode::FORBIDDEN,
                 Json(protocol_error(
-                    PROTOCOL_OPENAI,
+                    Protocol::OpenAi,
                     "model_not_allowed",
                     &format!("Model '{}' is not allowed for this API key", model),
                 )),
@@ -105,7 +105,7 @@ pub async fn passthrough(
         );
         return (
             StatusCode::PAYMENT_REQUIRED,
-            Json(protocol_error(PROTOCOL_OPENAI, "insufficient_quota", &msg)),
+            Json(protocol_error(Protocol::OpenAi, "insufficient_quota", &msg)),
         )
             .into_response();
     }
@@ -121,7 +121,7 @@ pub async fn passthrough(
                 );
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
-                    Json(protocol_error(PROTOCOL_OPENAI, "rate_limit_error", &msg)),
+                    Json(protocol_error(Protocol::OpenAi, "rate_limit_error", &msg)),
                 )
                     .into_response();
             }
@@ -185,7 +185,7 @@ pub async fn passthrough(
         let mut upstream_body = body.clone();
         apply_model_mapping(&provider, &mut upstream_body);
         let url = build_api_url(
-            crate::models::base_url_for(&provider, PROTOCOL_OPENAI),
+            crate::models::base_url_for(&provider, Protocol::OpenAi),
             &format!("/{}", path),
         );
         let timeout = if provider.timeout_secs > 0 {
@@ -203,7 +203,7 @@ pub async fn passthrough(
             req
         } else {
             // 鉴权头由渠道插件决定(透传只走 openai 协议)。
-            crate::channel::adapter_for(&provider).apply_auth(req, &provider.api_key, PROTOCOL_OPENAI)
+            crate::channel::adapter_for(&provider).apply_auth(req, &provider.api_key, Protocol::OpenAi)
         };
 
         debug!(
@@ -333,7 +333,7 @@ pub async fn passthrough(
             if status == 401 || status == 403 {
                 (
                     StatusCode::BAD_GATEWAY,
-                    Json(protocol_error(PROTOCOL_OPENAI, "upstream_error", "All upstream providers failed")),
+                    Json(protocol_error(Protocol::OpenAi, "upstream_error", "All upstream providers failed")),
                 )
                     .into_response()
             } else {
@@ -350,7 +350,7 @@ pub async fn passthrough(
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(protocol_error(
-                    PROTOCOL_OPENAI,
+                    Protocol::OpenAi,
                     "provider_unavailable",
                     &format!(
                         "No available provider for model '{}'. Check provider configuration.",

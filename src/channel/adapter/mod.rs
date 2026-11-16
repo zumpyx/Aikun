@@ -28,7 +28,7 @@ use reqwest::RequestBuilder;
 use serde_json::Value;
 
 use crate::models::Provider;
-use crate::protocol::{SseEvent, PROTOCOL_ANTHROPIC, PROTOCOL_RESPONSES};
+use crate::protocol::{Protocol, SseEvent};
 
 pub use registry::{adapter_for, registry};
 
@@ -55,12 +55,12 @@ pub trait ChannelAdapter: Send + Sync + 'static {
     }
 
     /// 给定上游协议的端点路径(相对 Base URL)。
-    fn endpoint_path(&self, protocol: &str) -> &'static str {
+    fn endpoint_path(&self, protocol: Protocol) -> &'static str {
         default_endpoint_path(protocol)
     }
 
     /// 对话请求的完整上游 URL。
-    fn chat_url(&self, provider: &Provider, protocol: &str) -> String {
+    fn chat_url(&self, provider: &Provider, protocol: Protocol) -> String {
         crate::channel::transport::build_api_url(
             crate::models::base_url_for(provider, protocol),
             self.endpoint_path(protocol),
@@ -69,45 +69,45 @@ pub trait ChannelAdapter: Send + Sync + 'static {
 
     /// 模型列表 / 健康探测 URL。只拿 base_url:管理端「获取模型」在渠道
     /// 落库之前就会调用,没有完整的 Provider。
-    fn models_url(&self, base_url: &str, _protocol: &str) -> String {
+    fn models_url(&self, base_url: &str, _protocol: Protocol) -> String {
         crate::channel::transport::build_api_url(base_url, "/models")
     }
 
     /// 写入鉴权头。默认:anthropic 协议同时带 x-api-key 与 Bearer
     /// (部分 Anthropic 兼容上游只认 Authorization),其余协议带 Bearer。
-    fn apply_auth(&self, req: RequestBuilder, api_key: &str, protocol: &str) -> RequestBuilder {
+    fn apply_auth(&self, req: RequestBuilder, api_key: &str, protocol: Protocol) -> RequestBuilder {
         default_auth(req, api_key, protocol)
     }
 
     /// 发送前修补上游请求体(已完成协议转换与模型映射)。
-    fn prepare_request(&self, _provider: &Provider, _protocol: &str, _body: &mut Value) {}
+    fn prepare_request(&self, _provider: &Provider, _protocol: Protocol, _body: &mut Value) {}
 
     /// 非流式 200 响应体在校验 / 转换前的修补(例如把厂商私有信封
     /// 拆成标准协议形状)。
-    fn normalize_response(&self, _protocol: &str, _body: &mut Value) {}
+    fn normalize_response(&self, _protocol: Protocol, _body: &mut Value) {}
 
     /// 流式响应中每个 SSE 事件在协议转换前的修补。
-    fn normalize_stream_event(&self, _protocol: &str, _event: &mut SseEvent) {}
+    fn normalize_stream_event(&self, _protocol: Protocol, _event: &mut SseEvent) {}
 }
 
 /// 各协议的标准端点路径。
-pub fn default_endpoint_path(protocol: &str) -> &'static str {
-    if protocol == PROTOCOL_ANTHROPIC {
-        "/messages"
-    } else if protocol == PROTOCOL_RESPONSES {
-        "/responses"
-    } else {
-        "/chat/completions"
+pub fn default_endpoint_path(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::OpenAi => "/chat/completions",
+        Protocol::Anthropic => "/messages",
+        Protocol::Responses => "/responses",
     }
 }
 
 /// 默认鉴权头,与重构前 proxy/client.rs 的 apply_auth 完全一致。
-pub fn default_auth(req: RequestBuilder, api_key: &str, protocol: &str) -> RequestBuilder {
-    if protocol == PROTOCOL_ANTHROPIC {
-        req.header("x-api-key", api_key)
+pub fn default_auth(req: RequestBuilder, api_key: &str, protocol: Protocol) -> RequestBuilder {
+    match protocol {
+        Protocol::Anthropic => req
+            .header("x-api-key", api_key)
             .header("Authorization", format!("Bearer {}", api_key))
-            .header("anthropic-version", "2023-06-01")
-    } else {
-        req.header("Authorization", format!("Bearer {}", api_key))
+            .header("anthropic-version", "2023-06-01"),
+        Protocol::OpenAi | Protocol::Responses => {
+            req.header("Authorization", format!("Bearer {}", api_key))
+        }
     }
 }
