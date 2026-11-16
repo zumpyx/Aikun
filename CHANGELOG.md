@@ -7,7 +7,8 @@
 
 ## [Unreleased]
 
-`refactor/modular-gateway` 分支,对应 roadmap-v0.5 阶段 0(可作为 0.4.5 发布)与阶段 1。
+`refactor/modular-gateway` 分支,对应 roadmap-v0.5 阶段 0(可作为 0.4.5 发布)与阶段 1;
+另含 architecture-v0.5 结构迁移首批(workspace 根包变体 + API spec / 生成管线,无运行时行为变化)。
 
 ### 修复(阶段 0,行为变化)
 
@@ -44,6 +45,29 @@
 - **响应缓存**:进程内内存缓存,默认 `AIKUN_CACHE_MODE=off`;可选 `deterministic` / `always`,
   按用户隔离,命中默认照常计费,响应头 `x-aikun-cache`。
 
+### 工程(architecture-v0.5 结构迁移首批,无运行时行为变化)
+
+- **多 crate workspace(根包变体)**:根 `Cargo.toml` 声明 `[workspace]`
+  (`members = ["crates/*"]`,`resolver = "3"`),生成 crate 统一进门禁;
+  二进制仍在根包(包名与构建产物路径不变),移入 `aikun/` 属后续步骤。
+- **`openapi.yaml`**:仓库根新增手写 OpenAPI 3.2.1 全景 spec(单一真相):
+  管理面(Auth / User / Admin 三层 tag)进生成白名单,`/v1` 代理面仅作文档
+  (loose schema,不镜像厂商契约),`/api/health` 不入。目标口径(统一
+  `{items,total}` 信封、创建 201 / 删除 204、PATCH 返回资源、RFC 9457
+  problem+json 错误体、ID int64 等)与现行实现的逐条对照见 `docs/api-mapping.md`;
+  spec 本身尚未接线,不改任何运行时行为。
+- **`crates/aikun-openapi`**:管理面服务端脚手架,由 openapi-to-rust(钉版
+  0.24.0,Rust 原生、无 Java)从 `openapi.yaml` 生成,43 个 operation 白名单
+  (`/v1` 绝不入白名单);生成物提交进仓库(构建不依赖外部生成器),
+  零手写、零测试。
+- **`scripts/gen-api.sh`**:可复现生成管线:钉版安装生成器 → 生成(暂存
+  `target/openapi-to-rust`)→ 组装 crate(依赖取自生成器清单 + 按引用防漏
+  探测)→ rustfmt 归一;输出目录删除重跑逐字节一致,`/v1` 路由泄漏进
+  生成物时拒绝组装。
+- CI 门禁覆盖全 workspace:`cargo fmt --all --check`、
+  `cargo clippy --workspace --all-targets --locked`、
+  `cargo test --locked --workspace`。
+
 ### 测试 / 工程
 
 - e2e:登录链路(`/api/login` → `/api/me`、错误密码、改密踢下线、禁用账户)。
@@ -55,6 +79,9 @@
 ### 文档
 
 - `docs/refactor-plan.md` 补充最佳实践(协议契约测试、流式取消与超时、计费幂等与对账、故障转移可重试边界、渠道熔断、可观测性前置、响应缓存约束),并写入阶段 1–4 任务。
+- 新增 `docs/architecture-v0.5.md`(0.5 目标结构定稿:多 crate workspace、管理面 API spec-first)与 `docs/api-mapping.md`(现有 API → 新 spec 逐条对照,前端与 impl 迁移清单);
+  `roadmap-v0.5.md` 标注"目标架构"一节由前者取代。
+- 新增 `docs/plan-next-steps.md`(结构迁移后续步骤,按依赖排序、每步带验收标准)。
 
 ## [0.4.4] - 2026-10-19
 

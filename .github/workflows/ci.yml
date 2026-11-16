@@ -25,10 +25,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo fmt --check
-        run: cargo fmt --check
+        # cargo-fmt 无 --workspace 旗标,--all 即全 workspace(含生成 crate)
+        run: cargo fmt --all --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -41,7 +42,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo test
-        run: cargo test --locked
+        run: cargo test --locked --workspace
 
   # 完整走一遍 release 的 docker 路径(metadata-action → build-push),
   # 但不推送,只验证 Dockerfile 与元数据输出在 CI 环境中可用。

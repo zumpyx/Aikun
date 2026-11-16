@@ -1,0 +1,23 @@
+# 由 scripts/gen-api.sh 生成 —— 勿手改;重跑脚本会整目录覆盖。
+[package]
+name = "aikun-openapi"
+# 与 openapi.yaml info.version 对齐
+version = "0.5.0"
+edition = "2024"
+description = "Aikun 管理面(Auth/User/Admin)API 脚手架,由 openapi-to-rust 从 openapi.yaml 生成(scripts/gen-api.sh)"
+publish = false
+
+# 依赖 = 生成器 REQUIRED_DEPS.toml 的 [dependencies] 原文
+# + 防漏补齐:生成代码引用而清单未列的依赖(wrapper 按引用探测,幂等)
+[dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["json", "tokio"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures-core = "0.3"
+http-body-util = "0.1"
+jsonschema = { version = "0.49", default-features = false }
+mime = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+url = { version = "2", features = ["serde"] }

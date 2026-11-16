@@ -4,6 +4,13 @@ version = "0.4.4"
 edition = "2024"
 description = "A lightweight AI gateway with multi-provider aggregation, failover, and routing optimization"
 
+# workspace:生成 crate(crates/aikun-openapi)与后续拆分的成员统一进门禁。
+# 根包自身仍是默认成员;二进制暂不迁移目录(完整拆分属后续步骤)。
+# 根包 edition 2024 → 工作区解析器取 resolver "3",显式声明避免歧义。
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
 [dependencies]
 # Web framework
 axum = { version = "0.8", features = ["macros"] }

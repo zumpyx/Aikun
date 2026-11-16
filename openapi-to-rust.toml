@@ -1,0 +1,74 @@
+# =============================================================================
+# openapi-to-rust 生成配置(由 scripts/gen-api.sh 消费)
+# =============================================================================
+# 纪律(出处:openapi.yaml 文件头、docs/architecture-v0.5.md 决策 2/3/4):
+#   * [server].operations 白名单只收管理面(Auth / User / Admin tag)的
+#     operationId,共 43 个;
+#   * Proxy(/v1)端点绝不加入 —— 生成器自带的 jsonschema 运行时校验会误拒
+#     第三方扩展字段,直接打坏 /v1 的字节级透传;
+#   * 纯服务端生成:enable_async_client = false,不引入 reqwest 客户端。
+#
+# spec 变更流程:改 openapi.yaml → 按需调整下方白名单 →
+# `bash scripts/gen-api.sh` 重新生成 crates/aikun-openapi 并提交。
+# generator.output_dir 是生成器原始输出的暂存目录(target/,不进 git),
+# 由 wrapper 组装成独立 crate,不是最终产物位置。
+# =============================================================================
+
+[generator]
+spec_path = "openapi.yaml"
+output_dir = "target/openapi-to-rust"
+module_name = "openapi"
+
+[features]
+enable_async_client = false
+
+[server]
+framework = "axum"
+operations = [
+  # --- Auth:公开层(裸挂,无 auth_middleware)---
+  "login",
+  "serveFrontend",
+  "serveStaticAsset",
+  # --- User:用户自助层(JWT)---
+  "createApiKey",
+  "deleteApiKey",
+  "getCurrentUser",
+  "getLogStats",
+  "getVersion",
+  "getWalletStats",
+  "listApiKeys",
+  "listLogs",
+  "listPublicPrices",
+  "redeemCode",
+  "updateApiKey",
+  # --- Admin:管理面(JWT + role=admin)---
+  "adminAdjustUserBalance",
+  "adminCreatePrice",
+  "adminCreateProvider",
+  "adminCreateProvidersBatch",
+  "adminCreateRedemptionCodes",
+  "adminCreateUser",
+  "adminCreateUsersBatch",
+  "adminDeletePrice",
+  "adminDeleteProvider",
+  "adminDeleteUser",
+  "adminDisableRedemptionCode",
+  "adminDuplicateProvider",
+  "adminFetchUpstreamModels",
+  "adminGetGlobalStats",
+  "adminGetProvider",
+  "adminGetUsageStats",
+  "adminGetUser",
+  "adminListBillingTransactions",
+  "adminListChannelKinds",
+  "adminListModelHealth",
+  "adminListPrices",
+  "adminListProviders",
+  "adminListRedemptionCodes",
+  "adminListUsers",
+  "adminTestProvider",
+  "adminTestProviderModel",
+  "adminUpdatePrice",
+  "adminUpdateProvider",
+  "adminUpdateUser",
+]
