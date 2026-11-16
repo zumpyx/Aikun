@@ -4,7 +4,11 @@ use serde::{Deserialize, Serialize};
 pub struct User {
     pub id: String,
     pub username: String,
+    /// 登录验密已迁 crates/aikun-admin(经 main.rs 的 AuthStore 适配器取
+    /// LoginUserRecord),本字段不再被读;保留是为了 row_to_user 的列位映射
+    /// (SELECT 第 3 列),store 收编(阶段 3)时随行模型一并处置。
     #[serde(skip_serializing)]
+    #[allow(dead_code)]
     pub password_hash: String,
     pub display_name: String,
     pub role: String,
@@ -101,17 +105,8 @@ impl From<User> for UserResponse {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct LoginRequest {
-    pub username: String,
-    pub password: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct LoginResponse {
-    pub token: String,
-    pub user: UserResponse,
-}
+// 旧 LoginRequest/LoginResponse 已删:登录走 spec-first 新契约
+// (POST /api/auth/login,aikun-openapi 生成类型),见 crates/aikun-admin。
 
 #[derive(Serialize, Deserialize)]
 pub struct ApiKey {

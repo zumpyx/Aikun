@@ -1,0 +1,29 @@
+[package]
+name = "aikun-admin"
+version = "0.5.0"
+edition = "2024"
+description = "管理面 API 业务实现:impl aikun-openapi 生成的 AuthApi/UserApi/AdminApi trait;过渡期 DB/加密经装配层注入的端口 trait(aikun-store 就位后收编,architecture-v0.5 §五.6)"
+publish = false
+
+[dependencies]
+# 生成脚手架(trait + 路由工厂 + 响应枚举/类型)
+aikun-openapi = { path = "../aikun-openapi" }
+# 渠道注册表/域类型(admin_providers 批次起使用;依赖一次配齐,见 plan 步骤 6)
+aikun-channels = { path = "../aikun-channels" }
+
+# Web 层(trait 是 async_trait + axum IntoResponse;middleware 为 Auth 批的
+# IP 限流/头部归一所需)。与 aikun-openapi 同一 feature 面,避免拉全量。
+axum = { version = "0.8", default-features = false, features = ["json", "tokio"] }
+async-trait = "0.1"
+# spawn_blocking:Argon2 验密与 DB 查询不占 async executor
+tokio = { version = "1", features = ["rt"] }
+
+# 时间:User 等出参类型带 chrono::DateTime<Utc>(sqlite_utc 助手同源)
+chrono = { version = "0.4", features = ["serde"] }
+# Problem.r#type 是 Option<url::Url>
+url = { version = "2", features = ["serde"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 日志门面(限流/内部错误可观测性)
+tracing = "0.1"

@@ -13,9 +13,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    Json, Router,
-    http::StatusCode,
-    middleware,
+    Json, Router, middleware,
     response::IntoResponse,
     routing::{delete, get, patch, post},
 };
@@ -28,35 +26,6 @@ use crate::auth::{auth_middleware, require_admin};
 use crate::config::AppConfig;
 use crate::db::DbPool;
 
-/// Frontend assets, embedded into the binary at compile time — the
-/// executable is fully self-contained and reads no static files at runtime.
-/// The HTML shell references these under /static/*.
-const INDEX_HTML: &str = include_str!("frontend/index.html");
-
-/// 前端全自托管、无外链脚本,CSP 收敛为仅允许自身来源。
-const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'";
-
-/// (path, content) for every embedded frontend asset.
-const STATIC_ASSETS: &[(&str, &str)] = &[
-    ("style.css", include_str!("frontend/style.css")),
-    ("js/core.js", include_str!("frontend/js/core.js")),
-    ("js/dashboard.js", include_str!("frontend/js/dashboard.js")),
-    ("js/wallet.js", include_str!("frontend/js/wallet.js")),
-    ("js/providers.js", include_str!("frontend/js/providers.js")),
-    ("js/users.js", include_str!("frontend/js/users.js")),
-    ("js/billing.js", include_str!("frontend/js/billing.js")),
-    (
-        "js/redemption.js",
-        include_str!("frontend/js/redemption.js"),
-    ),
-    ("js/keys.js", include_str!("frontend/js/keys.js")),
-    ("js/models.js", include_str!("frontend/js/models.js")),
-    ("js/test.js", include_str!("frontend/js/test.js")),
-    ("js/logs.js", include_str!("frontend/js/logs.js")),
-    ("js/docs.js", include_str!("frontend/js/docs.js")),
-    ("js/init.js", include_str!("frontend/js/init.js")),
-];
-
 /// Shared application state — all handlers receive this via `State<AppState>`.
 #[derive(Clone)]
 pub struct AppState {
@@ -66,7 +35,8 @@ pub struct AppState {
     /// client per request is expensive and defeats connection pooling.
     pub clients: Arc<Mutex<HashMap<String, reqwest::Client>>>,
     /// Sliding-window login-attempt tracker keyed by "ip:..." / "user:..." —
-    /// brute-force protection for /api/login.
+    /// brute-force protection for POST /api/auth/login(ip 维度在装配层
+    /// 中间件、user 维度在 crates/aikun-admin/src/auth.rs,共享本表)。
     pub login_attempts: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
     /// Sliding-window per-API-key request timestamps (keyed by api_keys.id) —
     /// enforces api_keys.rate_limit_rpm. In-memory only: a restart resets the
@@ -153,12 +123,31 @@ async fn main() {
         cache: Arc::new(cache::GatewayCache::from_config(&config)),
     };
 
+    // --- Auth tag(spec-first 新装配,crates/aikun-admin):裸挂,无鉴权中间件 ---
+    // login 的 IP 维度限流与前端响应头归一在中间件层 —— 生成 trait 方法
+    // 签名只有 body,拿不到对端地址,也表达不了自定义头(详见
+    // crates/aikun-admin/src/auth.rs 文件头的装配契约)。
+    let auth_service = aikun_admin::auth::AuthService::new(
+        std::sync::Arc::new(DbAuthStore {
+            pool: pool.clone(),
+            config: config.clone(),
+        }),
+        state.login_attempts.clone(),
+        config.trust_x_forwarded_for,
+    );
+    let auth_routes = aikun_openapi::openapi::server::router::auth_api_router(auth_service.clone())
+        .layer(middleware::from_fn_with_state(
+            auth_service.clone(),
+            aikun_admin::auth::login_ip_guard,
+        ))
+        .layer(middleware::from_fn(
+            aikun_admin::auth::frontend_header_fixup,
+        ));
+
     // --- Public routes (no auth) ---
-    let public_routes = Router::new()
-        .route("/", get(serve_frontend))
-        .route("/static/{*path}", get(serve_static))
-        .route("/api/health", get(health_check))
-        .route("/api/login", post(api::auth::login));
+    // Auth tag 的 /、/static、/api/auth/login 已迁 crates/aikun-admin,
+    // 由上方 auth_routes 承担(旧 /api/login 已删除,前端走新路径)。
+    let public_routes = Router::new().route("/api/health", get(health_check));
 
     // --- Protected routes (auth required) ---
     let protected_routes = Router::new()
@@ -341,10 +330,19 @@ async fn main() {
 
     // Combine all routes
     let shutdown_token = state.shutdown.clone();
+    // 嵌套静态资产(/static/js/*.js)兜底:生成路由 /static/{path} 只匹配
+    // 单段路径(matchit 的 {} 参数不含斜杠),多段路径在此分发到内嵌资产
+    // 表;其余未匹配路径维持 axum 默认空 404(与迁移前一致)。
+    let static_assets = auth_service.clone();
     let mut app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
         .merge(admin_routes)
+        .merge(auth_routes.with_state(()))
+        .fallback(move |req: axum::extract::Request| {
+            let svc = static_assets.clone();
+            async move { svc.static_fallback(req).await }
+        })
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -429,41 +427,71 @@ async fn version() -> impl IntoResponse {
     Json(json!({ "version": env!("CARGO_PKG_VERSION") }))
 }
 
-async fn serve_frontend() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [
-            ("content-type", "text/html; charset=utf-8"),
-            ("cache-control", "no-cache, no-store, must-revalidate"),
-            ("pragma", "no-cache"),
-            ("content-security-policy", CSP),
-        ],
-        INDEX_HTML,
-    )
+// --- Auth tag 过渡期装配:DbAuthStore 端口适配器 ---
+//
+// aikun-admin 的登录端口(aikun_admin::auth::AuthStore)由二进制的
+// DbPool + auth 模块实现,SQL 与哈希/签发逻辑迁自旧 api::auth::login;
+// aikun-store 就位后由 store 层收编(plan 步骤 8),届时删除本适配器。
+struct DbAuthStore {
+    pool: Arc<DbPool>,
+    config: Arc<AppConfig>,
 }
 
-/// Serve an embedded frontend asset by its /static/ path. 404 for anything
-/// not in the embedded table, so no filesystem access ever happens.
-async fn serve_static(axum::extract::Path(path): axum::extract::Path<String>) -> impl IntoResponse {
-    let asset = STATIC_ASSETS.iter().find(|(name, _)| *name == path);
-    match asset {
-        Some((_, content)) => {
-            let mime = if path.ends_with(".css") {
-                "text/css; charset=utf-8"
-            } else {
-                "text/javascript; charset=utf-8"
-            };
-            (
-                StatusCode::OK,
-                [
-                    ("content-type", mime),
-                    ("cache-control", "no-cache, no-store, must-revalidate"),
-                    ("content-security-policy", CSP),
-                ],
-                *content,
+impl aikun_admin::auth::AuthStore for DbAuthStore {
+    /// 查询错误与"用户不存在"一律 Ok(None)(旧实现 `.ok()` 语义,统一
+    /// 401 防枚举);连接锁中毒 → Err(())。
+    fn find_login_user(
+        &self,
+        username: &str,
+    ) -> Result<Option<aikun_admin::auth::LoginUserRecord>, ()> {
+        let conn = self.pool.read().lock().map_err(|_| ())?;
+        Ok(conn
+            .query_row(
+                "SELECT id, username, password_hash, display_name, role, is_active, created_at, updated_at, token_version
+                 FROM users WHERE username = ?1",
+                rusqlite::params![username],
+                |row| {
+                    Ok(aikun_admin::auth::LoginUserRecord {
+                        id: row.get(0)?,
+                        username: row.get(1)?,
+                        password_hash: row.get(2)?,
+                        display_name: row.get(3)?,
+                        role: row.get(4)?,
+                        is_active: row.get(5)?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
+                        token_version: row.get(8)?,
+                    })
+                },
             )
-                .into_response()
-        }
-        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+            .ok())
+    }
+
+    fn verify_password(&self, password: &str, hash: &str) -> bool {
+        crate::auth::verify_password(password, hash).unwrap_or(false)
+    }
+
+    fn dummy_password_hash(&self) -> &'static str {
+        // A valid Argon2 hash used to equalize response timing when the
+        // requested username does not exist (prevents account-enumeration
+        // via timing).迁自旧 api::auth::dummy_password_hash。
+        static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        DUMMY.get_or_init(|| {
+            crate::auth::hash_password("dummy-password").unwrap_or_else(|_| {
+                // Valid PHC string for "password"; only used for timing equalization.
+                "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$2hV3t0s4rVdXKZ2dKjSZUw".to_string()
+            })
+        })
+    }
+
+    fn create_token(&self, user: &aikun_admin::auth::LoginUserRecord) -> Result<String, ()> {
+        crate::auth::create_token(
+            &user.id,
+            &user.username,
+            &user.role,
+            user.token_version,
+            &self.config,
+        )
+        .map_err(|_| ())
     }
 }

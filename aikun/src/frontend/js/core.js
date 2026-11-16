@@ -70,8 +70,10 @@ async function api(method, path, body) {
     try { data = await res.json(); }
     catch { data = {}; }
     if (data === null || typeof data !== 'object') data = {};
-    if (!res.ok && !data.error && !data.message) data = { error: 'unknown_error' };
-    if (res.status === 401 && path !== '/api/login') {
+    // 旧端点错误体是 {error, message};新 spec 端点是 problem+json
+    // ({code, detail})。两类都原样透传,只有两者皆缺(空体/纯文本)才兜底。
+    if (!res.ok && !data.error && !data.message && !data.code && !data.detail) data = { error: 'unknown_error' };
+    if (res.status === 401 && path !== '/api/auth/login') {
       state.token = null;
       state.user = null;
       localStorage.removeItem('token');
@@ -154,7 +156,7 @@ function renderLogin(container) {
     const pass = document.getElementById('login-pass').value;
     btn.disabled = true; btn.textContent = '登录中…';
     try {
-      const r = await api('POST', '/api/login', { username: user, password: pass });
+      const r = await api('POST', '/api/auth/login', { username: user, password: pass });
       if (r.ok) {
         state.token = r.data.token;
         state.user = r.data.user;
@@ -163,7 +165,8 @@ function renderLogin(container) {
         toast('登录成功');
         render();
       } else {
-        toast(r.data.message || r.data.error || '登录失败', 'error');
+        // problem+json:读 detail(人类可读)兜底 code(机器短码)
+        toast(r.data.detail || r.data.code || '登录失败', 'error');
       }
     } finally {
       btn.disabled = false; btn.textContent = '登 录';
