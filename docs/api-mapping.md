@@ -69,7 +69,7 @@
 | `POST /api/admin/providers/batch` | `POST /api/providers/batch` | adminCreateProvidersBatch | 保留 batch(x-action);**状态码统一 200**(旧:全败 400/部分 201),成败全在 body;失败项 `error` → `code` |
 | `POST /api/admin/providers/fetch-models` | `POST /api/providers/fetch-models` | adminFetchUpstreamModels | **保留 POST 动作端点**(理由见备注 2);编辑态回退 / 502 只回显 host / 8MB 上限保留 |
 | `GET /api/admin/providers/{id}` | `GET /api/providers/{id}` | adminGetProvider | 404 保留 |
-| `PATCH /api/admin/providers/{id}` | `PATCH /api/providers/{id}` | adminUpdateProvider | 成功响应 `{message:'updated'}` → 返回资源;"最终状态"联动校验、空串清代理保留 |
+| `PATCH /api/admin/providers/{id}` | `PATCH /api/providers/{id}` | adminUpdateProvider | 成功响应 `{message:'updated'}` → 返回资源;"最终状态"联动校验、空串清代理保留。并发 PATCH 由服务级串行锁互斥(读-改-写原子性等价旧实现的持锁全程;不走该服务的写者除外,同锁事务语义待 store 收编,见备注 13 末段) |
 | `DELETE /api/admin/providers/{id}` | `DELETE /api/providers/{id}` | adminDeleteProvider | 物理删除保留;200 `{message}` → **204** |
 | `POST /api/admin/providers/{id}/test` | `POST /api/providers/{id}/tests` | adminTestProvider | 动作端点 → tests 子资源;200 → **201**(创建探测结果);不更新 EMA 延迟保留 |
 | `POST /api/admin/providers/{id}/test-model` | `POST /api/providers/{id}/model-tests` | adminTestProviderModel | 动作端点 → model-tests 子资源;200 → **201**;业务失败仍是成功响应(ok/status/error 在 body)保留;stream=true 时 text/event-stream |
@@ -169,14 +169,16 @@ openapi.yaml 用 loose 的 `ProxyError` 描述,短码
    spec 按宽容语义描述,**未**严格化为 400。
 10. **登录限流/兑换限流说明**:内存滑动窗口、重启清零、尽力而为
     (src/main.rs:145-152);spec 在 429 响应描述中注明,不承诺精确配额。
-11. **版本门禁(消费者侧硬要求)**:本表是 0.5.0 目标态,现网 0.4.4 二进制
+11. **版本门禁(消费者侧硬要求)**:本表是 0.5.0 目标态,历史 0.4.4 二进制
     的管理面与它完全不兼容 —— 按本 spec 生成的客户端**不得**指向 0.4.x
     实例(会静默拿裸数组/错误语义而非报错;最危险的坑:`GET /api/prices`
-    在 0.4.4 是用户只读价目 `src/main.rs:176`,在 0.5.0 是 Admin CRUD,
-    同路径语义翻转)。门禁手段:`GET /api/system/version` 主次版本 ≥ 0.5
-    (需鉴权);**建议 impl 迁移时在 `/api/health` 响应中带上同一 version
-    字段**作无鉴权探测 —— health 本身不入 spec,不违反"health 不进 spec"
-    的约束,这是 impl 侧待办,spec 只在此记录建议。
+    在 0.4.4 是用户只读价目,在 0.5.0 是 Admin CRUD,同路径语义翻转)。
+    门禁手段:`GET /api/system/version` 主次版本 ≥ 0.5(需鉴权)。
+    **状态(2026-11-17)**:二进制已随 plan 步骤 6 全批完成升版
+    **0.5.0**(`aikun/Cargo.toml`),门禁可用;`/api/health` 响应带同一
+    version 字段作**无鉴权探测**的建议仍未落地(handler 在 `main.rs`,
+    impl 侧待办)——health 本身不入 spec,不违反"health 不进 spec"的
+    约束,spec 只在此记录建议。
 12. **logs 的 `since` 是词法比较,不是时间解析**(`src/api/logs.rs:74-79`):
     库内 created_at 是 `to_rfc3339()` 输出(+00:00 带亚秒)。发 `Z` 后缀值
     会漏掉同秒的全部行('Z' > '.'),发非 UTC 偏移(如 +08:00)会静默漏数
@@ -184,3 +186,24 @@ openapi.yaml 用 loose 的 `ProxyError` 描述,短码
     把值"规范化"成 Z 后缀反而踩坑),并在参数描述中写明应发与库同构的
     UTC +00:00 形态。根治(服务端解析成 DateTime 再比较)是可选的 impl
     改进项,迁移期先按现行为如实描述。
+13. **5xx→4xx 过渡映射(spec 缺口,待裁决;复审 2026-11-17 单列)**:
+    spec 的 Problem 词表里有 500 短码(`internal_error` / `query_failed` /
+    `create_failed` / `update_failed` / `delete_failed`),但除
+    providers / model-health 列表与 `adminCreateRedemptionCodes` 外,
+    **绝大多数 op 的响应枚举没有 5xx 变体** —— 旧实现"DB 锁中毒 / SQL
+    失败 → 500"在新契约下无法表达。过渡期各批统一折衷(勿当定案):
+    **fail-closed 映射到枚举可得的非 401 变体**(Admin 批 403/400/404;
+    User 批写路径 400、删除 404;`getCurrentUser` 的 404 系旧行为),
+    body `code` 保留真实 500 词表短码、`status` 与 HTTP 一致(RFC 9457
+    自洽),`tracing::error!` 留痕。逐 op 对照见各 impl 文件头
+    (`crates/aikun-admin/src/{admin_users,admin_billing,admin_providers,user}.rs`)。
+    **已知副作用**:`listApiKeys` / `getWalletStats` / `listPublicPrices`
+    三个 op 枚举只有 Unauthorized 变体,存储故障只能回 401(body
+    code=`internal_error`)—— 前端 core.js 对任何 401 清 token 踢会话,
+    DB 抖动会误杀登录态;`login` 同为 fail-closed 401(踩坑 #2,但登录
+    页 401 不触发踢会话,影响小)。**根治需 spec 为相关 op 补 5xx 响应后
+    重生成**,各批 notes 已上报待人工裁决;裁决前客户端不得把上述
+    4xx/401 当作终态契约。另:providers PATCH 的读-改-写原子性由
+    aikun-admin 服务级串行锁对并发 PATCH 互斥恢复;不走该服务的写者
+    (后台健康检查/自动禁用)仍可能在读与写之间穿插,同锁事务语义待
+    阶段 3 store 收编时由原子端口方法回归。

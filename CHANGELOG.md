@@ -8,7 +8,51 @@
 ## [Unreleased]
 
 `refactor/modular-gateway` 分支,对应 roadmap-v0.5 阶段 0(可作为 0.4.5 发布)与阶段 1;
-另含 architecture-v0.5 结构迁移首批(workspace 根包变体 + API spec / 生成管线,无运行时行为变化)。
+另含 architecture-v0.5 结构迁移:workspace 根包变体 + API spec / 生成管线(首批,无运行时
+行为变化),以及**管理面 API spec-first 重建全批落地(行为变化,见下节;版本升至 0.5.0)**。
+
+### 变更(管理面 API spec-first 重建,plan 步骤 6;对外行为变化)
+
+管理面(登录 / 用户自助 / 管理员三层)按 `openapi.yaml` 全量迁移到
+`crates/aikun-admin` + 生成路由,旧 `/api/admin/**` handler 与旧用户自助路径已删除,
+内嵌前端同步切换。逐条对照(旧 → 新)见 `docs/api-mapping.md`。
+
+- **路径**:去掉 `/admin` 段并资源化 —— `POST /api/login` → `/api/auth/login`、
+  `GET /api/me` → `/api/users/me`、`GET /api/wallet` → `/api/users/me/wallet`、
+  `POST /api/wallet/redeem` → `/api/users/me/redemptions`、`GET /api/prices`(用户
+  只读价目)→ `/api/models/prices`(与管理端 `/api/prices` CRUD 分流,同路径语义
+  翻转消除)、`GET /api/version` → `/api/system/version`、
+  `GET /api/admin/stats` → `/api/system/stats`、其余 `/api/admin/x` → `/api/x`;
+  动作端点转子资源(tests / model-tests / duplicates / balance-transactions,
+  兑换码禁用转 `DELETE`)。
+- **状态码**:创建统一 **201**(兑换、调账、渠道/模型探测);删除统一 **204**
+  (api-keys / users / providers / prices / redemption-codes;用户删除仍是软禁用);
+  api-keys / users / providers 的 **PATCH 返回更新后的资源**(旧 `{message:'updated'}`);
+  providers 批量创建**统一 200**(旧全败 400 / 部分 201),成败全在 body;
+  删除/禁用最后一个活跃管理员 `400 last_admin` → **`409 last_admin`**。
+- **列表信封**:统一 `{items, total}` + `limit/offset` 分页(默认 50,clamp 1..=200;
+  目录/聚合单例外)。
+- **错误体**:管理面全部非 2xx(含装配层 401/403)改 **RFC 9457 problem+json**
+  `{type,title,status,detail,code}`(旧 `{error,message}`);短码归一:登录 429
+  `too_many_attempts` → **`rate_limited`**、`GET /api/me` 404 `user_not_found` →
+  `not_found`、批量失败项字段 `error` → `code`。请求体校验由生成路由承担:
+  缺必填字段 422 `request_validation_failed`、坏 JSON 400 `malformed_request`
+  (旧 axum 裸 422 归一到统一错误体)。`/v1/**` 代理面错误体**不变**。
+- **429 补 `Retry-After` 头**(登录、兑换;建议重试秒数)。
+- **5xx→4xx 过渡映射(spec 缺口,勿当终态)**:生成响应枚举绝大多数 op 无 5xx
+  变体,旧"DB 故障 → 500 internal_error/query_failed"过渡期 fail-closed 映射为
+  枚举可得的 4xx(Admin 批 403/400/404、User 批写 400/删 404),body `code`
+  保留真实 500 词表短码;`listApiKeys` / `getWalletStats` / `listPublicPrices`
+  / `login` 四 op 仅退 401(body code=`internal_error`)—— 前端对 401 会清
+  token,存储抖动可能误杀会话,待 spec 补 5xx 后重生成根治
+  (详见 `docs/api-mapping.md` 备注 13)。
+- **providers PATCH 原子性**:并发 PATCH 由服务级串行锁互斥(读库存 → 最终状态
+  联动校验 → UPDATE 全程排队),等价旧实现持锁全程的管理端写互斥。
+- **版本门禁**:二进制版本 0.4.4 → **0.5.0**;按 spec 生成的客户端以
+  `GET /api/system/version` 主次版本 ≥ 0.5 判定兼容(api-mapping 备注 11)。
+- e2e:旧管理面 / 用户自助用例随旧 handler 删除,新路径用例落位
+  `aikun/tests/e2e_{auth,user,admin_users,admin_providers,admin_billing}.rs`
+  (核心行为锚点——登录链路 / 计费 / 兑换——断言不减,按 plan 步骤 9 政策迁移)。
 
 ### 修复(阶段 0,行为变化)
 

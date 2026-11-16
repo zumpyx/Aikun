@@ -112,14 +112,25 @@ aikun-channels   aikun-openapi (axum/serde,不依赖任何兄弟 crate)
 
 **进度(2026-11-16 首批落地)**:本次落地是**根包 + workspace 变体**——workspace 已在根 `Cargo.toml` 声明,但二进制仍在根包、**尚未移入 `aikun/`**,完整迁移移到后续步骤;生成器为 openapi-to-rust(非最初设想的 Java 系官方生成器,见决策 3)。后续完整清单与逐步验收标准见 `docs/plan-next-steps.md`。
 
+**进度更新(2026-11-17 回写,plan 步骤 2–8 全部落地)**:workspace 已完整化(根
+`Cargo.toml` 为虚拟清单,`members = ["aikun", "crates/*"]`,`default-members = ["aikun"]`,
+二进制移入 `aikun/`);protocol / channels / admin / store 四个 crate 就位;管理面
+API 全部 tag 迁移完成——`grep -rn "api/admin" aikun/src/` 仅余注释、前端
+`grep -rn "/api/admin" aikun/src/frontend/` 归零,旧 handler 删除;对外行为变化已
+单列 CHANGELOG(路径 / 201/204 / PATCH 回资源 / problem+json / batch 200 /
+last_admin 409 / 429 码与 Retry-After / 5xx→4xx 过渡映射),二进制版本升 **0.5.0**
+(版本门禁可用,api-mapping 备注 11)。e2e 拆分为 `e2e_{auth,user,admin_users,
+admin_providers,admin_billing,store}.rs` + `e2e.rs`(旧管理面用例随旧 handler
+删除,按 plan 步骤 9 政策),全绿以 CI 门禁为准。
+
 | # | 步骤 | 状态 | 说明 |
 |---|---|---|---|
-| 1 | workspace 化 | 🟡 根包变体已落地 | 根 `Cargo.toml` 已声明 `[workspace]`(`members = ["crates/*"]`,`resolver = "3"`),生成 crate 进门禁。**二进制未移入 `aikun/`**(包名 `aikun` 与构建产物路径不变,CI/release/Dockerfile 均未动)——完整迁移是后续步骤 |
-| 2 | protocol crate 拆出(机械) | ⏳ 未开始 | |
-| 3 | channels crate 拆出(机械) | ⏳ 未开始 | |
-| 4 | spec 设计 → 生成 crate → 生成管线 → CI 守卫 | 🟡 前三项已落地,守卫未上 | `openapi.yaml`(OpenAPI 3.2.1 全景 spec:管理面三层 tag + `/v1` 仅文档)+ 逐条对照 `docs/api-mapping.md` 已落地待评审;`crates/aikun-openapi/`(openapi-to-rust **0.24.0 钉版**,43 op 白名单,约 8.0k 行生成物,零手写零测试)已入 workspace;`scripts/gen-api.sh` 可复现生成管线已就位。**CI regenerate 守卫 job 未上**,排后续步骤 |
-| 5 | 逐 tag 迁移:providers → prices → users → logs → redemption…,每 tag 一批,存量 handler 删一批;`aikun-admin` 依赖 `aikun-store`(或过渡期 db 模块) | ⏳ 未开始 | 试点批次建议 Auth(3 op、无 DB 依赖,风险最小),详见 `docs/plan-next-steps.md` |
-| 6 | store crate 落位(阶段 3,与缓存/计数器同阶段) | ⏳ 未开始 | |
+| 1 | workspace 化 | ✅ 已完整化(2026-11-16 首批根包变体 → 同日步骤 3 移入 `aikun/`) | 虚拟清单 `members = ["aikun", "crates/*"]` + `default-members = ["aikun"]`,根目录裸 cargo 行为不变 |
+| 2 | protocol crate 拆出(机械) | ✅ 已落地(plan 步骤 4,含 9.1 契约测试雏形:非流式双向黄金样本 + 官方 spec 快照) | |
+| 3 | channels crate 拆出(机械) | ✅ 已落地(plan 步骤 5,apply_auth 改 auth_headers 纯数据签名) | |
+| 4 | spec 设计 → 生成 crate → 生成管线 → CI 守卫 | ✅ 全部落地 | `openapi.yaml` + `docs/api-mapping.md` 对照;`crates/aikun-openapi/`(openapi-to-rust 0.24.0 钉版,43 op 白名单,零手写零测试);`scripts/gen-api.sh`;**CI regenerate 守卫 job 已上**(`ci.yml`) |
+| 5 | 逐 tag 迁移:providers → prices → users → logs → redemption…,每 tag 一批,存量 handler 删一批;`aikun-admin` 依赖 `aikun-store`(或过渡期 db 模块) | ✅ 全批完成(2026-11-16/17) | Auth 试点 → User / Providers / Billing / Stats 各批;旧 `/api/admin/**` 路由与旧用户自助 handler 清零,前端切换完成;行为变化单列 CHANGELOG;版本门禁 0.5.0 满足 |
+| 6 | store crate 落位(阶段 3,与缓存/计数器同阶段) | ✅ 已落地(plan 步骤 8 / roadmap 阶段 3) | `crates/aikun-store`(pool / schema / 行映射 / 静态加密 / 口令哈希 / 默认价格播种 / `api_key_usage_daily` 日用量计数器);`grep conn.lock() aikun/src/api/` 归零;渠道 registry 快照、价格表缓存世代失效同批落位。`scripts/bench.js` 对比以 CI / 人工复跑为准 |
 | 7 | 阶段 2(pipeline 显式化)与上述 1–3 无冲突,可并行推进 | — | |
 
 本次落地验证(2026-11-16 实跑):`cargo check -p aikun-openapi --locked` 通过;`cargo fmt --all --check` 通过;`crates/aikun-openapi/Cargo.toml` 直接依赖无 reqwest / rusqlite / tokio(axum 的 `tokio` feature 系服务端脚手所需,经由 axum 引入,非直接依赖)。

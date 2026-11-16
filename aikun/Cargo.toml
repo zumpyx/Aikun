@@ -1,6 +1,9 @@
 [package]
 name = "aikun"
-version = "0.4.4"
+# 0.5.0:管理面 API spec-first 迁移全部批次完成(plan 步骤 6 验收末条:
+# GET /api/system/version 主次版本 ≥ 0.5,按 spec 生成的客户端门禁才
+# 不会拒绝本二进制;api-mapping 备注 11)。发布整理仍是 roadmap 阶段 4。
+version = "0.5.0"
 edition = "2024"
 description = "A lightweight AI gateway with multi-provider aggregation, failover, and routing optimization"
 # 二进制 crate:装配与运行时(pipeline/channel/billing/api/db);结构见 docs/architecture-v0.5.md

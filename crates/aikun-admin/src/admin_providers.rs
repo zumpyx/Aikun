@@ -20,10 +20,15 @@
 //!   `CreatedStream(Sse<ServerEventStream>)` 骨架;事件内容由
 //!   [`ProviderProbes::probe_model_stream`] 的适配器手工产出(事件契约
 //!   见该方法文档;architecture-v0.5 §三.4:管理面 SSE 事件内容永不类型化)。
-//! * **PATCH 的读-改-写不再是同一把写锁**:旧实现在持写锁全程内完成
-//!   "读库存 → 校验最终状态 → UPDATE";端口化后为三段调用,并发 PATCH
-//!   同一渠道存在校验窗口(管理端低频操作,风险可接受;阶段 3 store
-//!   收编时可回归事务语义)。
+//! * **PATCH 的读-改-写原子性(复审后已恢复 PATCH×PATCH 串行)**:旧实现
+//!   在持写锁全程内完成"读库存 → 校验最终状态 → UPDATE";端口化后拆成
+//!   多段端口调用,并发 PATCH 一度存在校验窗口(最终状态联动校验可能放
+//!   行本应拒绝的组合)。现由 [`AdminProvidersService::patch_lock`]
+//!   (服务级 tokio Mutex)把整个"查重 → 读库存 → 联动校验 → UPDATE →
+//!   回读"串行化,等价于旧实现对并发管理端写的互斥。**仍非事务**:
+//!   不走本服务的写者(后台健康检查 / 自动禁用)仍可能在"读库存 →
+//!   UPDATE"之间穿插;完整同锁事务语义等阶段 3 store 收编时由原子端口
+//!   方法回归(记 notes 待集成工人/裁决)。
 //!
 //! # 过渡期端口(aikun-store 就位前)
 //!
@@ -329,11 +334,21 @@ pub trait ProviderProbes: Send + Sync + 'static {
 pub struct AdminProvidersService {
     store: Arc<dyn ProviderStore>,
     probes: Arc<dyn ProviderProbes>,
+    /// PATCH 读-改-写串行锁(见文件头):并发 PATCH 经同一服务实例排队,
+    /// 恢复旧实现"持锁全程读→校验→写"对管理端写的互斥。`Arc` 共享——
+    /// clone 出的服务副本(路由工厂会克隆)必须落在同一把锁上。tokio
+    /// Mutex 可跨 .await 持有(管理端低频,排队无感);不走本服务的写者
+    /// 不受此锁约束(完整事务语义待 store 收编)。
+    patch_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AdminProvidersService {
     pub fn new(store: Arc<dyn ProviderStore>, probes: Arc<dyn ProviderProbes>) -> Self {
-        Self { store, probes }
+        Self {
+            store,
+            probes,
+            patch_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 }
 
@@ -342,6 +357,7 @@ impl Clone for AdminProvidersService {
         Self {
             store: Arc::clone(&self.store),
             probes: Arc::clone(&self.probes),
+            patch_lock: Arc::clone(&self.patch_lock),
         }
     }
 }
@@ -988,6 +1004,11 @@ impl AdminProvidersService {
         provider_id: String,
         body: UpdateProviderRequest,
     ) -> AdminUpdateProviderResponse {
+        // 读-改-写全程串行(见文件头"PATCH 的读-改-写原子性"):锁覆盖
+        // "key 查重 → 读库存 → 最终状态联动校验 → UPDATE → 回读",
+        // 并发 PATCH 不再存在校验窗口。守卫活到函数尾(管理端低频,纯
+        // 校验代码持锁无感)。
+        let _patch_serial = self.patch_lock.lock().await;
         let bad = |code: &str, detail: &str| {
             AdminUpdateProviderResponse::BadRequest(problem(400, code, detail))
         };

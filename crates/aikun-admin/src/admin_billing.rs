@@ -30,7 +30,8 @@
 //! (spec 的 Problem 词表里有这些 500 码,却只在 providers/model-health/
 //! redemption-codes 三个 op 挂了 500 响应)。**过渡期映射**(HTTP 状态按
 //! 枚举可得变体妥协,body `code` 保留真实短码、`status` 与 HTTP 一致,
-//! RFC 9457 自洽;补 500 变体需 spec 改动后重生成):
+//! RFC 9457 自洽;补 500 变体需 spec 改动后重生成;全管理面各批的
+//! 汇总对照见 `docs/api-mapping.md` 备注 13,CHANGELOG 已单列):
 //!
 //! | op | 旧 5xx 码 | 过渡期变体 |
 //! |---|---|---|

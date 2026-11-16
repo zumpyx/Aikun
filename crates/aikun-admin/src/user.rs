@@ -38,11 +38,18 @@
 //! # 已知 spec 缺口(裁决前按折衷处理,均已记 notes 上报)
 //!
 //! * **User tag 全部响应枚举无 5xx 变体**(`errors.rs`):旧实现
-//!   "DB 锁中毒/查询失败 → 500 query_failed" 无法表达。折衷(与 Auth
-//!   试点批踩坑 #2 同族):fail-closed 401 `invalid_token` +
-//!   `tracing::error!` 留痕——不泄漏内部状态,也绝不静默回空列表/假资源。
-//!   get_current_user 例外:旧行为本就是"任何查询错误 → 404"
-//!   (aikun/src/api/auth.rs:54-58),按 404 保留。
+//!   "DB 锁中毒/查询失败 → 500 internal_error / query_failed"
+//!   (基线 aikun/src/api/auth.rs、logs.rs、redemption.rs)无法表达。
+//!   过渡映射与 admin_users / admin_billing 批同策(api-mapping 备注 13):
+//!   **非 401 变体优先**(写路径 400、删除 404,均 fail-closed +
+//!   `tracing::error!` 留痕),body `code` 保留真实短码 `internal_error`
+//!   ——绝不静默回空列表/假资源。**401 会误杀会话**(前端 core.js 对
+//!   任何 401 清 token 踢回登录页),所以仅当枚举只有 Unauthorized
+//!   变体(list_api_keys / get_wallet_stats / list_public_prices 三个)
+//!   才退 401,且 body `code` 用 `internal_error` 而非 `invalid_token`
+//!   (不冒充凭证问题);这三个 op 的会话误杀要等 spec 补 5xx 变体重
+//!   生成后才能根治。get_current_user 例外:旧行为本就是"任何查询
+//!   错误 → 404"(基线 aikun/src/api/auth.rs:54-58),按 404 保留。
 //! * **success 非 0/1 的 400 短码**:spec 示例 `invalid_success`,但生成
 //!   路由把枚举解码失败拦成 400 `malformed_parameter`,impl 永远见不到
 //!   非法值(e2e_user.rs 按实测锚定)。
@@ -50,10 +57,10 @@
 //!   "ID 拍板为不透明 string"(api-mapping 备注 2)冲突:现网这三列是
 //!   UUID 字符串。impl 按可解析则出数值、否则显式 null 处理,待 spec 修
 //!   正为 string。
-//! * **/api 管理面 401 响应体**:由二进制 auth_middleware 产生,当前是旧
-//!   扁平体 `{error,message}`(spec 要求 problem+json)。属装配层议题:
-//!   要么 auth_middleware 对 /api/* 输出 problem+json,要么 spec 让步;
-//!   本文件不做额外包装(避免双层信封)。
+//! * **/api 管理面 401/403 响应体**:由二进制 auth_middleware 产生,已
+//!   实现 problem+json(`auth/mod.rs::auth_error`,RFC 9457;main.rs
+//!   Admin tag 装配注释亦确认归一),与生成路由错误体一致,本文件无需
+//!   再包装(避免双层信封)。/v1 代理面 401 维持旧扁平体(契约冻结)。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -113,6 +120,14 @@ fn current_auth() -> Option<UserAuth> {
 /// 统一的 401 problem 体(spec Unauthorized 示例口径)。
 fn invalid_token() -> Problem {
     problem(401, "invalid_token", "Invalid or expired token")
+}
+
+/// 存储不可用时的 problem 体(过渡期映射,见文件头"已知 spec 缺口"):
+/// 响应枚举缺 5xx 变体,HTTP 状态按各 op 枚举可得变体妥协,`code` 保留
+/// 真实短码(与 admin_users / admin_billing 批同策,api-mapping 备注 13)。
+/// `status` 只能取该 op 枚举里存在的变体状态码。
+fn store_down(status: u16) -> Problem {
+    problem(status, "internal_error", "存储不可用,请稍后再试")
 }
 
 // ---------- 过渡期存储端口 ----------
@@ -620,7 +635,9 @@ impl<S: UserStore> UserApi for UserService<S> {
             }),
             None => {
                 tracing::error!("list_api_keys: store unavailable (db lock poisoned?)");
-                ListApiKeysResponse::Unauthorized(invalid_token())
+                // 枚举只有 Unauthorized 变体(文件头):退 401,但 code 用
+                // internal_error,不冒充凭证问题。
+                ListApiKeysResponse::Unauthorized(store_down(401))
             }
         }
     }
@@ -681,7 +698,8 @@ impl<S: UserStore> UserApi for UserService<S> {
             }),
             None => {
                 tracing::error!("create_api_key: insert failed for user {}", auth.username);
-                CreateApiKeyResponse::Unauthorized(invalid_token())
+                // 写路径:400 + 真实短码(文件头过渡映射,避免 401 误杀会话)。
+                CreateApiKeyResponse::BadRequest(store_down(400))
             }
         }
     }
@@ -755,7 +773,8 @@ impl<S: UserStore> UserApi for UserService<S> {
             Some(None) => UpdateApiKeyResponse::NotFound(problem(404, "not_found", "资源不存在")),
             None => {
                 tracing::error!("update_api_key: store unavailable (db lock poisoned?)");
-                UpdateApiKeyResponse::Unauthorized(invalid_token())
+                // 写路径:400 + 真实短码(文件头过渡映射,避免 401 误杀会话)。
+                UpdateApiKeyResponse::BadRequest(store_down(400))
             }
         }
     }
@@ -790,7 +809,9 @@ impl<S: UserStore> UserApi for UserService<S> {
             Some(_) => DeleteApiKeyResponse::NotFound(problem(404, "not_found", "资源不存在")),
             None => {
                 tracing::error!("delete_api_key: store unavailable (db lock poisoned?)");
-                DeleteApiKeyResponse::Unauthorized(invalid_token())
+                // 删除幂等语义(同 admin_delete_provider):404 + 真实短码,
+                // "当作未确认删除"最不误导,也避免 401 误杀会话。
+                DeleteApiKeyResponse::NotFound(store_down(404))
             }
         }
     }
@@ -832,7 +853,8 @@ impl<S: UserStore> UserApi for UserService<S> {
             }),
             None => {
                 tracing::error!("list_logs: store unavailable (db lock poisoned?)");
-                ListLogsResponse::Unauthorized(invalid_token())
+                // 枚举无非 401 变体外的 5xx:400 + 真实短码(文件头过渡映射)。
+                ListLogsResponse::BadRequest(store_down(400))
             }
         }
     }
@@ -874,7 +896,8 @@ impl<S: UserStore> UserApi for UserService<S> {
             }),
             None => {
                 tracing::error!("get_log_stats: store unavailable (db lock poisoned?)");
-                GetLogStatsResponse::Unauthorized(invalid_token())
+                // 同 list_logs:400 + 真实短码(文件头过渡映射)。
+                GetLogStatsResponse::BadRequest(store_down(400))
             }
         }
     }
@@ -901,7 +924,8 @@ impl<S: UserStore> UserApi for UserService<S> {
             .and_then(|r| r.ok());
         let Some(snap) = snapshot else {
             tracing::error!("get_wallet_stats: store unavailable (db lock poisoned?)");
-            return GetWalletStatsResponse::Unauthorized(invalid_token());
+            // 枚举只有 Unauthorized 变体(文件头):退 401 + internal_error。
+            return GetWalletStatsResponse::Unauthorized(store_down(401));
         };
 
         let (mut month_cost, mut month_tok, mut month_req) = (0i64, 0i64, 0i64);
@@ -1008,10 +1032,12 @@ impl<S: UserStore> UserApi for UserService<S> {
             }
             // 无效/已用/已禁用/已过期统一 400 不细分(防枚举)。
             Some(None) => invalid(),
-            // 存储不可用:不计失败(不是用户的错),fail-closed 401 + 留痕。
+            // 存储不可用:不计失败(不是用户的错);fail-closed 400 + 真实
+            // 短码(文件头过渡映射)——不走 401,避免 DB 抖动误杀会话
+            //(core.js 对任何 401 清 token 踢回登录页)。
             None => {
                 tracing::error!("redeem_code: store unavailable (db lock poisoned?)");
-                RedeemCodeResponse::Unauthorized(invalid_token())
+                RedeemCodeResponse::BadRequest(store_down(400))
             }
         }
     }
@@ -1050,7 +1076,9 @@ impl<S: UserStore> UserApi for UserService<S> {
             }
             None => {
                 tracing::error!("list_public_prices: store unavailable (db lock poisoned?)");
-                ListPublicPricesResponse::Unauthorized(invalid_token())
+                // 枚举只有 Unauthorized 变体(文件头):退 401 + internal_error;
+                // 会话误杀需 spec 补 5xx 后重生成才能根治(记 notes 待裁决)。
+                ListPublicPricesResponse::Unauthorized(store_down(401))
             }
         }
     }

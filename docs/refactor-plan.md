@@ -1,9 +1,9 @@
 # Aikun 重构方案与进度(refactor/modular-gateway)
 
-> 状态:roadmap-v0.5 **阶段 0 与阶段 1(结构重组)已完成**;阶段 1 补入的协议契约测试尚未做;阶段 2–4 未开始。
-> 结构迁移(architecture-v0.5 §五)2026-11-16 首批落地:**根包变体 workspace**(根 `Cargo.toml` 声明 `[workspace] members = ["crates/*"]`,二进制仍在根包未移入 `aikun/`)、`openapi.yaml` 全景 spec、`crates/aikun-openapi` 生成 crate(openapi-to-rust 0.24.0)、`scripts/gen-api.sh` 生成管线;CI 门禁改 `--workspace`。protocol / channels 拆分、admin tag 迁移与 CI regenerate 守卫未做——完整清单与验收标准见 `docs/plan-next-steps.md`。
-> 第 9 节最佳实践已写入对应阶段任务,代码尚未实施。
-> 分支 `refactor/modular-gateway`,`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 零告警,`cargo test --locked` 全绿(148 单测 + 42 e2e;基线 v0.4.4 为 130 + 38)。
+> 状态:roadmap-v0.5 **阶段 0 与阶段 1(结构重组)已完成**(阶段 1 遗留的协议契约测试已随结构迁移步骤 4 落雏形:非流式双向黄金样本 + 官方 spec 快照,流式样本仍留阶段 2);**阶段 3 已随 plan 步骤 8 主体落地**(见 7.4);阶段 2、4 未开始。
+> 结构迁移(architecture-v0.5 §五)**步骤 2–8 已全部落地**(2026-11-17 回写):workspace 完整化(虚拟清单 `members = ["aikun", "crates/*"]`,二进制移入 `aikun/`)、`crates/aikun-protocol` / `aikun-channels` / `aikun-admin` / `aikun-store` 四 crate 就位、CI regenerate 守卫已上;**管理面 API 全部 tag 完成 spec-first 迁移**——旧 `/api/admin/**` 与旧用户自助 handler 删除、前端切换完成,行为变化单列 CHANGELOG,二进制版本升 **0.5.0**(版本门禁可用)。完整清单与验收标准见 `docs/plan-next-steps.md`。
+> 第 9 节最佳实践已写入对应阶段任务;除 9.7 的部分缓存约束与 9.1 非流式样本外,代码尚未实施。
+> 分支 `refactor/modular-gateway`,`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 零告警;阶段 0/1 完成时 `cargo test --locked` 全绿(148 单测 + 42 e2e;基线 v0.4.4 为 130 + 38)。结构迁移后 e2e 拆为 `e2e.rs` + 6 个 tag 独立目标(静态统计 65 个 `#[tokio::test]`),全绿以 CI 门禁为准。
 >
 > **优先级:`docs/roadmap-v0.5.md`(阶段与纪律)> `docs/architecture-v0.5.md`(目标结构)> 本文。** 冲突时按此序裁决;本文只记录落地方式、未覆盖的用户需求,以及各条目的进度。结构类决策(多 crate workspace、admin API spec-first、channels crate)见 architecture-v0.5.md 的决策记录。
 >
@@ -245,7 +245,7 @@ pub trait ChannelAdapter: Send + Sync + 'static {
 | `RequestLog.cost` 改 `i64` | ✅ |
 | 验收:`src/protocol/` 无 `&'static str` 协议标识 | ✅ 剩余的 `&'static str` 都是 stop_reason / 错误类型映射与 `Protocol::as_str` |
 | 验收:加入假协议后编译器在所有 match 处报错 | ✅ 人工验证 18 处 E0004 |
-| 协议契约测试:黄金样本 + 完整输出比对(第 9.1 节) | ⏳ **未做**(阶段 1 结构重组已完成,本条为确认后补入)。先建 `tests/fixtures/`、补齐非流式 OpenAI ↔ Anthropic 样本;流式样本与 SSE 完整比对放到阶段 2 |
+| 协议契约测试:黄金样本 + 完整输出比对(第 9.1 节) | 🟡 雏形已随结构迁移步骤 4 落地(`crates/aikun-protocol/tests/`:非流式 OpenAI ↔ Anthropic 双向黄金样本 + OpenAI 官方 spec 快照 f437d0ec);流式样本与 SSE 完整比对放到阶段 2 |
 
 ### 7.3 阶段 2:管线显式化(未开始)
 
@@ -265,18 +265,18 @@ pub trait ChannelAdapter: Send + Sync + 'static {
 | 收紧响应缓存约束(第 9.7 节) | ⏳ | 键必须含租户或 API Key;带 `tools` 或图片默认不缓存;评估 `global` 作用域 |
 | 管线各单元单测;协议契约测试补齐流式样本(第 9.1 节) | ⏳ | 流式黄金样本比对 SSE 事件顺序、`tool_calls` 分片、`usage` |
 
-### 7.4 阶段 3:性能与状态归位(未开始)
+### 7.4 阶段 3:性能与状态归位(主体已随 plan 步骤 8 落地,2026-11-17 回写)
 
 | 条目 | 状态 | 说明 |
 |---|---|---|
-| `channel/registry.rs` 渠道快照;`selector` 改为吃快照的纯函数 | ⏳ | 加「缓存与 DB 一致」防御测试:管理端改渠道后下一请求必须看到新配置 |
-| 价格表缓存,CRUD 时失效 | ⏳ | |
-| 日额度计数器表,与记账同事务 UPSERT | ⏳ | 热路径仍同事务更新 |
-| 计费幂等与对账(第 9.3 节) | ⏳ | 以 `request_id` 为键的用量记录必须幂等;日计数器可从明细重建 |
-| 按渠道熔断(第 9.5 节) | ⏳ | 连续失败 N 次后冷却期内跳过该渠道;状态挂在进程内快照上,不取代自动禁用 |
-| `state.rs` Limiter,合并 AppState 的 5 个 HashMap | ⏳ | |
-| `store/` 仓储层;`api/` 下 `conn.lock()` 清零 | ⏳ | |
-| 价格播种从 db 层移到启动编排层 | ⏳ | |
+| `channel/registry.rs` 渠道快照;`selector` 改为吃快照的纯函数 | ✅ | 选路零全表扫描 / 零逐行解密 / 零重复 JSON 解析;快照失效 = 表令牌 + 世代计数器双口径(世代覆盖不改 `updated_at` 的写)。防御测试 `e2e_store.rs::admin_provider_patch_takes_effect_on_next_request` |
+| 价格表缓存,CRUD 时失效 | ✅ | 价格 CRUD 成功即递增缓存世代(`aikun_admin::admin_billing::bump_price_table_epoch`);防御测试 `e2e_store.rs::admin_price_update_takes_effect_on_next_billing` |
+| 日额度计数器表,与记账同事务 UPSERT | ✅ | `api_key_usage_daily` 计数器点查(admission),写入在 `billing/ledger.rs`(与日志 + 扣费同事务),可从明细幂等重建;一致性测试 `e2e_store.rs::daily_usage_counter_matches_request_log_sum` |
+| 计费幂等与对账(第 9.3 节) | 🟡 | 日计数器可从明细重建已落;以 `request_id` 为键的用量写入幂等(重试 / 断开 / 崩溃不双扣)尚未见实现 |
+| 按渠道熔断(第 9.5 节) | ⏳ | 连续失败 N 次后冷却期内跳过该渠道;未做 |
+| `state.rs` Limiter,合并 AppState 的 5 个 HashMap | ⏳ | AppState 仍是 5 个独立 `Arc<Mutex<HashMap>>`(main.rs) |
+| `store/` 仓储层;`api/` 下 `conn.lock()` 清零 | ✅ | `crates/aikun-store`(pool / schema / 行映射 / 静态加密 / 口令哈希 / 默认价格);`grep conn.lock() aikun/src/api/` 归零 |
+| 价格播种从 db 层移到启动编排层 | ✅ | 随 store 收编(`aikun-store/pricing.rs` + `default_prices.json`),db 模块不再反向播种 |
 
 ### 7.5 阶段 4:收尾与验证(未开始)
 
