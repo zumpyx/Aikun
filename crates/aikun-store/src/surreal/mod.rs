@@ -411,6 +411,10 @@ pub const SCHEMA_SURQL: &str = r#"
     DEFINE INDEX IF NOT EXISTS idx_request_log_created ON TABLE request_log FIELDS created_at;
     DEFINE INDEX IF NOT EXISTS idx_request_log_key_created ON TABLE request_log FIELDS api_key, created_at;
 
+    // ---- 计费幂等哨兵(9.3):record id = request_id;用量行只落一次 ----
+    DEFINE TABLE IF NOT EXISTS request_ledger_dedup SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS created_at ON TABLE request_ledger_dedup TYPE datetime DEFAULT time::now();
+
     // ---- 模型价格(每 1M tokens 的价格,元;cached 为空 = 按输入价计) ----
     DEFINE TABLE IF NOT EXISTS model_price SCHEMAFULL;
     DEFINE FIELD IF NOT EXISTS model ON TABLE model_price TYPE string;

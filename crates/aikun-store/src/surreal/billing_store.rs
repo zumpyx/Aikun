@@ -851,11 +851,46 @@ impl BillingStore for SurrealBilling {
         // * api_key 为 None(JWT/被降级)不计计数器;
         // * 关联列直接写 record 链接,不做 EXISTS 预检(无强制 FK,
         //   dangling 由 query_logs 读侧降级,见文件头)。
+        //
+        // 9.3 计费幂等:用量行(total_tokens > 0 且带 request_id)以
+        // request_id 为键**只落一次**——重复落账(StreamAbortGuard 与正常
+        // 收尾赛跑、崩溃恢复重放、重试链重复投递)不产生第二行用量、
+        // 不重复扣费/累加计数器。实现:事务外预检哨兵表(挡常见路径)
+        // + 事务首句 INSERT 哨兵(唯一键冲突 → 服务器端整体回滚,兜住
+        // 预检与提交之间的竞态窗口,绝不双扣)。零用量失败行不占键:
+        // 同请求多次 attempt 的失败日志各留一行(9.3 口径:幂等的是
+        // "用量记录",不是失败审计)。
+        let dedup_rid = if entry.total_tokens > 0 {
+            entry
+                .request_id
+                .as_deref()
+                .map(|r| rid("request_ledger_dedup", r))
+        } else {
+            None
+        };
+        if let Some(dup) = &dedup_rid {
+            let mut res = self
+                .run(
+                    "SELECT VALUE id FROM request_ledger_dedup WHERE id = $d LIMIT 1;",
+                    &binds(vec![("d", dup.clone().into_value())]),
+                )
+                .await?;
+            let existing: Option<serde_json::Value> = res.take(0).map_err(failed)?;
+            if existing.is_some() {
+                return Ok(()); // 幂等命中:该 request_id 的用量已落账
+            }
+        }
         let key_rid = entry.api_key_id.as_deref().map(|k| rid("api_key", k));
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let mut sql = String::from(
-            "BEGIN TRANSACTION;\
-             \nINSERT INTO request_log (id, request_id, user, api_key, provider, model, \
+        let mut sql = String::from("BEGIN TRANSACTION;");
+        if dedup_rid.is_some() {
+            sql.push_str(
+                "\nINSERT INTO request_ledger_dedup (id, created_at) \
+                 VALUES ($dup, time::now());",
+            );
+        }
+        sql.push_str(
+            "\nINSERT INTO request_log (id, request_id, user, api_key, provider, model, \
               request_type, prompt_tokens, completion_tokens, total_tokens, cached_tokens, \
               latency_ms, status_code, success, error_message, cost, created_at) \
               VALUES ($rid, $reqid, $user, $key, $prov, $model, $rt, $pt, $ct, $tt, $kt, \
@@ -880,6 +915,13 @@ impl BillingStore for SurrealBilling {
             (
                 "rid",
                 RecordId::new("request_log", ulid::Ulid::new().to_string()).into_value(),
+            ),
+            (
+                "dup",
+                dedup_rid
+                    .clone()
+                    .map(|r| r.into_value())
+                    .unwrap_or(Sval::Null),
             ),
             ("reqid", entry.request_id.clone().into_value()),
             ("user", rid("user", &entry.user_id).into_value()),
@@ -2007,6 +2049,79 @@ mod tests {
             error_message: None,
             cost_micro: cost,
         }
+    }
+
+    /// 9.3 计费幂等:同一 request_id 的用量行只落一次、只扣一次费、
+    /// 计数器只累加一次;零用量失败行不占键(可多行);不同 request_id
+    /// 互不影响。
+    #[test]
+    fn surreal_record_request_idempotent_by_request_id() {
+        block_on("idem", async {
+            let s = store("idem").await;
+            mk_user(&s, "u1", 10_000_000).await;
+            mk_api_key(&s, "k1", "u1").await;
+
+            let usage = |reqid: &str, cost: i64| {
+                let mut e = entry("u1", Some("k1"), None, cost);
+                e.request_id = Some(reqid.to_string());
+                e
+            };
+            let failure = |reqid: &str| {
+                let mut e = entry("u1", Some("k1"), None, 0);
+                e.request_id = Some(reqid.to_string());
+                e.total_tokens = 0;
+                e.success = false;
+                e.status_code = 502;
+                e
+            };
+
+            // 首次落账:扣 500,计数器 150。
+            s.record_request(usage("idem-req-1", 500)).await.unwrap();
+            assert_eq!(user_balance(&s, "u1").await, 10_000_000 - 500);
+            assert_eq!(
+                s.key_limits_and_usage("k1", chrono::Utc::now().date_naive())
+                    .await
+                    .unwrap()
+                    .tokens_spent,
+                150
+            );
+
+            // 重复落账(同 request_id):幂等命中——不双扣、不双计、不加行。
+            s.record_request(usage("idem-req-1", 500)).await.unwrap();
+            s.record_request(usage("idem-req-1", 999)).await.unwrap();
+            assert_eq!(user_balance(&s, "u1").await, 10_000_000 - 500);
+            assert_eq!(
+                s.key_limits_and_usage("k1", chrono::Utc::now().date_naive())
+                    .await
+                    .unwrap()
+                    .tokens_spent,
+                150
+            );
+            assert_eq!(count_rows(&s, "request_log").await, 1);
+
+            // 零用量失败行:不占幂等键,同 request_id 也可多行(审计语义)。
+            s.record_request(failure("idem-req-1")).await.unwrap();
+            s.record_request(failure("idem-req-1")).await.unwrap();
+            assert_eq!(count_rows(&s, "request_log").await, 3);
+            assert_eq!(user_balance(&s, "u1").await, 10_000_000 - 500);
+
+            // 失败行没建哨兵:同 id 的用量行仍被挡。
+            s.record_request(usage("idem-req-1", 1)).await.unwrap();
+            assert_eq!(count_rows(&s, "request_log").await, 3);
+            assert_eq!(user_balance(&s, "u1").await, 10_000_000 - 500);
+
+            // 不同 request_id:正常第二笔。
+            s.record_request(usage("idem-req-2", 300)).await.unwrap();
+            assert_eq!(user_balance(&s, "u1").await, 10_000_000 - 800);
+            assert_eq!(
+                s.key_limits_and_usage("k1", chrono::Utc::now().date_naive())
+                    .await
+                    .unwrap()
+                    .tokens_spent,
+                300
+            );
+            assert_eq!(count_rows(&s, "request_log").await, 4);
+        });
     }
 
     /// 9.6:request_id 落 request_log 并经 query_logs 读回(同一请求多渠道
