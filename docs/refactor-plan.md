@@ -1,8 +1,8 @@
 # Aikun 重构方案与进度(refactor/modular-gateway)
 
-> 状态:roadmap-v0.5 **阶段 0 与阶段 1(结构重组)已完成**(阶段 1 遗留的协议契约测试已随结构迁移步骤 4 落雏形:非流式双向黄金样本 + 官方 spec 快照,流式样本仍留阶段 2);**阶段 3 已随 plan 步骤 8 主体落地**(见 7.4);阶段 2、4 未开始。
+> 状态:roadmap-v0.5 **阶段 0 与阶段 1(结构重组)已完成**(阶段 1 遗留的协议契约测试已随结构迁移步骤 4 落雏形:非流式双向黄金样本 + 官方 spec 快照,流式样本仍留阶段 2);**阶段 3 已随 plan 步骤 8 主体落地**(见 7.4);**阶段 2 已于 2026-11-17 落地**(见 7.3,流式黄金样本除外);阶段 4 未开始。
 > 结构迁移(architecture-v0.5 §五)**步骤 2–8 已全部落地**(2026-11-17 回写):workspace 完整化(虚拟清单 `members = ["aikun", "crates/*"]`,二进制移入 `aikun/`)、`crates/aikun-protocol` / `aikun-channels` / `aikun-admin` / `aikun-store` 四 crate 就位、CI regenerate 守卫已上;**管理面 API 全部 tag 完成 spec-first 迁移**——旧 `/api/admin/**` 与旧用户自助 handler 删除、前端切换完成,行为变化单列 CHANGELOG,二进制版本升 **0.5.0**(版本门禁可用)。完整清单与验收标准见 `docs/plan-next-steps.md`。
-> 第 9 节最佳实践已写入对应阶段任务;除 9.7 的部分缓存约束与 9.1 非流式样本外,代码尚未实施。
+> 第 9 节最佳实践已写入对应阶段任务;阶段 2 范围内(9.2/9.4/9.6/9.7/9.8/9.9)已随 2026-11-17 落地,9.1 的流式黄金样本仍待补(见 7.3)。
 > 分支 `refactor/modular-gateway`,`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 零告警;阶段 0/1 完成时 `cargo test --locked` 全绿(148 单测 + 42 e2e;基线 v0.4.4 为 130 + 38)。结构迁移后 e2e 拆为 `e2e.rs` + 6 个 tag 独立目标(静态统计 65 个 `#[tokio::test]`),全绿以 CI 门禁为准。
 >
 > **优先级:`docs/roadmap-v0.5.md`(阶段与纪律)> `docs/architecture-v0.5.md`(目标结构)> 本文。** 冲突时按此序裁决;本文只记录落地方式、未覆盖的用户需求,以及各条目的进度。结构类决策(多 crate workspace、admin API spec-first、channels crate)见 architecture-v0.5.md 的决策记录。
@@ -247,23 +247,25 @@ pub trait ChannelAdapter: Send + Sync + 'static {
 | 验收:加入假协议后编译器在所有 match 处报错 | ✅ 人工验证 18 处 E0004 |
 | 协议契约测试:黄金样本 + 完整输出比对(第 9.1 节) | 🟡 雏形已随结构迁移步骤 4 落地(`crates/aikun-protocol/tests/`:非流式 OpenAI ↔ Anthropic 双向黄金样本 + OpenAI 官方 spec 快照 f437d0ec);流式样本与 SSE 完整比对放到阶段 2 |
 
-### 7.3 阶段 2:管线显式化(未开始)
+### 7.3 阶段 2:管线显式化(2026-11-17 落地;流式黄金样本除外)
 
-动手前先给 passthrough 现行为补 e2e 快照(超时语义、日志字段差异要么保留要么显式变更记录)。每条最佳实践的决策与验收见第 9 节。
+passthrough 现行为已由既有 e2e(`passthrough_embeddings_end_to_end` /
+`passthrough_failover_and_credential_masking`)锚定后并入管线;超时语义、
+日志字段差异均已显式记入 CHANGELOG([Unreleased] 阶段 2 节)。每条最佳实践的决策与验收见第 9 节。
 
 | 条目 | 状态 | 说明 |
 |---|---|---|
-| 定义 `RequestCtx`,收敛 14 参 / 11 参 | ⏳ | 含 ConcurrencyGuard、tried 顺序、`StreamAbortGuard` 生命周期 |
-| 拆小 `attempt_loop`(候选迭代 / 单次 attempt / 失败分类) | ⏳ | 失败分类必须落实第 9.4 节:未向客户端发出任何字节前才可换渠道 |
-| 拆小 `stream_response`(流转发 / 记账收尾 / 错误帧) | ⏳ | |
-| 流式取消与三类超时(第 9.2 节) | ⏳ | 客户端断开立即中止上游并记账已产生 token;连接超时、首字节超时、chunk 间空闲超时独立配置 |
-| passthrough 并入管线(`NoConversion + OpenAiOnly + NoStream`) | ⏳ | 删除重复实现;`grep -c "与 chat 同口径" src/` 为 0 |
-| `pipeline/error.rs` `GatewayError` | ⏳ | 统一可重试口径与客户端错误形状 |
-| `request_id` + `X-Request-Id` + tracing span(第 9.6 节) | ⏳ | span 至少含 request_id、渠道、模型、是否命中缓存、TTFT、总耗时;阶段 4 `/metrics` 从此汇总 |
-| 启动时完整校验配置(第 9.9 节) | ⏳ | 非法配置拒绝启动;三类新超时一并校验 |
-| 上游 API Key / 代理凭证全出口脱敏(第 9.8 节) | ⏳ | 日志、错误响应、span 均不得出现明文 |
-| 收紧响应缓存约束(第 9.7 节) | ⏳ | 键必须含租户或 API Key;带 `tools` 或图片默认不缓存;评估 `global` 作用域 |
-| 管线各单元单测;协议契约测试补齐流式样本(第 9.1 节) | ⏳ | 流式黄金样本比对 SSE 事件顺序、`tool_calls` 分片、`usage` |
+| 定义 `RequestCtx`,收敛 14 参 / 11 参 | ✅ | `pipeline/context.rs`:auth 维度、并发 guard、tried 顺序、取消令牌、span、计费维度;`StreamAbortGuard` 从 ctx 构造,随生成器存活,`concurrency_guard.take()` 清零 |
+| 拆小 `attempt_loop`(候选迭代 / 单次 attempt / 失败分类) | ✅ | `dispatch.rs`(候选迭代)/ `attempt.rs`(单次尝试)/ `classify.rs`(失败分类 + 9.4 边界判定 `failover_allowed`) |
+| 拆小 `stream_response`(流转发 / 记账收尾 / 错误帧) | ✅ | 生成器(转发)/ `finalize_stream`(记账收尾)/ `error_event_sequence`(错误帧,纯函数)三单元 |
+| 流式取消与三类超时(第 9.2 节) | ✅ | `AIKUN_CONNECT_TIMEOUT_SECS` / `AIKUN_TTFB_TIMEOUT_SECS` / `AIKUN_IDLE_TIMEOUT_SECS` 独立配置;断开经生成器 Drop 中止上游,499 补账不重复 |
+| passthrough 并入管线(`NoConversion + OpenAiOnly + NoStream`) | ✅ | `pipeline::passthrough_completion`;`grep -c "与 chat 同口径" aikun/src/` = 0 |
+| `pipeline/error.rs` `GatewayError` | ✅ | thiserror;`failure_kind()` 统一可重试判定,`into_response()` 统一客户端错误形状(含脱敏) |
+| `request_id` + `X-Request-Id` + tracing span(第 9.6 节) | ✅ | UUID v4 入口生成;span 字段 request_id/protocol/model/channel/cache_hit/ttft_ms/total_ms/status;`request_logs.request_id` 落库(schemafull 加字段,option 兼容旧行) |
+| 启动时完整校验配置(第 9.9 节) | ✅ | 数值与枚举非法值 panic 拒启(行为变化记 CHANGELOG);三类新超时一并校验 |
+| 上游 API Key / 代理凭证全出口脱敏(第 9.8 节) | ✅ | `redact_secrets` / `redact_json_secrets` / `provider_secrets`(transport);错误体、日志、reqwest URL 全出口,单测覆盖 |
+| 收紧响应缓存约束(第 9.7 节) | ✅ | 键按 API key 隔离(v2);tools/图片默认不缓存;`global` 串缓存风险写明 env.example |
+| 管线各单元单测;协议契约测试补齐流式样本(第 9.1 节) | 🟡 | 管线单测已补(classify/context/error/stream/cache/transport/config);**流式黄金样本未做**(属 aikun-protocol 契约测试,阶段 2 未尽事项) |
 
 ### 7.4 阶段 3:性能与状态归位(主体已随 plan 步骤 8 落地,2026-11-17 回写)
 

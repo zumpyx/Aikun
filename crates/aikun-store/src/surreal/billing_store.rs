@@ -81,6 +81,9 @@ use crate::{CacheToken, KeyUsageSnapshot, PriceRule, StoreError};
 /// cost 由调用方按进程内价格缓存折算后传入,微元)。
 #[derive(Debug, Clone)]
 pub struct RequestLedgerEntry {
+    /// 请求追踪号(网关入口生成的 UUID v4,9.6;一次多渠道重试的各次
+    /// 落账共享同一 id)。迁移旧行等历史数据无此值(库内 option)。
+    pub request_id: Option<String>,
     pub user_id: String,
     pub api_key_id: Option<String>,
     pub provider_id: Option<String>,
@@ -102,6 +105,8 @@ pub struct RequestLedgerEntry {
 #[derive(Debug, Clone)]
 pub struct LogRow {
     pub id: String,
+    /// 请求追踪号(9.6;旧行为空)。
+    pub request_id: Option<String>,
     pub user_id: Option<String>,
     pub username: Option<String>,
     pub api_key_id: Option<String>,
@@ -643,6 +648,7 @@ fn log_row(row: &serde_json::Value) -> Result<LogRow, StoreError> {
         .map(|_| bare_id(&j_str(row, "provider_id")));
     Ok(LogRow {
         id: bare_id(&j_str(row, "id")),
+        request_id: j_opt_str(row, "request_id"),
         user_id,
         username,
         api_key_id,
@@ -849,11 +855,11 @@ impl BillingStore for SurrealBilling {
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let mut sql = String::from(
             "BEGIN TRANSACTION;\
-             \nINSERT INTO request_log (id, user, api_key, provider, model, request_type, \
-              prompt_tokens, completion_tokens, total_tokens, cached_tokens, latency_ms, \
-              status_code, success, error_message, cost, created_at) \
-              VALUES ($rid, $user, $key, $prov, $model, $rt, $pt, $ct, $tt, $kt, $lat, \
-              $sc, $ok, $err, $cost, time::now());",
+             \nINSERT INTO request_log (id, request_id, user, api_key, provider, model, \
+              request_type, prompt_tokens, completion_tokens, total_tokens, cached_tokens, \
+              latency_ms, status_code, success, error_message, cost, created_at) \
+              VALUES ($rid, $reqid, $user, $key, $prov, $model, $rt, $pt, $ct, $tt, $kt, \
+              $lat, $sc, $ok, $err, $cost, time::now());",
         );
         if key_rid.is_some() {
             // 与记账同事务的日额度计数器累加(数组 id UPSERT 直位)。
@@ -875,6 +881,7 @@ impl BillingStore for SurrealBilling {
                 "rid",
                 RecordId::new("request_log", ulid::Ulid::new().to_string()).into_value(),
             ),
+            ("reqid", entry.request_id.clone().into_value()),
             ("user", rid("user", &entry.user_id).into_value()),
             ("key", key_rid.clone().into_value()),
             (
@@ -997,7 +1004,7 @@ impl BillingStore for SurrealBilling {
             .run(
                 &format!(
                     "SELECT count() AS c FROM request_log {W} GROUP ALL;\
-                     \nSELECT id, user.id AS user_id, user.username AS username, \
+                     \nSELECT id, request_id, user.id AS user_id, user.username AS username, \
                       api_key.id AS api_key_id, api_key.key_suffix AS ak_suffix, \
                       provider.id AS provider_id, provider.name AS provider_name, \
                       model, request_type, prompt_tokens, completion_tokens, total_tokens, \
@@ -1984,6 +1991,7 @@ mod tests {
         cost: i64,
     ) -> RequestLedgerEntry {
         RequestLedgerEntry {
+            request_id: None,
             user_id: user.to_string(),
             api_key_id: key.map(str::to_string),
             provider_id: prov.map(str::to_string),
@@ -1999,6 +2007,35 @@ mod tests {
             error_message: None,
             cost_micro: cost,
         }
+    }
+
+    /// 9.6:request_id 落 request_log 并经 query_logs 读回(同一请求多渠道
+    /// 重试链按它拼出);旧行/未带 id 的写入读回 None(option 语义)。
+    #[test]
+    fn surreal_request_id_round_trip() {
+        block_on("reqid", async {
+            let s = store("reqid").await;
+            mk_user(&s, "u1", 1_000).await;
+            mk_provider(&s, "p1", "prov-one").await;
+
+            let mut e = entry("u1", None, Some("p1"), 0);
+            e.request_id = Some("11111111-2222-3333-4444-555555555555".to_string());
+            s.record_request(e).await.unwrap();
+            let e2 = entry("u1", None, Some("p1"), 0);
+            s.record_request(e2).await.unwrap(); // 无 request_id(历史形态)
+
+            let (_, rows) = s.query_logs(&LogFilters::default(), 10, 0).await.unwrap();
+            assert_eq!(rows.len(), 2);
+            let with_id = rows
+                .iter()
+                .find(|r| r.request_id.as_deref() == Some("11111111-2222-3333-4444-555555555555"))
+                .expect("row with request_id");
+            assert_eq!(with_id.provider_name.as_deref(), Some("prov-one"));
+            assert!(
+                rows.iter().any(|r| r.request_id.is_none()),
+                "无 id 的写入读回 None"
+            );
+        });
     }
 
     // ---- 价格表:CRUD + 令牌 + 播种 + 通配语义 ----

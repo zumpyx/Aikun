@@ -89,13 +89,61 @@ pub fn sanitize_log_url(url: &str) -> String {
     no_creds.split('?').next().unwrap_or("").to_string()
 }
 
+/// 9.8 凭证脱敏:把文本中出现的密钥明文替换为 `***`。短于 4 个字符的
+/// "密钥"不替换(会把普通文本打烂,且无脱敏价值)。用于上游错误消息
+/// 进入日志 / request_logs / 客户端错误体前的最后一道出口过滤——
+/// one-api 系上游在 401/403 消息里常回显完整渠道 key。
+pub fn redact_secrets(text: &str, secrets: &[&str]) -> String {
+    let mut out = text.to_string();
+    for secret in secrets {
+        let s = secret.trim();
+        if s.len() < 4 {
+            continue;
+        }
+        if out.contains(s) {
+            out = out.replace(s, "***");
+        }
+    }
+    out
+}
+
+/// [`redact_secrets`] 的 JSON 版:对 JSON 值序列化后的文本做脱敏,再解析
+/// 回 JSON(上游错误体可能在任意字符串字段回显凭证)。解析失败时回退
+/// 对原始序列化文本脱敏后的安全字符串包装。
+pub fn redact_json_secrets(body: &Value, secrets: &[&str]) -> Value {
+    let raw = serde_json::to_string(body).unwrap_or_default();
+    let redacted = redact_secrets(&raw, secrets);
+    serde_json::from_str(&redacted).unwrap_or(json!({
+        "error": {"message": redacted, "type": "upstream_error"}
+    }))
+}
+
+/// 从渠道配置里收集"不得出现在任何出口"的凭证明文(上游 key 与代理
+/// userinfo)。空串自动被 redact_secrets 的长度门槛滤掉。
+pub fn provider_secrets(provider: &Provider) -> Vec<String> {
+    let mut secrets = vec![provider.api_key.clone()];
+    if let Some((_, rest)) = provider.proxy_url.split_once("://")
+        && let Some((userinfo, _)) = rest.split_once('@')
+        && userinfo.contains(':')
+    {
+        secrets.push(userinfo.to_string());
+    }
+    secrets
+}
+
 /// Build an HTTP client honoring the given proxy settings.
 /// `timeout_secs` of 0 means no overall timeout (used for streaming requests,
-/// where the total duration is unbounded). Build failures are logged loudly
-/// and fall back to a default direct client.
-fn build_client(proxy_url: &str, context: &str, timeout_secs: u64) -> Client {
+/// where the total duration is unbounded). `connect_timeout_secs` is the
+/// 9.2 connect timeout (was a hardcoded 15s). Build failures are logged
+/// loudly and fall back to a default direct client.
+fn build_client(
+    proxy_url: &str,
+    context: &str,
+    timeout_secs: u64,
+    connect_timeout_secs: u64,
+) -> Client {
     let mut builder = Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs.max(1)))
         // 网关不跟随重定向，防止跨主机 302 把 x-api-key 泄露给第三方主机
         .redirect(reqwest::redirect::Policy::none());
     if timeout_secs > 0 {
@@ -129,15 +177,21 @@ fn build_client(proxy_url: &str, context: &str, timeout_secs: u64) -> Client {
     }
 }
 
-/// Get a cached HTTP client for the (proxy_url, timeout_secs) combination,
+/// Get a cached HTTP client for the (proxy_url, timeout_secs, connect) key,
 /// building and caching one on first use. `context` is only used in logs.
 pub fn cached_client(
     clients: &Mutex<HashMap<String, Client>>,
     proxy_url: &str,
     context: &str,
     timeout_secs: u64,
+    connect_timeout_secs: u64,
 ) -> Client {
-    let key = format!("{}|{}", proxy_url.trim(), timeout_secs);
+    let key = format!(
+        "{}|{}|{}",
+        proxy_url.trim(),
+        timeout_secs,
+        connect_timeout_secs
+    );
     match clients.lock() {
         Ok(mut cache) => {
             // 防缓存无限增长：条目过多时整体清空重建
@@ -146,12 +200,14 @@ pub fn cached_client(
             }
             cache
                 .entry(key)
-                .or_insert_with(|| build_client(proxy_url, context, timeout_secs))
+                .or_insert_with(|| {
+                    build_client(proxy_url, context, timeout_secs, connect_timeout_secs)
+                })
                 .clone()
         }
         Err(_) => {
             warn!("Client cache lock poisoned — building uncached client");
-            build_client(proxy_url, context, timeout_secs)
+            build_client(proxy_url, context, timeout_secs, connect_timeout_secs)
         }
     }
 }
@@ -162,7 +218,10 @@ pub fn cached_client(
 ///
 /// Non-streaming requests use the provider's `timeout_secs`, falling back to
 /// the global `fallback_timeout_secs` (REQUEST_TIMEOUT_SECS) when the
-/// provider value is not positive (legacy rows).
+/// provider value is not positive (legacy rows). `connect_timeout_secs` /
+/// `ttfb_timeout_secs` are the 9.2 connect / first-byte timeouts
+/// (AIKUN_CONNECT_TIMEOUT_SECS / AIKUN_TTFB_TIMEOUT_SECS).
+#[allow(clippy::too_many_arguments)]
 pub async fn send_request(
     clients: &Mutex<HashMap<String, Client>>,
     provider: &Provider,
@@ -170,6 +229,8 @@ pub async fn send_request(
     mut request_body: Value,
     stream: bool,
     fallback_timeout_secs: u64,
+    connect_timeout_secs: u64,
+    ttfb_timeout_secs: u64,
 ) -> Result<(reqwest::Response, f64), (Value, u16, f64)> {
     let start = Instant::now();
     // Streaming responses can run arbitrarily long — no overall timeout
@@ -184,6 +245,7 @@ pub async fn send_request(
         &provider.proxy_url,
         &provider.name,
         if stream { 0 } else { non_stream_timeout },
+        connect_timeout_secs,
     );
 
     // URL、鉴权头与请求体修补都交给渠道适配器(见 aikun_channels)。
@@ -216,15 +278,20 @@ pub async fn send_request(
     // 流式响应总时长任意,client 不带整体超时(中段 stall 由流读取侧的
     // idle 超时约束);但首字节必须有界:上游 accept 后迟迟不发响应头时
     // 按传输失败处理并故障转移,而不是挂到整体重试 deadline 才被取消。
+    // 首字节上界来自 AIKUN_TTFB_TIMEOUT_SECS(9.2),不再借道渠道超时。
     let send_result = if stream {
-        let ttfb_secs = non_stream_timeout.clamp(1, 60);
-        match tokio::time::timeout(std::time::Duration::from_secs(ttfb_secs), req.send()).await {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(ttfb_timeout_secs.max(1)),
+            req.send(),
+        )
+        .await
+        {
             Ok(r) => r,
             Err(_) => {
                 let latency = start.elapsed().as_millis() as f64;
                 warn!(
                     "Request to {} timed out waiting for response headers ({}s)",
-                    provider.name, ttfb_secs
+                    provider.name, ttfb_timeout_secs
                 );
                 return Err((
                     json!({
@@ -249,8 +316,9 @@ pub async fn send_request(
         }
         Err(e) => {
             let latency = start.elapsed().as_millis() as f64;
-            // 完整 reqwest 错误（含上游 URL）只进服务端日志
-            warn!("Request to {} failed: {}", provider.name, e);
+            // 完整 reqwest 错误的 URL 可能带查询串凭证(key=…),剥离后
+            // 才进服务端日志(9.8)。
+            warn!("Request to {} failed: {}", provider.name, e.without_url());
             // 返回终端用户的文案保持通用，避免泄露渠道拓扑
             Err((
                 json!({
@@ -261,6 +329,76 @@ pub async fn send_request(
                 }),
                 502,
                 latency,
+            ))
+        }
+    }
+}
+
+/// 字节级透传发送(通用端点并入管线后的 NoConversion 形态):按适配器的
+/// OpenAI 鉴权头原样转发 body 到 `{openai_base_url}/<path>`,无协议转换、
+/// 无请求体修补。失败语义与 [`send_request`] 一致(合成 502 错误体)。
+#[allow(clippy::too_many_arguments)]
+pub async fn send_raw(
+    clients: &Mutex<HashMap<String, Client>>,
+    provider: &Provider,
+    path: &str,
+    request_body: &Value,
+    fallback_timeout_secs: u64,
+    connect_timeout_secs: u64,
+    ttfb_timeout_secs: u64,
+) -> Result<(reqwest::Response, f64), (Value, u16, f64)> {
+    let start = Instant::now();
+    let timeout = if provider.timeout_secs > 0 {
+        provider.timeout_secs as u64
+    } else {
+        fallback_timeout_secs
+    };
+    let client = cached_client(
+        clients,
+        &provider.proxy_url,
+        &provider.name,
+        timeout,
+        connect_timeout_secs,
+    );
+    let adapter = aikun_channels::adapter_for(provider);
+    let url = build_api_url(
+        aikun_channels::base_url_for(provider, aikun_protocol::Protocol::OpenAi),
+        &format!("/{path}"),
+    );
+    debug!(
+        "Forwarding passthrough /{} to {} ({})",
+        path,
+        provider.name,
+        sanitize_log_url(&url)
+    );
+    let req = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(request_body);
+    let mut req = req;
+    // 免密钥本地上游不携带 Authorization(空 Bearer 会让部分上游 401)。
+    if !provider.api_key.is_empty() {
+        for (k, v) in adapter.auth_headers(&provider.api_key, aikun_protocol::Protocol::OpenAi) {
+            req = req.header(k, v);
+        }
+    }
+    // 透传恒为非流式:整体超时由 client(timeout)承担,与旧 passthrough
+    // 一致;ttfb 参数在此路径仅保持签名对齐(整体超时已覆盖首字节)。
+    let _ = ttfb_timeout_secs;
+    match req.send().await {
+        Ok(resp) => Ok((resp, start.elapsed().as_millis() as f64)),
+        Err(e) => {
+            warn!(
+                "Passthrough request to {} failed: {}",
+                provider.name,
+                e.without_url()
+            );
+            Err((
+                json!({
+                    "error": {"message": "Upstream request failed", "type": "upstream_error"}
+                }),
+                502,
+                start.elapsed().as_millis() as f64,
             ))
         }
     }
@@ -387,5 +525,84 @@ mod tests {
         assert_eq!(extract_model(&json!({"model": "gpt-4"})), "gpt-4");
         assert_eq!(extract_model(&json!({})), "unknown");
         assert_eq!(extract_model(&json!({"model": null})), "unknown");
+    }
+
+    /// 9.8:带密钥的输入跑一遍,输出不得出现明文。
+    #[test]
+    fn redact_secrets_masks_upstream_keys() {
+        let key = "sk-live-0123456789abcdef";
+        let msg = format!("Invalid API key {key} provided by proxy user:pw@host");
+        let out = redact_secrets(&msg, &[key, "user:pw"]);
+        assert!(!out.contains(key), "key leaked: {out}");
+        assert!(!out.contains("user:pw"), "proxy creds leaked: {out}");
+        assert!(out.contains("***"));
+        // 短"密钥"不替换(< 4 字符无脱敏价值,只会打烂文本)
+        assert_eq!(redact_secrets("abc", &["abc"]), "abc");
+        assert_eq!(redact_secrets("", &[""]), "");
+    }
+
+    #[test]
+    fn redact_json_secrets_masks_every_string_field() {
+        let key = "sk-up-abcdef123456";
+        let body = json!({
+            "error": {"message": format!("unauthorized: bad key {key}"), "type": "auth"},
+            "detail": {"echo": key}
+        });
+        let out = redact_json_secrets(&body, &[key]);
+        let raw = serde_json::to_string(&out).unwrap();
+        assert!(!raw.contains(key), "key leaked: {raw}");
+        assert!(raw.contains("***"));
+    }
+
+    #[test]
+    fn provider_secrets_collects_key_and_proxy_userinfo() {
+        let p = crate::models::Provider {
+            api_key: "sk-xyz".into(),
+            proxy_url: "socks5://alice:secret@proxy.local:1080".into(),
+            ..transport_test_provider()
+        };
+        let secrets = provider_secrets(&p);
+        assert!(secrets.contains(&"sk-xyz".to_string()));
+        assert!(secrets.contains(&"alice:secret".to_string()));
+        // 无代理 userinfo 的渠道只收集 api_key
+        let p2 = crate::models::Provider {
+            api_key: "sk-abc".into(),
+            proxy_url: "http://proxy.local:8080".into(),
+            ..transport_test_provider()
+        };
+        assert_eq!(provider_secrets(&p2), vec!["sk-abc".to_string()]);
+    }
+
+    fn transport_test_provider() -> crate::models::Provider {
+        crate::models::Provider {
+            id: "p".into(),
+            name: "p".into(),
+            provider_type: "openai".into(),
+            openai_base_url: "http://x".into(),
+            anthropic_base_url: "http://x".into(),
+            api_key: String::new(),
+            key_decrypt_failed: false,
+            models: "[]".into(),
+            priority: 0,
+            weight: 1.0,
+            is_active: true,
+            health_status: "healthy".into(),
+            latency_ms: 0.0,
+            error_rate: 0.0,
+            last_health_check: None,
+            max_retries: 3,
+            timeout_secs: 120,
+            proxy_url: String::new(),
+            model_mapping: String::new(),
+            consecutive_failures: 0,
+            disabled_reason: String::new(),
+            protocols: "[\"openai\"]".into(),
+            default_protocol: "openai".into(),
+            note: String::new(),
+            website_url: String::new(),
+            channel_kind: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
     }
 }

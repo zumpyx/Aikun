@@ -21,6 +21,13 @@ pub struct AppConfig {
     pub max_retries: u32,
     pub auto_disable_threshold: u32, // consecutive failures before auto-disable
     pub request_timeout_secs: u64,
+    /// TCP/TLS 连接超时(9.2 三类超时之一;原 15s 硬编码改为可配)。
+    pub connect_timeout_secs: u64,
+    /// 首字节(响应头)超时(9.2):流式请求等上游响应头的上界。
+    pub ttfb_timeout_secs: u64,
+    /// 流式 chunk 间空闲超时(9.2)。0 = 沿用渠道级 `timeout_secs`
+    /// (回退 `request_timeout_secs`)的旧语义;> 0 为全局覆盖。
+    pub idle_timeout_secs: u64,
     pub log_retention_days: u32,
     /// CORS 允许的来源白名单;为空表示不加 CORS 层(仅同源)。
     pub cors_allowed_origins: Vec<String>,
@@ -70,6 +77,9 @@ impl Default for AppConfig {
             max_retries: 3,
             auto_disable_threshold: 5,
             request_timeout_secs: 120,
+            connect_timeout_secs: 15,
+            ttfb_timeout_secs: 60,
+            idle_timeout_secs: 0,
             log_retention_days: 30,
             cors_allowed_origins: Vec::new(),
             trust_x_forwarded_for: false,
@@ -127,6 +137,21 @@ const SETTINGS: &[(&str, &str, &str)] = &[
         "request-timeout-secs",
         "AIKUN_REQUEST_TIMEOUT_SECS",
         "单次上游请求超时(秒,≥1)",
+    ),
+    (
+        "connect-timeout-secs",
+        "AIKUN_CONNECT_TIMEOUT_SECS",
+        "上游 TCP/TLS 连接超时(秒,≥1,默认 15)",
+    ),
+    (
+        "ttfb-timeout-secs",
+        "AIKUN_TTFB_TIMEOUT_SECS",
+        "流式请求等上游响应头的首字节超时(秒,≥1,默认 60)",
+    ),
+    (
+        "idle-timeout-secs",
+        "AIKUN_IDLE_TIMEOUT_SECS",
+        "流式 chunk 间空闲超时(秒,0=沿用渠道级 timeout_secs,默认 0)",
     ),
     (
         "log-retention-days",
@@ -256,6 +281,21 @@ impl AppConfig {
             config.request_timeout_secs =
                 parse_min(&val, "request-timeout-secs", 1, config.request_timeout_secs);
         }
+        // 9.2 三类独立超时:连接 / 首字节 / 流式空闲。与 9.9 同口径——
+        // 非法值拒绝启动,不静默回退(idle 的 0 是合法哨兵,表示沿用
+        // 渠道级 timeout_secs 的旧语义)。
+        if let Some(val) = get("connect-timeout-secs", "AIKUN_CONNECT_TIMEOUT_SECS") {
+            config.connect_timeout_secs =
+                parse_min(&val, "connect-timeout-secs", 1, config.connect_timeout_secs);
+        }
+        if let Some(val) = get("ttfb-timeout-secs", "AIKUN_TTFB_TIMEOUT_SECS") {
+            config.ttfb_timeout_secs =
+                parse_min(&val, "ttfb-timeout-secs", 1, config.ttfb_timeout_secs);
+        }
+        if let Some(val) = get("idle-timeout-secs", "AIKUN_IDLE_TIMEOUT_SECS") {
+            config.idle_timeout_secs =
+                parse_min(&val, "idle-timeout-secs", 0, config.idle_timeout_secs);
+        }
         if let Some(val) = get("log-retention-days", "AIKUN_LOG_RETENTION_DAYS") {
             config.log_retention_days =
                 parse_min(&val, "log-retention-days", 1, config.log_retention_days);
@@ -270,16 +310,14 @@ impl AppConfig {
         config.trust_x_forwarded_for =
             get("trust-x-forwarded-for", "AIKUN_TRUST_X_FORWARDED_FOR").as_deref() == Some("1");
         if let Some(val) = get("cache-mode", "AIKUN_CACHE_MODE") {
+            // 9.9:非法枚举拒绝启动(此前 warn 后回退 off;部署配错时进程
+            // 看似在跑、实际用默认行为,问题拖到第一个请求才暴露)。
             config.cache_mode = match val.trim().to_ascii_lowercase().as_str() {
                 "off" | "" => CacheMode::Off,
                 "deterministic" => CacheMode::Deterministic,
                 "always" => CacheMode::Always,
                 other => {
-                    tracing::warn!(
-                        "cache-mode={:?} 非法(off/deterministic/always),回退 off",
-                        other
-                    );
-                    CacheMode::Off
+                    panic!("cache-mode={other:?} 非法(可选 off / deterministic / always),拒绝启动");
                 }
             };
         }
@@ -303,8 +341,7 @@ impl AppConfig {
                 "global" => CacheScope::Global,
                 "user" | "" => CacheScope::User,
                 other => {
-                    tracing::warn!("cache-scope={:?} 非法(user/global),回退 user", other);
-                    CacheScope::User
+                    panic!("cache-scope={other:?} 非法(可选 user / global),拒绝启动");
                 }
             };
         }
@@ -313,8 +350,7 @@ impl AppConfig {
                 "free" => CacheHitBilling::Free,
                 "full" | "" => CacheHitBilling::Full,
                 other => {
-                    tracing::warn!("cache-hit-billing={:?} 非法(full/free),回退 full", other);
-                    CacheHitBilling::Full
+                    panic!("cache-hit-billing={other:?} 非法(可选 full / free),拒绝启动");
                 }
             };
         }
@@ -392,7 +428,8 @@ fn print_usage() {
     }
 }
 
-/// 解析带下限的数值配置,非法或低于下限时回退默认值并 warn。
+/// 解析带下限的数值配置(9.9:非法或低于下限直接 panic 拒绝启动;
+/// 2026-11 前是 warn 后回退默认值,属行为变化,已单列 CHANGELOG)。
 fn parse_min<T>(raw: &str, name: &str, min: T, default: T) -> T
 where
     T: std::str::FromStr + PartialOrd + std::fmt::Display,
@@ -400,19 +437,12 @@ where
     match raw.parse::<T>() {
         Ok(v) if v >= min => v,
         _ => {
-            tracing::warn!(
-                "{}={:?} 非法(需 ≥ {}),回退默认值 {}",
-                name,
-                raw,
-                min,
-                default
-            );
-            default
+            panic!("{name}={raw:?} 非法(需 ≥ {min};默认值 {default}),拒绝启动");
         }
     }
 }
 
-/// 解析带上下限的数值配置,越界或非法时回退默认值并 warn。
+/// 解析带上下限的数值配置(9.9:越界或非法直接 panic 拒绝启动)。
 fn parse_range<T>(raw: &str, name: &str, min: T, max: T, default: T) -> T
 where
     T: std::str::FromStr + PartialOrd + std::fmt::Display,
@@ -420,15 +450,7 @@ where
     match raw.parse::<T>() {
         Ok(v) if v >= min && v <= max => v,
         _ => {
-            tracing::warn!(
-                "{}={:?} 非法(需在 {}..={}),回退默认值 {}",
-                name,
-                raw,
-                min,
-                max,
-                default
-            );
-            default
+            panic!("{name}={raw:?} 非法(需在 {min}..={max};默认值 {default}),拒绝启动");
         }
     }
 }
@@ -449,6 +471,27 @@ mod tests {
         );
         assert_eq!(map.get("host").map(String::as_str), Some("0.0.0.0:3001"));
         assert_eq!(map.get("max-retries").map(String::as_str), Some("5"));
+    }
+
+    /// 9.9:数值配置非法时拒绝(panic)而不是回退默认值。
+    #[test]
+    fn parse_min_rejects_illegal_values() {
+        assert_eq!(parse_min("5", "t", 1u64, 9), 5);
+        assert_eq!(
+            parse_min("0", "t", 0u64, 9),
+            0,
+            "0 对 min=0 合法(idle 哨兵)"
+        );
+        assert!(std::panic::catch_unwind(|| parse_min("abc", "t", 1u64, 9)).is_err());
+        assert!(std::panic::catch_unwind(|| parse_min("0", "t", 1u64, 9)).is_err());
+        assert!(std::panic::catch_unwind(|| parse_min("-3", "t", 1u64, 9)).is_err());
+    }
+
+    #[test]
+    fn parse_range_rejects_out_of_range() {
+        assert_eq!(parse_range("60", "t", 1u64, 100, 9), 60);
+        assert!(std::panic::catch_unwind(|| parse_range("0", "t", 1u64, 100, 9)).is_err());
+        assert!(std::panic::catch_unwind(|| parse_range("101", "t", 1u64, 100, 9)).is_err());
     }
 
     /// SurrealKV 目录的位置语义沿用:旧库显式指向非默认位置时,嵌入式

@@ -5,6 +5,85 @@
 
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
+## [Unreleased] - roadmap v0.5 阶段 2(管线显式化)
+
+阶段 2 落地:`pipeline` 拆为 context / admission / dispatch(候选迭代)/
+attempt(单次尝试)/ classify(失败分类)/ stream(流转发 / 记账收尾 /
+错误帧)/ error(GatewayError)七个单元;通用端点透传(embeddings /
+moderations / images / rerank)作为 `NoConversion + OpenAiOnly + NoStream`
+模式并入同一管线,删除 `passthrough.rs` 的重复实现。对外行为变化逐条:
+
+### 变更(可观测性,9.6)
+
+- **新增 `X-Request-Id` 响应头**:所有 `/v1/*` 出口(成功 / 错误 / SSE 流)
+  返回网关入口生成的 UUID v4;同值落 `request_logs.request_id`(见下方
+  schema)并进入每请求 tracing span(`proxy_request`:request_id、
+  protocol、model、channel、cache_hit、ttft_ms、total_ms、status)。
+  一次多渠道重试可按 request_id + 日志拼出完整链。
+- `request_logs` 表(surreal schema v1 内追加字段,幂等)新增
+  `request_id option<string>`;旧行为空。管理面日志 API 未暴露该字段
+  (openapi.yaml 冻结),读侧经 `aikun-store` 的 `LogRow.request_id` 可取。
+
+### 变更(超时,9.2)
+
+- 新增三个独立配置(环境变量 > CLI > 默认;非法值**拒绝启动**):
+  `AIKUN_CONNECT_TIMEOUT_SECS`(TCP/TLS 连接超时,默认 15,原 15s 硬编码)、
+  `AIKUN_TTFB_TIMEOUT_SECS`(流式等上游响应头的首字节超时,默认 60,
+  原为渠道超时 clamp 1..60)、`AIKUN_IDLE_TIMEOUT_SECS`(流式 chunk 间
+  空闲超时,0=沿用渠道级 timeout_secs 的旧行为,>0 全局覆盖,clamp
+  1..600)。
+- 客户端断开时上游请求立即中止(生成器 Drop 关闭上游连接),已捕获
+  usage 照常按 499 补账且不重复记账(原行为,现由 ctx 生命周期与
+  StreamAbortGuard 结构化保证)。
+
+### 变更(启动校验,9.9;**行为收紧**)
+
+- **非法配置由"warn 后回退默认值"改为拒绝启动**(`panic`):全部数值型
+  `AIKUN_*` 配置(超时 / 重试 / 阈值 / 保留期等)与枚举型
+  `AIKUN_CACHE_MODE` / `AIKUN_CACHE_SCOPE` / `AIKUN_CACHE_HIT_BILLING`。
+  此前如 `AIKUN_CACHE_MODE=alway` 会回退 off 继续跑,现在直接退出并
+  指明合法取值。合法配置行为不变。
+
+### 变更(响应缓存,9.7;**键语义收紧**)
+
+- 缓存键(`scope=user`)从按 user_id 隔离收紧为**带 API key 调用时按
+  API key 隔离**(JWT 会话仍按 user_id):同一用户的不同 key 不再共享
+  缓存;缓存键版本 v1→v2,升级后旧缓存条目自然失效(进程内缓存,
+  重启即空,无迁移影响)。
+- 带 `tools` 或多模态图片内容(`image_url` / `image`+`source` /
+  `input_image`)的请求默认不入缓存(此前 deterministic/always 模式下
+  会缓存)。
+- `AIKUN_CACHE_SCOPE=global` 保留,文档(env.example)明确标注串缓存
+  风险:仅单租户部署使用。
+
+### 变更(凭证脱敏,9.8;**收紧**)
+
+- 上游 API key 与代理 userinfo 在全部出口脱敏:上游错误消息进入
+  request_logs / 客户端错误体 / 服务端 warn 日志前统一替换为 `***`
+  (此前仅 401/403 的日志文案掩码,其余状态的上游消息原文透传——
+  含 5xx 消息里回显渠道 key 的可能);reqwest 传输错误的 URL(查询串
+  可能含 `key=…`)剥离后才进日志与错误帧。
+- 透传端点的上游错误体此前**原文**回传客户端,现仅做凭证脱敏、形状
+  不变(字节级语义保留)。
+
+### 变更(透传并入管线)
+
+- `/v1/{embeddings,moderations,images/generations,rerank}` 全部行为与
+  chat 同源:准入(余额 402 / 限额 429 / 模型白名单 403)、故障转移、
+  记账、request_id、X-Request-Id、整体重试 deadline、三类超时、脱敏。
+  新增差异:透传请求此前无整体重试 deadline 与 request_id;缺 model 的
+  请求日志 model 字段由空串改为 `unknown`(与 chat 统一);chat 端点
+  对 `model:""` 此前会走到 503,现与透传统一为 400。
+- 透传请求的错误响应仍原样回传上游错误体(不转 OpenAI 错误信封),
+  但 401/403 穷尽后同样掩码为 502 通用文案(与 chat 一致,原行为)。
+
+### 不变(红线复核)
+
+- 计费扣费、兑换码核销、协议转换、登录链路行为不变(定向 e2e 复跑
+  全绿:计费 / 兑换 / 协议转换 / 登录 / 透传 / 故障转移 / 缓存)。
+- 9.4 硬边界单测锁定:未向客户端发出任何字节才允许换渠道;流式移交后
+  不存在再次选路的代码路径(候选迭代在 200+SSE 头移交后即返回)。
+
 ## [0.6.0] - 2026-11-17
 
 阶段 S(数据库迁移 SurrealDB,设计全文见 `docs/surreal-migration.md`)全部

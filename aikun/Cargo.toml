@@ -57,6 +57,9 @@ tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# 管线统一错误形状(pipeline/error.rs,GatewayError)
+thiserror = "2"
+
 # Config
 dotenvy = "0.15"
 

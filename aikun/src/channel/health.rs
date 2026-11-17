@@ -10,6 +10,7 @@ use crate::config::AppConfig;
 use crate::store::AppStore;
 
 /// Check the health of a single provider by making a lightweight request to the models endpoint.
+#[allow(clippy::too_many_arguments)]
 pub async fn check_provider_health(
     clients: &Mutex<HashMap<String, reqwest::Client>>,
     base_url: &str,
@@ -18,9 +19,16 @@ pub async fn check_provider_health(
     timeout_secs: u64,
     proxy_url: &str,
     channel_kind: &str,
+    connect_timeout_secs: u64,
 ) -> (String, f64) {
     let start = Instant::now();
-    let client = cached_client(clients, proxy_url, base_url, timeout_secs);
+    let client = cached_client(
+        clients,
+        proxy_url,
+        base_url,
+        timeout_secs,
+        connect_timeout_secs,
+    );
 
     // URL 与鉴权头由渠道适配器决定(见 aikun_channels)。
     let adapter = aikun_channels::registry().resolve(channel_kind);
@@ -186,6 +194,7 @@ async fn run_health_check_round(
                         probe_timeout,
                         proxy_url,
                         channel_kind,
+                        config.connect_timeout_secs,
                     ),
                 )
                 .await

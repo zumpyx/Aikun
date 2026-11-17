@@ -388,6 +388,9 @@ pub const SCHEMA_SURQL: &str = r#"
 
     // ---- 请求日志(高频追加;关联为 record 链接,软外键语义见文件头) ----
     DEFINE TABLE IF NOT EXISTS request_log SCHEMAFULL;
+    // request_id:网关入口生成的请求追踪号(UUID v4,9.6);一次请求的多渠道
+    // 重试链按它拼出。option<string>:迁移进来的旧行与少数无管线写路径为空。
+    DEFINE FIELD IF NOT EXISTS request_id ON TABLE request_log TYPE option<string>;
     DEFINE FIELD IF NOT EXISTS user ON TABLE request_log TYPE option<record<user>>;
     DEFINE FIELD IF NOT EXISTS api_key ON TABLE request_log TYPE option<record<api_key>>;
     DEFINE FIELD IF NOT EXISTS provider ON TABLE request_log TYPE option<record<provider>>;

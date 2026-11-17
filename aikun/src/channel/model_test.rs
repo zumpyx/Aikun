@@ -120,6 +120,7 @@ fn extract_delta(protocol: Protocol, data: &str) -> String {
 /// When `stream` is true the upstream is asked for SSE and the stream is
 /// consumed to completion (bounded by the provider idle timeout) so streaming
 /// support is verified, not just the first response byte.
+#[allow(clippy::too_many_arguments)]
 pub async fn probe_model(
     clients: &std::sync::Mutex<std::collections::HashMap<String, reqwest::Client>>,
     provider: &Provider,
@@ -128,9 +129,22 @@ pub async fn probe_model(
     messages: Vec<Value>,
     max_tokens: u32,
     stream: bool,
+    connect_timeout_secs: u64,
+    ttfb_timeout_secs: u64,
 ) -> ModelProbe {
     let body = build_probe_body(model, protocol, &messages, max_tokens, stream);
-    let (resp, latency) = match send_request(clients, provider, protocol, body, stream, 120).await {
+    let (resp, latency) = match send_request(
+        clients,
+        provider,
+        protocol,
+        body,
+        stream,
+        120,
+        connect_timeout_secs,
+        ttfb_timeout_secs,
+    )
+    .await
+    {
         Ok(v) => v,
         Err((err_body, status, latency)) => {
             return ModelProbe {
@@ -324,13 +338,14 @@ pub async fn record_model_health(
 /// instead of starving the tail sequentially.
 pub async fn run_model_test_loop(
     store: Arc<AppStore>,
+    config: Arc<crate::config::AppConfig>,
     clients: Arc<Mutex<std::collections::HashMap<String, reqwest::Client>>>,
 ) {
     // Wait one interval before the first round — the health ping loop already
     // covers startup, and upstreams may still be warming up.
     tokio::time::sleep(Duration::from_secs(MODEL_TEST_INTERVAL_SECS)).await;
     loop {
-        run_model_test_round(&store, &clients).await;
+        run_model_test_round(&store, &config, &clients).await;
         tokio::time::sleep(Duration::from_secs(MODEL_TEST_INTERVAL_SECS)).await;
     }
 }
@@ -340,6 +355,7 @@ pub async fn run_model_test_loop(
 /// is exceeded the round is cancelled and the untested pairs are logged.
 async fn run_model_test_round(
     store: &Arc<AppStore>,
+    config: &Arc<crate::config::AppConfig>,
     clients: &Arc<Mutex<std::collections::HashMap<String, reqwest::Client>>>,
 ) {
     let providers: Vec<Provider> = match store.channels.active_channels().await {
@@ -377,6 +393,7 @@ async fn run_model_test_round(
     let workers = join_all((0..ROUND_WORKERS).map(|_| {
         model_test_worker(
             store.clone(),
+            config.clone(),
             clients.clone(),
             providers.clone(),
             queue.clone(),
@@ -414,6 +431,7 @@ async fn run_model_test_round(
 /// the queue is empty. The queue lock is never held across an await.
 async fn model_test_worker(
     store: Arc<AppStore>,
+    config: Arc<crate::config::AppConfig>,
     clients: Arc<Mutex<std::collections::HashMap<String, reqwest::Client>>>,
     providers: Arc<Vec<Provider>>,
     queue: Arc<Mutex<VecDeque<(usize, String)>>>,
@@ -436,6 +454,8 @@ async fn model_test_worker(
             vec![json!({"role": "user", "content": "Say OK"})],
             16,
             false,
+            config.connect_timeout_secs,
+            config.ttfb_timeout_secs,
         )
         .await;
         tested.fetch_add(1, Ordering::Relaxed);

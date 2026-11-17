@@ -1,85 +1,76 @@
-//! 候选渠道迭代、单次尝试与失败分类(原 attempt_loop)。
-//! roadmap 阶段 2 将继续拆为 候选迭代 / 单次 attempt / 失败分类 三个单元。
+//! 候选迭代(阶段 2 拆分出的第一个可单测单元):依次选渠道 → 交给
+//! [`single_attempt`] 单次尝试 → 按 [`crate::pipeline::classify`] 的硬边界
+//! 决定"换下一条渠道 / 报错收尾"。
+//!
+//! 9.4 的结构保证:本循环唯一的续体(`continue`)发生在
+//! [`AttemptOutcome::Failed`] 且 [`failover_allowed`] 判定为
+//! `NextChannel` 时——该判定以 `ClientOutput::NotStarted` 为前提(流式
+//! 移交路径在 200+SSE 头时直接 `return`,ctx 已 move 进生成器,不存在
+//! "已向客户端写出后再 attempt"的分支)。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
-use axum::{
-    Json,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
-use serde_json::{Value, json};
-use tracing::{debug, warn};
+use tracing::debug;
 
-use super::*;
 use crate::AppState;
-use crate::billing::ledger::{request_log_sync, spawn_request_log};
-use crate::channel::selector::{
-    select_provider_async, spawn_pin_channel, spawn_record_failure, spawn_record_result,
-};
-use crate::channel::transport::send_request;
-use crate::pipeline::admission::ConcurrencyGuard;
-use aikun_protocol::{
-    Protocol, convert_error, convert_request, convert_response, extract_usage_any, protocol_error,
-    valid_response_shape,
-};
+use crate::channel::selector::select_provider_async;
+use crate::pipeline::attempt::{AttemptOutcome, single_attempt};
+use crate::pipeline::classify::{ClientOutput, FailoverDecision, failover_allowed};
+use crate::pipeline::context::RequestCtx;
+use crate::pipeline::error::GatewayError;
 
-/// 渠道重试/故障转移循环：依次尝试可用渠道，全部失败时返回最后一次上游
-/// 错误（或 503）。流式请求在拿到 200 头后直接移交 stream_response。
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn attempt_loop(
-    state: AppState,
-    client_protocol: Protocol,
-    model: String,
-    body: Value,
-    is_stream: bool,
-    user_id: String,
-    api_key_id: Option<String>,
-    tried_order: Arc<std::sync::Mutex<Vec<String>>>,
-    concurrency_guard: Option<ConcurrencyGuard>,
-    cache_key: Option<String>,
-) -> Response {
+/// 候选迭代在渠道之间携带的循环状态。
+pub(crate) struct AttemptState {
+    /// 已选过的渠道(选择器排除集;耗尽后由选择器重置)。
+    pub(crate) tried: HashSet<String>,
+    /// 每个渠道在本请求内的尝试次数:受渠道级 max_retries(重试次数,
+    /// 0 = 不重试)约束——同一渠道最多尝试 max_retries + 1 次。
+    pub(crate) per_provider_attempts: HashMap<String, u32>,
+    /// 本请求已对哪些渠道累计过 consecutive_failure:同一渠道被重选回时
+    /// 不重复累加,防止失败计数被重试放大。
+    pub(crate) failure_counted: HashSet<String>,
+    /// 最近一次失败(候选耗尽时回给客户端)。
+    pub(crate) last_error: Option<GatewayError>,
+}
+
+/// 渠道重试/故障转移循环:依次尝试可用渠道,全部失败时返回最后一次上游
+/// 错误(或 503)。流式请求在拿到 200 + SSE 头后把整个 ctx move 进
+/// stream_response(见 [`AttemptOutcome::Stream`])。
+pub(crate) async fn attempt_loop(state: AppState, ctx: RequestCtx) -> axum::response::Response {
     let max_attempts = state.config.max_retries.max(1);
-    let threshold = state.config.auto_disable_threshold;
-    // 并发槽位在本函数作用域持有:失败/非流式成功路径随函数返回释放;
-    // 流式路径在移交 stream_response 时被 move 进流生成器。
-    let mut concurrency_guard = concurrency_guard;
-
-    let mut tried: HashSet<String> = HashSet::new();
-    // 每个渠道在本请求内的尝试次数:受渠道级 max_retries(重试次数,0 = 不重试)
-    // 约束——同一渠道最多尝试 max_retries + 1 次,达上限后本请求内不再选它。
-    let mut per_provider_attempts: HashMap<String, u32> = HashMap::new();
-    // 本请求已对哪些渠道累计过 consecutive_failure:selector 在候选耗尽时
-    // 会重置排除集,同一渠道可能被反复选回;重试造成的重复失败不重复累加,
-    // 防止失败计数被重试放大(见 record_failure 的 count_consecutive)。
-    let mut failure_counted: HashSet<String> = HashSet::new();
-    let mut last_error: Option<(Value, u16)> = None;
+    let mut st = AttemptState {
+        tried: HashSet::new(),
+        per_provider_attempts: HashMap::new(),
+        failure_counted: HashSet::new(),
+        last_error: None,
+    };
 
     for _ in 0..max_attempts {
         let provider = match select_provider_async(
             state.store.clone(),
-            model.clone(),
-            tried.clone(),
-            api_key_id.clone(),
+            ctx.model.clone(),
+            st.tried.clone(),
+            ctx.api_key_id.clone(),
         )
         .await
         {
             Some(p) => p,
             None => break,
         };
-        tried.insert(provider.id.clone());
-        if let Ok(mut t) = tried_order.lock() {
+        st.tried.insert(provider.id.clone());
+        if let Ok(mut t) = ctx.tried_order.lock() {
             t.push(provider.id.clone());
         }
 
         // 渠道级重试上限:该渠道已尝试 max_retries + 1 次后跳过,换下一个。
-        let attempts = per_provider_attempts
+        let attempts = st
+            .per_provider_attempts
             .entry(provider.id.clone())
             .or_insert(0);
         *attempts += 1;
         if *attempts > provider.max_retries.max(0) as u32 + 1 {
             debug!(
+                request_id = %ctx.request_id,
                 "Provider {} reached its per-channel retry limit ({}) — skipping",
                 provider.name, provider.max_retries
             );
@@ -91,394 +82,148 @@ pub(super) async fn attempt_loop(
         // 触发渠道立即禁用,换掉 JWT secret 就会连锁打挂全部渠道。
         if provider.key_decrypt_failed {
             tracing::error!(
+                request_id = %ctx.request_id,
                 "Provider '{}' 密钥解密失败,跳过该渠道——检查 AIKUN_ENCRYPTION_KEY/AIKUN_JWT_SECRET 是否变更",
                 provider.name
             );
-            spawn_record_failure(
+            crate::channel::selector::spawn_record_failure(
                 state.store.clone(),
                 provider.id.clone(),
                 0.0,
                 0,
-                threshold,
-                failure_counted.insert(provider.id.clone()),
+                state.config.auto_disable_threshold,
+                st.failure_counted.insert(provider.id.clone()),
             );
             continue;
         }
 
-        let provider_protocol = crate::models::upstream_protocol_for(&provider, client_protocol);
-        debug!(
-            "Routing '{}' ({} client) → provider '{}' ({} upstream, health={} latency={}ms)",
-            model,
-            client_protocol,
-            provider.name,
-            provider_protocol,
-            provider.health_status,
-            provider.latency_ms as i64
-        );
+        // 字节级透传只能走声明 openai 协议的渠道(protocols 为空的旧行按
+        // provider_type 兜底)。
+        if ctx.is_passthrough() && !speaks_openai(&provider) {
+            continue;
+        }
 
-        // Convert the request into the provider's native protocol, then apply
-        // the channel's model mapping (requested model → upstream model).
-        let mut upstream_body = convert_request(&body, client_protocol, provider_protocol);
-        apply_model_mapping(&provider, &mut upstream_body);
-
-        let adapter = aikun_channels::adapter_for(&provider);
-        let (resp, latency) = match send_request(
-            &state.clients,
-            &provider,
-            provider_protocol,
-            upstream_body,
-            is_stream,
-            state.config.request_timeout_secs,
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err((err_body, status, latency)) => {
-                warn!(
-                    "Transport error from provider {}: status={} — failing over",
-                    provider.name, status
+        // ---- 单次尝试 + 失败分类(硬边界判定唯一入口) ----
+        match single_attempt(&state, &ctx, &provider, &mut st).await {
+            AttemptOutcome::Done(resp) => return resp,
+            AttemptOutcome::Stream {
+                resp,
+                adapter,
+                provider_protocol,
+                provider_id,
+                idle_timeout_secs,
+            } => {
+                // 流式移交:ctx 被 move 进生成器,本循环随即返回——此后
+                // 上游失败只能由流转发单元报错收尾,不再选路(9.4)。
+                return super::stream::stream_response(
+                    state,
+                    ctx,
+                    resp,
+                    adapter,
+                    provider_protocol,
+                    provider_id,
+                    idle_timeout_secs,
                 );
-                spawn_record_failure(
-                    state.store.clone(),
-                    provider.id.clone(),
-                    latency,
-                    0,
-                    threshold,
-                    failure_counted.insert(provider.id.clone()),
-                );
-                spawn_request_log(
-                    &state,
-                    user_id.clone(),
-                    api_key_id.clone(),
-                    Some(provider.id.clone()),
-                    model.clone(),
-                    client_protocol.as_str(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    latency as i32,
-                    status as i32,
-                    false,
-                    Some("upstream transport error".to_string()),
-                );
-                last_error = Some((err_body, status));
-                continue;
             }
-        };
-
-        let status = resp.status().as_u16();
-
-        if status == 200 {
-            if !is_stream {
-                // 读取并解析响应体（带 8MB 上限）；上游 200 但 body 不可用
-                // 时按失败处理并故障转移，绝不把错误形状 JSON 当 200 返回。
-                let read = read_json_limited(resp).await.map(|mut b| {
-                    adapter.normalize_response(provider_protocol, &mut b);
-                    b
-                });
-                match read {
-                    Ok(resp_body) if valid_response_shape(&resp_body, provider_protocol) => {
-                        spawn_record_result(
-                            state.store.clone(),
-                            provider.id.clone(),
-                            latency,
-                            true,
-                        );
-                        spawn_pin_channel(
-                            state.store.clone(),
-                            api_key_id.clone(),
-                            model.clone(),
-                            provider.id.clone(),
-                        );
-                        let (p, c, t, k) = extract_usage_any(&resp_body);
-                        // 计费级:响应返回前日志与扣费已落库(await)。
-                        request_log_sync(
-                            &state,
-                            user_id.clone(),
-                            api_key_id.clone(),
-                            Some(provider.id.clone()),
-                            model.clone(),
-                            client_protocol.as_str(),
-                            p,
-                            c,
-                            t,
-                            k,
-                            latency as i32,
-                            200,
-                            true,
-                            None,
-                        )
-                        .await;
-                        debug!(
-                            "Completed: model={} provider={} latency={}ms tokens={}",
-                            model, provider.name, latency as i64, t
-                        );
-                        let client_body = convert_response(
-                            &resp_body,
-                            provider_protocol,
-                            client_protocol,
-                            &model,
-                        );
-                        if let Some(key) = cache_key {
-                            // 同步写入(内存后端为纳秒级),
-                            // 保证响应返回后紧接着的同一请求必然命中。
-                            let entry = crate::cache::CacheEntry {
-                                body: client_body.clone(),
-                                usage: (p, c, t, k),
-                            };
-                            state.cache.put(&key, entry).await;
-                            return (StatusCode::OK, [(CACHE_HEADER, "MISS")], Json(client_body))
-                                .into_response();
-                        }
-                        return (StatusCode::OK, Json(client_body)).into_response();
-                    }
-                    result => {
-                        // 审计/服务端日志带截断的上游响应体(便于排查
-                        // MiniMax 这类 200+错误信封的上游),客户端只收通用文案。
-                        let (msg, detail) = match &result {
-                            Err(msg) => (msg.clone(), msg.clone()),
-                            Ok(resp_body) => (
-                                "upstream returned a response body that does not match its protocol"
-                                    .to_string(),
-                                format!(
-                                    "upstream returned a response body that does not match its protocol: {}",
-                                    truncate_json(resp_body)
-                                ),
-                            ),
-                        };
-                        warn!(
-                            "Upstream 200 from provider {} but body unusable: {} — failing over",
-                            provider.name, detail
-                        );
-                        spawn_record_failure(
-                            state.store.clone(),
-                            provider.id.clone(),
-                            latency,
-                            0,
-                            threshold,
-                            failure_counted.insert(provider.id.clone()),
-                        );
-                        spawn_request_log(
-                            &state,
-                            user_id.clone(),
-                            api_key_id.clone(),
-                            Some(provider.id.clone()),
-                            model.clone(),
-                            client_protocol.as_str(),
-                            0,
-                            0,
-                            0,
-                            0,
-                            latency as i32,
-                            502,
-                            false,
-                            Some(detail),
-                        );
-                        last_error = Some((
-                            json!({"error": {"message": msg, "type": "upstream_error"}}),
-                            502,
-                        ));
-                        continue;
+            AttemptOutcome::Failed(err) => {
+                st.last_error = Some(err.clone());
+                match failover_allowed(err.failure_kind(), ClientOutput::NotStarted) {
+                    FailoverDecision::NextChannel => continue,
+                    FailoverDecision::FinishWithError => {
+                        return err.into_response(ctx.client_protocol);
                     }
                 }
             }
-            // 流式:上游必须以 SSE 回应。部分网关对流式请求返回 200 +
-            // JSON 错误体(限流/鉴权失败),若直接移交 stream_response
-            // 会把错误 JSON 当数据帧转发并按成功记账。
-            let is_sse = resp
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.to_ascii_lowercase().contains("text/event-stream"))
-                .unwrap_or(false);
-            if !is_sse {
-                // 同上:日志带截断的上游响应体,客户端只收通用文案。
-                let (msg, detail) = match read_json_limited(resp).await {
-                    Ok(resp_body) => (
-                        "upstream answered a stream request with a non-SSE body".to_string(),
-                        format!(
-                            "upstream answered a stream request with a non-SSE body: {}",
-                            truncate_json(&resp_body)
-                        ),
-                    ),
-                    Err(m) => (m.clone(), m),
-                };
-                warn!(
-                    "Upstream 200 from provider {} but not an SSE stream: {} — failing over",
-                    provider.name, detail
-                );
-                spawn_record_failure(
-                    state.store.clone(),
-                    provider.id.clone(),
-                    latency,
-                    0,
-                    threshold,
-                    failure_counted.insert(provider.id.clone()),
-                );
-                spawn_request_log(
-                    &state,
-                    user_id.clone(),
-                    api_key_id.clone(),
-                    Some(provider.id.clone()),
-                    model.clone(),
-                    client_protocol.as_str(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    latency as i32,
-                    502,
-                    false,
-                    Some(detail),
-                );
-                last_error = Some((
-                    json!({"error": {"message": msg, "type": "upstream_error"}}),
-                    502,
-                ));
-                continue;
-            }
-            // 流式不在此记录成功：流结束时统一记一次 record_request_result /
-            // record_failure（中途失败），避免指标重复或自相矛盾。
-            // 渠道亲和在交出 SSE 时就钉上:上游已经接受了这条对话。流中途
-            // 失败也不会改钉,下一次仍先试这个渠道,再失败才换。
-            // 客户端是否自己请求了 include_usage:未请求时转发前剥掉
-            // 网关注入的 usage chunk。
-            let client_wants_usage = body["stream_options"]["include_usage"]
-                .as_bool()
-                .unwrap_or(false);
-            spawn_pin_channel(
-                state.store.clone(),
-                api_key_id.clone(),
-                model.clone(),
-                provider.id.clone(),
-            );
-            return super::stream::stream_response(
-                state,
-                resp,
-                adapter,
-                client_protocol,
-                provider_protocol,
-                provider.id.clone(),
-                provider.timeout_secs,
-                model,
-                user_id,
-                api_key_id,
-                client_wants_usage,
-                concurrency_guard.take(),
-            );
         }
-
-        // --- Upstream returned an HTTP error ---
-        let err_body: Value = read_json_limited(resp)
-            .await
-            .unwrap_or_else(|_| json!({"error": {"message": "upstream error"}}));
-        let msg = err_body["error"]["message"]
-            .as_str()
-            .unwrap_or("upstream error")
-            .to_string();
-        warn!(
-            "Upstream error: model={} provider={} status={} msg={}",
-            model, provider.name, status, msg
-        );
-        spawn_record_failure(
-            state.store.clone(),
-            provider.id.clone(),
-            latency,
-            status,
-            threshold,
-            failure_counted.insert(provider.id.clone()),
-        );
-        // 401/403 的上游消息可能回显渠道凭证(one-api 系常见);request_logs
-        // 对终端用户可见(/api/logs 按 user_id 过滤),日志只存通用文案,
-        // 完整消息仅留在服务端 warn 里。
-        let log_msg = if status == 401 || status == 403 {
-            format!("upstream authentication failed ({})", status)
-        } else {
-            msg.clone()
-        };
-        spawn_request_log(
-            &state,
-            user_id.clone(),
-            api_key_id.clone(),
-            Some(provider.id.clone()),
-            model.clone(),
-            client_protocol.as_str(),
-            0,
-            0,
-            0,
-            0,
-            latency as i32,
-            status as i32,
-            false,
-            Some(log_msg),
-        );
-
-        // Retryable: rate limits, server errors, timeouts, and dead channels
-        // (401/403 — the channel's key is bad, not the client's request).
-        if status == 401 || status == 403 || status == 408 || status == 429 || status >= 500 {
-            last_error = Some((err_body, status));
-            continue;
-        }
-
-        // Other client errors (400, 404, ...): fail fast, return to caller.
-        let client_body = convert_error(&err_body, client_protocol);
-        let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-        return (code, Json(client_body)).into_response();
     }
 
-    // All attempts exhausted (or no provider supports the model).
-    match last_error {
-        Some((err_body, status)) => {
-            // Never leak upstream 401/403 to end users — it's the channel's
-            // credential that failed, not the client's key.
-            if status == 401 || status == 403 {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(protocol_error(
-                        client_protocol,
-                        "upstream_error",
-                        "All upstream providers failed",
-                    )),
-                )
-                    .into_response();
-            }
-            let client_body = convert_error(&err_body, client_protocol);
-            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-            (code, Json(client_body)).into_response()
-        }
+    // 全部尝试耗尽(或无渠道支持该模型):回最后一次上游错误或 503。
+    match st.last_error {
+        Some(err) => err.into_response(ctx.client_protocol),
         None => {
-            // No provider could serve this model at all — record it too, so
-            // the audit log reflects every failed request, not just upstream
-            // ones.
-            spawn_request_log(
+            let err = GatewayError::NoProvider(ctx.model.clone());
+            crate::billing::ledger::spawn_request_log(
                 &state,
-                user_id.clone(),
-                api_key_id.clone(),
-                None,
-                model.clone(),
-                client_protocol.as_str(),
-                0,
-                0,
-                0,
-                0,
-                0,
-                503,
-                false,
-                Some(format!("no available provider for model '{}'", model)),
+                crate::billing::ledger::RequestLogParams::failure(
+                    &ctx.request_id,
+                    ctx.user_id.clone(),
+                    ctx.api_key_id.clone(),
+                    None,
+                    &ctx.model,
+                    &ctx.request_type(),
+                    0,
+                    503,
+                    err.log_message(),
+                ),
             );
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(protocol_error(
-                    client_protocol,
-                    "provider_unavailable",
-                    &format!(
-                        "No available provider for model '{}'. Check provider configuration.",
-                        model
-                    ),
-                )),
-            )
-                .into_response()
+            err.into_response(ctx.client_protocol)
         }
+    }
+}
+
+/// 渠道是否声明讲 openai 协议(protocols 为空的旧行按 provider_type 兜底)。
+pub(crate) fn speaks_openai(p: &crate::models::Provider) -> bool {
+    serde_json::from_str::<Vec<String>>(&p.protocols)
+        .map(|ps| ps.iter().any(|x| x == "openai"))
+        .unwrap_or(false)
+        || (p.protocols.trim().is_empty() && p.provider_type == "openai")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider_with_protocols(protocols: &str, provider_type: &str) -> crate::models::Provider {
+        crate::models::Provider {
+            id: "p".into(),
+            name: "p".into(),
+            provider_type: provider_type.into(),
+            openai_base_url: "http://x".into(),
+            anthropic_base_url: "http://x".into(),
+            api_key: "k".into(),
+            key_decrypt_failed: false,
+            models: "[]".into(),
+            priority: 0,
+            weight: 1.0,
+            is_active: true,
+            health_status: "healthy".into(),
+            latency_ms: 0.0,
+            error_rate: 0.0,
+            last_health_check: None,
+            max_retries: 3,
+            timeout_secs: 120,
+            proxy_url: String::new(),
+            model_mapping: String::new(),
+            consecutive_failures: 0,
+            disabled_reason: String::new(),
+            protocols: protocols.into(),
+            default_protocol: String::new(),
+            note: String::new(),
+            website_url: String::new(),
+            channel_kind: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// 透传候选过滤:声明 openai 的渠道、空 protocols 的旧 openai 渠道
+    /// 可选;仅 anthropic 的渠道跳过。
+    #[test]
+    fn passthrough_candidate_filter_openai_only() {
+        assert!(speaks_openai(&provider_with_protocols(
+            r#"["openai","anthropic"]"#,
+            "anthropic"
+        )));
+        assert!(speaks_openai(&provider_with_protocols("", "openai")));
+        assert!(!speaks_openai(&provider_with_protocols(
+            r#"["anthropic"]"#,
+            "anthropic"
+        )));
+        assert!(!speaks_openai(&provider_with_protocols("", "anthropic")));
+        // 非法 JSON 的 protocols 视为未声明
+        assert!(!speaks_openai(&provider_with_protocols(
+            "oops",
+            "anthropic"
+        )));
     }
 }

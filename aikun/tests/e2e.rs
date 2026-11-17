@@ -70,6 +70,21 @@ async fn openai_chat_success_end_to_end() {
 
     let resp = chat_completions(&app, &user.api_key).await;
     assert_eq!(resp.status(), 200);
+    // 9.6:所有 /v1 出口带 X-Request-Id(UUID v4 形状;与 span、
+    // request_logs.request_id 同值——request_id 落库由 store 单测锁定)
+    let request_id = resp
+        .headers()
+        .get("x-request-id")
+        .expect("X-Request-Id header")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let parts: Vec<&str> = request_id.split('-').collect();
+    assert_eq!(
+        parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+        vec![8, 4, 4, 4, 12],
+        "UUID v4 shape: {request_id}"
+    );
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["choices"][0]["message"]["content"], "OK");
 

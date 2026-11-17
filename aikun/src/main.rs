@@ -193,6 +193,7 @@ async fn async_main() {
             Arc::new(GatewayProbes {
                 store: store.clone(),
                 clients: state.clients.clone(),
+                config: config.clone(),
             }),
         ),
         users: aikun_admin::admin_users::AdminUsersService::new(Arc::new(SurrealAdminUsersStore {
@@ -266,6 +267,7 @@ async fn async_main() {
 
     // Same supervision for the 30-minute per-model live test loop.
     let model_test_store = store.clone();
+    let model_test_config = config.clone();
     let model_test_clients = state.clients.clone();
     tokio::spawn(async move {
         use futures_util::FutureExt;
@@ -273,6 +275,7 @@ async fn async_main() {
             let result =
                 std::panic::AssertUnwindSafe(crate::channel::model_test::run_model_test_loop(
                     model_test_store.clone(),
+                    model_test_config.clone(),
                     model_test_clients.clone(),
                 ))
                 .catch_unwind()
@@ -1250,6 +1253,8 @@ struct SurrealProviderStore {
 struct GatewayProbes {
     store: Arc<AppStore>,
     clients: Arc<Mutex<HashMap<String, reqwest::Client>>>,
+    /// 9.2 三类超时取值(连接/首字节),探测路径与请求管线同源。
+    config: Arc<AppConfig>,
 }
 
 #[async_trait::async_trait]
@@ -1526,6 +1531,7 @@ impl providers_port::ProviderProbes for GatewayProbes {
             probe.timeout_secs,
             &probe.proxy_url,
             &probe.channel_kind,
+            self.config.connect_timeout_secs,
         )
         .await
     }
@@ -1549,6 +1555,7 @@ impl providers_port::ProviderProbes for GatewayProbes {
             &probe.proxy_url,
             "fetch-models",
             15,
+            self.config.connect_timeout_secs,
         );
         let adapter = aikun_channels::registry().resolve(&probe.channel_kind);
         let url = adapter.models_url(&probe.base_url, protocol);
@@ -1618,6 +1625,8 @@ impl providers_port::ProviderProbes for GatewayProbes {
             messages,
             max_tokens,
             false,
+            self.config.connect_timeout_secs,
+            self.config.ttfb_timeout_secs,
         )
         .await;
         providers_port::ModelProbeOutcome {
@@ -1648,6 +1657,7 @@ impl providers_port::ProviderProbes for GatewayProbes {
         let protocol_str = protocol.as_str().to_string();
         let clients = self.clients.clone();
         let store = self.store.clone();
+        let config = self.config.clone();
         // 探针请求体(口径同 channel::model_test 的 build_probe_body)。
         let mut body = json!({
             "model": model,
@@ -1674,7 +1684,14 @@ impl providers_port::ProviderProbes for GatewayProbes {
             let mut stream_error: Option<String> = None;
 
             match crate::channel::transport::send_request(
-                &clients, &provider, protocol, body, true, 120,
+                &clients,
+                &provider,
+                protocol,
+                body,
+                true,
+                120,
+                config.connect_timeout_secs,
+                config.ttfb_timeout_secs,
             )
             .await
             {
