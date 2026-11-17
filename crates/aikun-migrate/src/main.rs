@@ -143,11 +143,17 @@ async fn run() -> Result<(), String> {
     migrate!("providers", "provider", migrate_providers);
     migrate!("request_logs", "request_log", migrate_request_logs);
     migrate!("model_prices", "model_price", migrate_model_prices);
-    migrate!(
-        "api_key_usage_daily",
-        "api_key_usage_daily",
-        migrate_api_key_usage_daily
-    );
+    // api_key_usage_daily 特例:v0.5 重构中期(计数器表落地)之前的 v3 库
+    // 没有这张表——user_version 同为 3 但表集不同(仓库根 aikun.db 实测)。
+    // 缺表按 0 行迁移而非中断:计数器本就可由 request_logs 明细重建
+    // (新 schema 注释"明细是唯一真相"),中断反而留下写了一半的库。
+    {
+        let src = count_sqlite_opt(&sqlite, "api_key_usage_daily")?;
+        migrate_api_key_usage_daily(&sqlite, db).await?;
+        let dst = count_sureal(db, "api_key_usage_daily").await?;
+        report.push(("api_key_usage_daily", src, dst));
+        println!("api_key_usage_daily 源 {src:>9} 行 → 目标 {dst:>9} 行");
+    }
     migrate!("usage_daily", "usage_daily", migrate_usage_daily);
     migrate!(
         "channel_affinity",
@@ -222,6 +228,28 @@ fn gate_source_version(conn: &Connection) -> Result<(), String> {
 fn count_sqlite(conn: &Connection, table: &str) -> Result<i64, String> {
     conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
         .map_err(|e| format!("统计 {table} 行数失败: {e}"))
+}
+
+/// 表是否存在(sqlite_master 直查;仅 api_key_usage_daily 的缺表容忍用)。
+fn table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .map_err(|e| format!("查 sqlite_master 失败: {e}"))
+}
+
+/// 同 [`count_sqlite`],但表缺失按 0 行(而不是报错)。仅用于
+/// api_key_usage_daily:部分 v3 库没有这张表(见 run 内注释),语义上
+/// 就是"无计数器数据";其余表缺失说明源库不对,仍应报错。
+fn count_sqlite_opt(conn: &Connection, table: &str) -> Result<i64, String> {
+    if !table_exists(conn, table)? {
+        tracing::warn!("源库缺 {table} 表(旧 v3 库形态):按 0 行迁移");
+        return Ok(0);
+    }
+    count_sqlite(conn, table)
 }
 
 async fn count_sureal(db: &Surreal<Any>, table: &str) -> Result<i64, String> {
@@ -633,6 +661,11 @@ async fn migrate_model_prices(sqlite: &Connection, db: &Surreal<Any>) -> Result<
 }
 
 async fn migrate_api_key_usage_daily(sqlite: &Connection, db: &Surreal<Any>) -> Result<(), String> {
+    // 缺表(旧 v3 库)→ 0 行,直接跳过;与 count_sqlite_opt 同口径。
+    if !table_exists(sqlite, "api_key_usage_daily")? {
+        tracing::warn!("api_key_usage_daily 表不存在:跳过(计数器可由 request_logs 明细重建)");
+        return Ok(());
+    }
     let mut stmt = sqlite
         .prepare("SELECT api_key_id, date, tokens_spent FROM api_key_usage_daily")
         .map_err(|e| e.to_string())?;
