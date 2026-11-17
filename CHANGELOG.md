@@ -10,6 +10,29 @@
 - `aikun-migrate`:v3 早期库缺 `api_key_usage_daily` 表时中断且留半成品库——改为缺表按
   0 行迁移并 WARN(计数器可由明细重建,服务端启动本就重建当日值);其余表缺失仍报错。
   迁移演练:12 表行数对照全过、密文逐字节原样、幂等可重跑。
+
+### 变更(/v1 代理面纳入 openapi-to-rust 生成,2026-11-18)
+
+8 个 `/v1` 显式端点(chat/completions、messages、responses、models、embeddings、
+moderations、images/generations、rerank)从手写薄壳改为 openapi-to-rust 生成
+(装配层 `relay.rs` 实现生成 trait 并委托既有管线;鉴权、管线行为、SSE、
+`X-Request-Id`、计费等全部不变)。请求侧为混合宽松 schema:核心字段
+(model/stream/messages 等)类型化,未知字段经 `#[serde(flatten)]` 原样透传
+(e2e 锚定顶层扩展字段到达上游)。同批:生成改为**全量模式**——spec 的全部
+operationId(51 个)由 `gen-api.sh` 机械提取注入,`openapi-to-rust.toml` 不再
+有手工 operations 清单,新增端点零配置遗漏。对外可见差异仅入口校验错误:
+
+- **非法 JSON 请求**(此前 axum 默认 `text/plain` 400)→ 400 + OpenAI 厂商
+  错误体 `{error:{message,type:"invalid_request_error",param,code}}`
+  (`/v1/messages` 端点同为 OpenAI 形状;与管线自产错误体口径一致)。
+- 缺 `content-type: application/json` → 415(厂商格式化 body,同上);
+  body 超 2 MiB → 413(同上;axum 默认限额本就是 2 MiB,无实质变化)。
+- 真畸形请求(声明字段类型不符,如 `messages` 非数组)→ 400 厂商格式
+  (生成器 422 归一为 400;混合宽松 schema 下仅此类情形触发,缺 model 等
+  业务校验仍在管线,错误体与状态码不变)。
+- `x-aikun-cache` / `X-Request-Id` 等响应头与流式行为:`Raw` 透传变体
+  原样返回管线 Response,零变化。
+
  - roadmap v0.5 阶段 2(管线显式化)
 
 阶段 2 落地:`pipeline` 拆为 context / admission / dispatch(候选迭代)/

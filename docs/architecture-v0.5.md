@@ -9,9 +9,9 @@
 | # | 决策 | 理由 |
 |---|---|---|
 | 1 | **多 crate workspace**(取代 roadmap 原定的"单 crate 内重组") | ① protocol 层已验证零耦合(仅依赖 serde_json),crate 边界把"纪律"升级为编译器强制;② 管理面 API 决定 spec-first 重建,生成物需要独立 crate;③ 渠道会持续增多(含 WorkBuddy/Qoder 类反向代理),适配器需要纯净的家 |
-| 2 | **管理面 API spec-first**(范围 = 公开 login + 用户自助 + 管理员三层):手写 OpenAPI 3.2.1 spec → openapi-to-rust 生成;`/v1/*` 进 spec **仅作文档**(loose schema、不镜像厂商 spec、不入生成白名单),`/api/health` 不进 | Aikun 是 AGPL 开源自托管项目,管理面 API 按演化规律会长出第三方消费者(脚本/面板),spec 是对外契约的正确形态;重构窗口内无兼容包袱,按新设计重建优于逐端点迁移 |
+| 2 | **管理面 API spec-first**(范围 = 公开 login + 用户自助 + 管理员三层):手写 OpenAPI 3.2.1 spec → openapi-to-rust 生成;`/api/health` 不进。~~`/v1/*` 进 spec 仅作文档~~(2026-11-18 由决策 4 的新裁决取代:`/v1` 也进生成,混合宽松 schema) | Aikun 是 AGPL 开源自托管项目,管理面 API 按演化规律会长出第三方消费者(脚本/面板),spec 是对外契约的正确形态;重构窗口内无兼容包袱,按新设计重建优于逐端点迁移 |
 | 3 | **生成器选 openapi-to-rust(v0.24.0 钉版),五支柱纪律不变** | 2026-11 spike 实测:官方 openapi-generator 拒绝 3.2.1(8 个校验错误)且无 SSE 服务端生成(issue #21967);[openapi-to-rust](https://github.com/gpu-cli/openapi-to-rust)(Rust 原生、无 Java)接受 3.2.1、SSE 服务端一等生成(`OkStream` 包 axum 原生 Sse)、axum 0.8 与现有栈同大版本、RFC 9457 错误、jsonschema 运行时校验、`[server].operations` 按操作白名单。代价:spec 3.2.1 与该生成器绑定(官方生成器不可用),以钉版本缓解。生成到专用 crate(`crates/aikun-openapi/`)且零手写;配置(TOML)而非编辑输出;CI 重生成 + `git diff --exit-code`,全程无 Java |
-| 4 | **`/v1/*` 永远手写、不进 spec** | 代理端点的契约属于 OpenAI/Anthropic 官方规范;流式 SSE 不适合生成器 |
+| 4 | **`/v1/*` 纳入生成(2026-11-18 用户裁决,推翻 0.5 期的"/v1 永远手写")**:Proxy tag 8 个显式端点纳入生成;请求侧混合宽松 schema(核心字段 optional 类型化 + **每层显式 `additionalProperties: true`**——实测 0.24.0 生成 `#[serde(flatten)]`,未知字段不丢不拒,漏写的层会静默丢字段);响应侧管线动态产出(SSE/headers/厂商错误体),生成枚举装不下,由 gen-api.sh wrapper 注入 `Raw(Response)` 透传变体,装配层 `aikun/src/relay.rs` 只走 Raw;生成校验链的 problem+json 错误体经中间件改写为厂商格式;`/v1/{*path}` 通配兜底保留手写(OpenAPI 无通配语法);**Gemini 等新协议明确不做** | 原"永远手写"的三条理由被 2026-11-18 spike 逐条重估:① 契约属厂商 → 混合宽松 schema 只类型化网关真正消费的字段(model/stream 等),不镜像厂商契约、无第二份真相;② SSE 不适合生成器 → 响应侧不交给生成器,Raw 变体透传管线 Response;③ jsonschema 校验误拒扩展字段 → 实测 `additionalProperties: true` 下校验放行且 flatten 保留。用户知情后拍板统一走生成(入口校验/路由/trait 与管理面同构);安全网:扩展字段透传与错误形状各有 e2e 锚点,契约测试(aikun-protocol)不动 |
 | 5 | **channels 独立 crate,编译期静态注册** | 适配器只描述差异(URL/鉴权/归一化钩子),不做 I/O;不是动态插件系统 |
 | 6 | **pipeline 留在二进制 crate** | 只被二进制消费且阶段 2 大改中,过早 crate 化是纯摩擦 |
 | 7 | **前端保持 vanilla** | 路径随 spec 演化;TS 类型消费(vite + spec 生成)推迟到管理端 UI 大扩张时再评估 |
@@ -25,18 +25,20 @@ aikun/                                # 仓库根
 ├── Cargo.lock
 ├── openapi.yaml                      # ★ 手写 spec(仓库根,与 Cargo.toml 平级的单一真相):
 │                                     #   系统 API 全景图(OpenAPI 3.2.1,RESTful 资源化);
-│                                     #   管理面三层(Auth/User/Admin tag)→ 生成;/v1/* 进 spec 仅作
-│                                     #   文档(loose schema:路径/鉴权/媒体类型,不镜像厂商 schema,
-│                                     #   不入生成白名单);/api/health 不进;统一错误 envelope;
-│                                     #   code review 的对象
+│                                     #   管理面三层(Auth/User/Admin tag)与代理面(Proxy tag,
+│                                     #   /v1 八端点,2026-11-18 纳入)→ 生成;/v1 用混合宽松
+│                                     #   schema(不镜像厂商契约);/api/health 不进;统一错误
+│                                     #   envelope(/v1 例外:厂商格式);code review 的对象
 ├── scripts/
 │   ├── gen-api.sh              # 生成 wrapper:cargo install openapi-to-rust --version 0.24.0(支柱 1,无 Java)
 │   └── bench.js                      # 性能基准
 │
 ├── crates/
-│   ├── aikun-openapi/                # ★ openapi-to-rust 生成物(从 openapi.yaml,仅管理面
-│   │                                 #   ops):workspace 成员,零手写、可整体删除重建;
-│   │                                 #   生成物提交进仓库(构建无需任何外部生成器)
+│   ├── aikun-openapi/                # ★ openapi-to-rust 生成物(从 openapi.yaml,管理面 +
+│   │                                 #   Proxy tag /v1 八端点):workspace 成员,零手写、可
+│   │                                 #   整体删除重建;生成物提交进仓库(构建无需任何外部
+│   │                                 #   生成器);Proxy 响应枚举的 Raw 变体由 gen-api.sh
+│   │                                 #   wrapper 注入(见决策 4)
 │   ├── aikun-protocol/               # /v1 协议转换:enum Protocol、Value 树枢纽、流式状态机、
 │   │   └── src/                      #   sse/usage/stream/error + {openai,anthropic,responses}/
 │   │                                 #   deps: serde_json(仅此)
@@ -65,7 +67,8 @@ aikun/                                # 仓库根
 │   │   ├── billing/                  # 价格、微元折算、ledger(日志+扣费同事务)
 │   │   ├── cache/                    # 响应缓存(进程内,默认关闭)
 │   │   ├── auth/  crypto.rs          # JWT/API Key、AES-GCM
-│   │   ├── api/                      # 薄 HTTP 层:/v1/* 手写端点(永久)+ 迁移期存量管理面端点
+│   │   ├── api/                      # 薄 HTTP 层:/v1/{*path} 通配兜底(唯一手写残余)+ 迁移期
+│   │                             #   存量管理面端点;/v1 八个显式端点已迁生成(见 relay.rs)
 │   │   ├── db/  models/              # 迁移、连接池、行模型(阶段 3 起逐步被 store 吸收)
 │   │   └── frontend/                 # 内嵌管理前端(vanilla JS,路径随 spec 演化)
 │   └── tests/                        # e2e(真实二进制 + mock 上游)+ common 基建
@@ -92,8 +95,8 @@ aikun-channels   aikun-openapi (axum/serde,不依赖任何兄弟 crate)
 
 1. **纯 crate 不沾 I/O**:`aikun-protocol`、`aikun-channels`、`aikun-openapi` 的 Cargo.toml 里不得出现 reqwest / rusqlite / tokio——依赖纯净度由 crate 边界编译期强制,这是多 crate 化的核心收益;
 2. **`aikun-openapi` 零手写**:业务逻辑、中间件、状态接线一律在 `aikun-admin` 与二进制装配层;对生成行为的调整只通过生成器配置(`--additional-properties` / `--template-dir`);
-3. **扩展只落一处**:新增渠道只动 `aikun-channels`(一个文件 + 一行注册);管理面 API(公开/用户自助/管理员三层)演化只动 `openapi.yaml`;`/v1` 端点与管线永远在二进制 crate。spec 的 tag 按鉴权层切,二进制装配时 Auth 裸挂、User 包 `auth_middleware`、Admin 包 `auth_middleware + require_admin`;`/v1/*` 与 `/api/health` 不进 spec。
-4. **流式的边界(2026-11 按选型更新)**:openapi-to-rust 可生成管理面 SSE 端点**骨架**(响应枚举带 `OkStream` 变体,直接包 axum 原生 `Sse`),未来管理面流式端点(日志尾随、测试 playground)可进生成白名单;但 SSE 事件**内容**永远手写——事件流元素是通用 `axum::response::sse::Event`,逐事件负载不做类型化。`/v1/*` 的事件转换状态机在 `aikun-protocol`,**绝不生成**:① handler 是进管线的代理壳,trait 无东西可装;② 生成物自带 jsonschema 运行时请求校验,对代理端点启用会误拒第三方扩展字段(`reasoning_content` 等),直接打坏透传;③ 镜像厂商 schema 进自己 spec = 第二份真相,必漂移——故 `/v1` 在 spec 里只做 loose 文档(路径/鉴权/媒体类型 + `text/event-stream` 标注)。
+3. **扩展只落一处**:新增渠道只动 `aikun-channels`(一个文件 + 一行注册);管理面 API(公开/用户自助/管理员三层)与代理面 `/v1` 演化只动 `openapi.yaml`;`/v1` 管线永远在二进制 crate(生成的只是入口薄壳,装配层 `relay.rs` 委托管线)。spec 的 tag 按鉴权层切,二进制装配时 Auth 裸挂、User 包 `auth_middleware`、Admin 包 `auth_middleware + require_admin`、Proxy 包 `auth_middleware` + `relay_scope` + problem 改写;`/api/health` 不进 spec。
+4. **流式的边界(2026-11-18 按决策 4 更新)**:openapi-to-rust 可生成 SSE 端点**骨架**(响应枚举带 `OkStream` 变体,直接包 axum 原生 `Sse`),未来管理面流式端点(日志尾随、测试 playground)可进生成;SSE 事件**内容**手写——事件流元素是通用 `axum::response::sse::Event`,逐事件负载不做类型化。`/v1/*` 的请求侧已进生成(混合宽松 schema,核心字段类型化 + flatten 扩展透传);事件转换状态机仍在 `aikun-protocol`,响应侧由 wrapper 注入的 `Raw(Response)` 变体透传管线产出(类型化变体装不下动态 SSE/headers,见决策 4)。
 
 ## 四、现存代码 → 目标位置的迁移映射
 
@@ -128,7 +131,7 @@ admin_providers,admin_billing,store}.rs` + `e2e.rs`(旧管理面用例随旧 han
 | 1 | workspace 化 | ✅ 已完整化(2026-11-16 首批根包变体 → 同日步骤 3 移入 `aikun/`) | 虚拟清单 `members = ["aikun", "crates/*"]` + `default-members = ["aikun"]`,根目录裸 cargo 行为不变 |
 | 2 | protocol crate 拆出(机械) | ✅ 已落地(plan 步骤 4,含 9.1 契约测试雏形:非流式双向黄金样本 + 官方 spec 快照) | |
 | 3 | channels crate 拆出(机械) | ✅ 已落地(plan 步骤 5,apply_auth 改 auth_headers 纯数据签名) | |
-| 4 | spec 设计 → 生成 crate → 生成管线 → CI 守卫 | ✅ 全部落地 | `openapi.yaml` + `docs/api-mapping.md` 对照;`crates/aikun-openapi/`(openapi-to-rust 0.24.0 钉版,43 op 白名单,零手写零测试);`scripts/gen-api.sh`;**CI regenerate 守卫 job 已上**(`ci.yml`) |
+| 4 | spec 设计 → 生成 crate → 生成管线 → CI 守卫 | ✅ 全部落地(2026-11-18 起全量生成:spec 全部 operationId 由 gen-api.sh 机械注入,无手工白名单;当前 51 op = 43 管理面 + 8 Proxy) | `openapi.yaml` + `docs/api-mapping.md` 对照;`crates/aikun-openapi/`(openapi-to-rust 0.24.0 钉版,零手写零测试);`scripts/gen-api.sh`(含 Proxy Raw 变体注入 + 代理面正向清单);**CI regenerate 守卫 job 已上**(`ci.yml`) |
 | 5 | 逐 tag 迁移:providers → prices → users → logs → redemption…,每 tag 一批,存量 handler 删一批;`aikun-admin` 依赖 `aikun-store`(或过渡期 db 模块) | ✅ 全批完成(2026-11-16/17) | Auth 试点 → User / Providers / Billing / Stats 各批;旧 `/api/admin/**` 路由与旧用户自助 handler 清零,前端切换完成;行为变化单列 CHANGELOG;版本门禁 0.5.0 满足 |
 | 6 | store crate 落位(阶段 3,与缓存/计数器同阶段) | ✅ 已落地(plan 步骤 8 / roadmap 阶段 3) | `crates/aikun-store`(pool / schema / 行映射 / 静态加密 / 口令哈希 / 默认价格播种 / `api_key_usage_daily` 日用量计数器);`grep conn.lock() aikun/src/api/` 归零;渠道 registry 快照、价格表缓存世代失效同批落位。`scripts/bench.js` 对比以 CI / 人工复跑为准 |
 | 7 | 阶段 2(pipeline 显式化)与上述 1–3 无冲突,可并行推进 | — | |

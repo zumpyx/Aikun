@@ -276,3 +276,21 @@ roadmap 阶段 2(pipeline 显式化)与步骤 3–5 无冲突,可并行推进
 - ✅ **roadmap 阶段 2(pipeline 显式化)**:RequestCtx/分类/单次 attempt/流式三单元/
   GatewayError/passthrough 并入(27 行薄壳)/request_id 贯穿/三类超时/脱敏/缓存收紧,
   全量 270 测试绿(7bbd2a6);**9.1 流式黄金样本**双向 7 用例(6a9ef68)。
+
+### 后续批次(2026-11-18):/v1 代理面纳入 openapi-to-rust 生成 ✅
+
+> 用户裁决,推翻 0.5 期"/v1 永远手写"(architecture-v0.5 决策 4 已重写留痕);
+> 同时拍板 **Gemini 等新协议不做**(roadmap 阶段 4 待定项关闭)。
+
+- **spec**:`/v1` 八端点 requestBody 换混合宽松 schema(核心字段 optional 类型化,
+  **每层显式 `additionalProperties: true`**——0.24.0 实测生成 `#[serde(flatten)]`,
+  漏写的层会静默丢字段);200 仍声明 json + text/event-stream。
+- **生成管线**:全量生成(spec 全部 operationId 由 gen-api.sh 机械注入,无手工白名单);gen-api.sh 防线由"拒绝 /v1"反转为正向清单
+  (8 条路由必须齐)+ wrapper 注入 `Raw(Response)` 透传变体(管线动态响应
+  装不进生成枚举);复现性校验逐字节一致。
+- **装配**:`aikun/src/relay.rs`(RelayService 实现 ProxyApi trait;Claims/
+  AuthContext/headers 经 relay_scope task-local 注入,同一模式源自
+  aikun-admin user.rs);problem+json 校验错误经中间件改写为厂商格式(422
+  归一 400);`/v1/{*path}` 通配兜底保留手写;手写 handler 删 3 个文件。
+- **验收**:e2e 全绿且既有断言零修改;新增 2 用例锁定新行为(非法 JSON →
+  厂商格式 400;顶层扩展字段 flatten 透传到上游)。

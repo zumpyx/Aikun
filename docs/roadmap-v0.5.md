@@ -141,7 +141,7 @@ src/
 ### 阶段 4:收尾与验证(按需)
 
 - [ ] 前端治理:providers.js 两个弹窗去重(共享一份表单构造)、全部 JS 转 ESM(`<script type="module">`,消灭全局作用域与加载顺序依赖)、hash 路由(刷新/深链/后退可用)
-- [ ] (待定)用新 protocol 抽象接入一个新协议(如 Gemini)作为 0.5 架构的验收测试——**这是发布标志候选,动工前再拍板**
+- [x] ~~(待定)用新 protocol 抽象接入一个新协议(如 Gemini)作为 0.5 架构的验收测试~~ → **2026-11-18 拍板:不做**。协议面维持 OpenAI 系 + Anthropic;/v1 八端点已纳入 openapi-to-rust 生成(见 architecture-v0.5 决策 4),扩展以适配器(`aikun-channels`)而非新协议方向演进
 - [ ] (待定)/metrics 端点(QPS、分渠道延迟、failover 计数、转换计数)
 - [ ] CHANGELOG 整理,发 0.5.0
 
