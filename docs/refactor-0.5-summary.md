@@ -87,9 +87,8 @@ handler 删除,登录链路 / 计费 / 兑换等行为锚点断言不减(plan �
 2. **契约测试流式样本**:`crates/aikun-protocol/tests/fixtures/` 目前只有
    非流式 OpenAI ↔ Anthropic 双向黄金样本 + 官方 spec 快照;流式样本按计划
    留阶段 2(与 stream 状态机改造同批)。
-3. **SurrealDB 阶段 S**:SQLite → SurrealDB(默认嵌入式 SurrealKV,保单二进制
-   零依赖)。前置条件已就绪——`aikun-store` 的能力 trait 签名零 SQL 方言;
-   验收标准(bench 不劣化、迁移工具、备份故事重写、版本钉死)见
+3. **SurrealDB 阶段 S**:**已完成**(2026-11-17,见 §六补记)——SQLite →
+   SurrealDB(默认嵌入式 SurrealKV,保单二进制零依赖),验收标准核对见
    `docs/plan-next-steps.md`「阶段 S」。
 4. **spec 5xx 缺口(5xx→4xx 过渡映射)**:生成响应枚举绝大多数 op 无 5xx
    变体,DB 故障 fail-closed 映射为 4xx;`listApiKeys` / `getWalletStats` /
@@ -115,3 +114,36 @@ handler 删除,登录链路 / 计费 / 兑换等行为锚点断言不减(plan �
   `GET /api/system/version` 主次版本 ≥ 0.5 门禁,不得指向 0.4.x 实例
   (最危险的坑:同路径 `GET /api/prices` 语义翻转,api-mapping 备注 11)。
 - `/v1/**` 代理面契约、路径、错误体全部不变(v1 冻结)。
+
+## 六、数据库补记(阶段 S,0.5 收尾之后落地)
+
+> 本文 §一–§五 是 0.5.0 收尾时点(HEAD 2260139)的快照;本节补记其后
+> 落地的阶段 S——数据库从 SQLite 迁到 SurrealDB(2026-11-17 收尾回写,
+> 数字为当日实查)。设计全文 `docs/surreal-migration.md`(含 §十实施
+> 结果),验收核对 `docs/plan-next-steps.md`「阶段 S」,对外行为变化
+> 逐条 `CHANGELOG.md` [0.6.0]。
+
+- **默认嵌入式 SurrealKV**(`surrealdb` 钉版 4.0.1,单二进制零外部依赖
+  不变;数据目录 `./aikun.surreal/`,容器内 `/data/aikun.surreal`);
+  远程 `ws/wss/http/https` 端点同构支持——"是否多实例"从架构决策降为
+  部署决策。配置面 `AIKUN_SURREAL_URL` / `--surreal-url`,
+  `AIKUN_DATABASE_URL` 废弃。
+- **本文 §二 表格随阶段 S 失效的两处**:`aikun-store` 行的
+  "SQLite impl / rusqlite(仅 impl 侧)" 与 "关键依赖" 列——主路径已
+  **移除 SQLite**(源码 grep rusqlite 0 命中),crate 只剩 SurrealDB
+  实现;schemafull 12 表,版本闸门 `store_meta:schema.version`
+  (替代 `PRAGMA user_version`,降级保护语义不变)。
+- **能力 trait 全部 async**(`#[async_trait]` 三域:`IdentityStore` /
+  `ChannelStore` / `BillingStore`,`Arc<dyn …>` 装配)——§四遗留项 6
+  的 "ledger 留二进制" 随之消除:记账改为 `BillingStore::record_request`
+  的单次 `BEGIN…COMMIT`(扣费原子性红线语义不变)。
+- **SQLite 读能力收口进 `crates/aikun-migrate`**(迁移工具,Docker 镜像
+  内置):只读源库 + `user_version` 闸门,微元金额直搬、渠道 key 密文
+  免重加密、旧 uuid 沿用;幂等可重跑,行数对照全一致才成功。
+- **备份故事重写**:嵌入式停机整目录拷贝或 `surreal export`,远程
+  `surreal export` / `surreal import`(README「数据与升级」)。
+- **bench(阶段 S 记录)**:12 核 Apple M6 / node v26.13.1,50 并发
+  ≈576 QPS(P50 78.9ms);SQLite 基线 2400 QPS @50 出自 10 核
+  i9-12900H 旧机,非同机对照(如实记录,见 plan-next-steps 阶段 S)。
+- e2e 检查通道改经管理面 API(dev-dependencies 无数据库直连),
+  `#[tokio::test]` 静态统计仍 65;store 侧 Surreal 单测 29(`mem://`)。

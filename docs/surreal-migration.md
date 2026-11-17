@@ -1,6 +1,7 @@
 # SurrealDB 迁移设计(阶段 S)
 
-> 状态:骨架已落地(本文 §八);三路并行实现进行中。
+> 状态:**已完成**(2026-11-17 阶段 S 全部批次落地,默认已切 SurrealDB;
+> 实施结果与设计偏差见 §十)。
 > 上游依据:`docs/plan-next-steps.md` 阶段 S(2026-11-16 用户决策)、
 > `docs/architecture-v0.5.md` §六(store trait 禁方言判据)、用户 2026-11-17
 > 授权(新版 SDK、配置面已定、schema 可重构)。
@@ -340,3 +341,61 @@ admin 端口与 /v1 热路径全部要绕——持续性地雷,否。
     存量 20 个 SQLite 侧单测,证明共存无回归);
   * 完整测试门禁(`cargo test --locked --workspace` + e2e)由脚本统一跑,
     本批未跑。
+
+## 十、实施结果(2026-11-17 收尾回写)
+
+阶段 S 各批全部落地;下列条目为收尾当日在当前工作树实查(命令与结果
+如实记录),设计偏差单列。
+
+### 落地对照(逐节)
+
+| 设计节 | 状态 | 实施位置与实查证据 |
+|---|---|---|
+| §一 选型钉版 + 栈配置 | ✅ | `crates/aikun-store/Cargo.toml` `surrealdb = "4.0.1"`,`Cargo.lock` 同值;主程序显式建运行时 `thread_stack_size(10MiB)`(`aikun/src/main.rs:58-66`),迁移工具 16MiB(`crates/aikun-migrate/src/main.rs:57-61`) |
+| §二 配置面 | ✅ | `aikun/src/config.rs`:`surreal_url` 字段 + SETTINGS 文案 + 非法端点 panic 拒启(:233-235)+ `database_url` 废弃告警(:211-220)+ 目录推导 `sqlite_dir_of`(:328-341,单测 `surreal_dir_follows_database_url_location`);`env.example` 同步 |
+| §三 ID 策略 | ✅ | 新记录 `ulid::Ulid::new()` 作 record key(`identity.rs:463`、`:683`);迁移旧行沿用旧 uuid(`aikun-migrate` 按 §五映射) |
+| §四 schema | ✅ | `SCHEMA_SURQL` 12 表全部落 DDL(`surreal/mod.rs:317-470`);`SUPPORTED_SCHEMA_VERSION = 1`(`mod.rs:57`),库版本更新即拒启(两处闸门,`mod.rs:39-46`) |
+| §五 字段映射 | ✅ | `crates/aikun-migrate`(main.rs 835 行):源库只读打开 + `user_version` 闸门(恰为 3)、双格式时间解析 `parse_dt`、幂等 UPSERT、各表行数对照全一致才报成功;微元直搬 / 密文免重加密(文件头红线复述) |
+| §六 trait async 化 | ✅(有偏差,见下) | 三域 async trait 定稿:`IdentityStore`(`identity.rs:118`)、`ChannelStore`(`channels_store.rs:84`)、`BillingStore`(`billing_store.rs:150`),均 `#[async_trait]` + `Arc<dyn …>` 装配(`aikun/src/store.rs:18-26`) |
+| §七 检查通道 | ✅ | e2e 全改管理面 API:spawn 注入 `AIKUN_RESET_ADMIN_PASSWORD` + 临时目录 `AIKUN_SURREAL_URL`(`aikun/tests/common/mod.rs:223-231`),dev-dependencies 无数据库直连 crate;store 单测 `mem://` 进程内直连 |
+| §八 分工 | ✅ | 三域文件最终规模:`identity.rs` 1326 行 / `channels_store.rs` 2175 行 / `billing_store.rs` 2811 行 / `surreal/mod.rs` 565 行 |
+
+### 设计偏差(如实记录)
+
+1. **存量四同步 trait 未"翻转"而是被取代**:§六.2 原计划把
+   `ChannelTopology` / `PriceBook` / `KeyUsage` / `CacheTokens` 四个同步
+   trait 逐一翻转为 async;实施时四 trait 不再单独存在,其能力(拓扑
+   令牌 / 价格规则 / 限额快照)并入三域 async trait 的方法,快照域类型
+   (`PriceRule` / `KeyUsageSnapshot` / `CacheToken`)留在 `lib.rs` 共享。
+   调用面结果与设计一致:registry / billing / admission 全部直接
+   `await`(如 `billing/ledger.rs:243` 的 `record_request`),DB 访问不再
+   包 `spawn_blocking`(`aikun/src` 内仅剩 2 处,均为 Argon2 口令哈希,
+   CPU 密集属意留,`main.rs:447`、`:962`)。
+2. **计费记账事务本体随切换收编**:`ledger.rs` 的记账从"二进制内 SQLite
+   事务 + spawn_blocking"改为调用 `BillingStore::record_request` 的单次
+   `BEGIN…COMMIT` 查询(事务原子性红线语义不变);0.5 收尾总结所述
+   "ledger 留二进制"的遗留项至此消除。
+
+### 验收数字(收尾实测)
+
+- `grep -rn rusqlite aikun/src crates/aikun-store/src crates/aikun-admin/src
+  crates/aikun-channels/src crates/aikun-protocol/src crates/aikun-openapi/`
+  → **0 命中**(SQLite 收口进 `aikun-migrate`);
+- `grep -rn "conn.lock()" aikun/src/api/` → **0 命中**;
+- e2e:`aikun/tests/` 7 目标静态统计 **65** 个 `#[tokio::test]`
+  (与阶段 S 前持平);store 侧 Surreal 单测 **29** 个
+  (identity 7 + channels 9 + billing 11 + mod 2,`mem://`);
+- bench(阶段 S 批次记录转录,含环境与"非同机对照"限定)见
+  `docs/plan-next-steps.md` 阶段 S 验收核对;
+- 完整测试门禁(`cargo test --locked --workspace` + e2e)由脚本统一跑,
+  本收尾批未跑(仅文档回写)。
+
+### 落地后的遗留
+
+- bench 同机 SQLite ↔ SurrealDB 对照未做(旧基线出自另一台机器,
+  见 plan-next-steps 阶段 S);
+- 远程(ws/http)端点与 `?ns=&db=&user=&pass=` 已实现解析与连接,但
+  多实例部署的运维故事(选路 / 缓存 owner 序号已留缝,`store.rs:24`)
+  未在阶段 S 展开,留后续;
+- SQLite 侧 pool.rs / schema.rs / provider_row.rs 已随主路径移除,
+   读能力仅存于 `aikun-migrate`(再往后的 schema 演进只动 Surreal 侧)。

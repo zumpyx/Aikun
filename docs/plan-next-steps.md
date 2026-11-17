@@ -206,7 +206,7 @@ roadmap 阶段 2(pipeline 显式化)与步骤 3–5 无冲突,可并行推进
     (基线:阶段 0 补的登录链路 e2e、修复 ①②③ 的回归测试均仍在);
   - `cargo test --locked --workspace` 中不出现 `aikun-openapi` 的任何测试目标。
 
-## 阶段 S(0.5 之后):数据库迁移 SurrealDB
+## 阶段 S(0.5 之后):数据库迁移 SurrealDB ✅(2026-11-17 回写)
 
 > 2026-11-16 用户决策:整个结构重构完成后,数据库从 SQLite 迁移到 SurrealDB。
 > 路线:默认嵌入式 SurrealKV(保住单二进制零依赖),将来可切网络连接模式——
@@ -216,9 +216,49 @@ roadmap 阶段 2(pipeline 显式化)与步骤 3–5 无冲突,可并行推进
 前置条件:aikun-store 仓储层就位,且 trait **按能力定义、不泄漏 SQLite 方言**
 (datetime 字符串运算 / ON CONFLICT / ?N 占位 / PRAGMA——设计评审时逐条过)。
 
-验收标准:
+**验收核对(2026-11-17 收尾实测)**:
+
+- **版本钉死** ✅:`crates/aikun-store/Cargo.toml` `surrealdb = "4.0.1"`,
+  `Cargo.lock` 实查同为 4.0.1。
+- **迁移工具** ✅:`crates/aikun-migrate`(835 行)——源库只读打开 +
+  `user_version` 闸门(必须恰为 3,低则提示升满、高则拒绝)、目标库
+  `ensure_schema`(`store_meta:schema.version` 即 user_version 闸门的
+  替代语义)、按设计文档 §五字段映射全量搬运、幂等 UPSERT 可重跑、
+  完成后打印各表行数对照且全部一致才报成功。Docker 镜像已内置。
+- **备份/恢复故事重写** ✅:README「数据与升级」改为嵌入式停机后整目录
+  拷贝(`./aikun.surreal/`)或 `surreal export`,远程用 `surreal export` /
+  `surreal import`;`docker-compose.yml` 数据卷挂 `/data/aikun.surreal`。
+- **主路径 SQLite 清零** ✅:`grep -rn rusqlite aikun/src crates/aikun-store/src
+  crates/aikun-admin/src crates/aikun-channels/src crates/aikun-protocol/src
+  crates/aikun-openapi/` 0 命中(SQLite 读能力收口进 `aikun-migrate`);
+  `grep -rn "conn.lock()" aikun/src/api/` 0 命中。
+- **测试面随迁** ✅:e2e 检查通道全部改经管理面 API
+  (`AIKUN_RESET_ADMIN_PASSWORD` 注入已知密码;dev-dependencies 无任何
+  数据库直连 crate),静态统计 **65** 个 `#[tokio::test]`(与阶段 S 前
+  持平);store 侧 Surreal 单测 **29** 个(`mem://` 进程内实例,断言
+  微元口径 / 事务原子性),`aikun/src` 内 `spawn_blocking` 仅剩 2 处
+  (Argon2 口令哈希,CPU 密集属意留)。
+- **bench(阶段 S 批次记录,如实转录)**:`scripts/bench.js`(mock 上游
+  零延迟、非流式 `/v1/chat/completions`、含完整计费链路),环境 12 核
+  Apple M6 / node v26.13.1:
+
+  | 并发 | 请求数 | QPS | P50(ms) | P99(ms) |
+  |---|---|---|---|---|
+  | 10 | 1000 | 609 | 13.5 | 55.1 |
+  | 50 | 5000 | 576 | 78.9 | 202.0 |
+  | 100 | 10000 | 569 | 152.8 | 489.7 |
+  | 200 | 20000 | 539 | 329.1 | 1033.6 |
+
+  「不劣于 SQLite 基线(2400 QPS @ 50 并发)」一项**不据此判定**:该基线
+  出自 10 核 i9-12900H 的旧机记录,与本批 M6 非同机对照,阶段 S 各批
+  notes 未提供同机 SQLite 对照数据——如实记录,同机对照待补。
+
+原验收标准(存档):
 
 - `scripts/bench.js` 同场景对比,计费热路径(高频小事务串行写)不劣于 SQLite 基线(2400 QPS @ 50 并发)
 - SQLite → SurrealKV 数据迁移工具(含 user_version 闸门语义的替代:版本检测 + 拒绝降级)
 - 备份/恢复故事重写(export/snapshot 替代"复制单文件")
 - 版本钉死(3.0 起转向 AI agent memory 方向,演化快)
+
+实施结果与设计偏差记录见 `docs/surreal-migration.md` §十;对外行为变化
+逐条见 `CHANGELOG.md` [0.6.0]。

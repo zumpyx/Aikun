@@ -5,6 +5,73 @@
 
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
+## [0.6.0] - 2026-11-17
+
+阶段 S(数据库迁移 SurrealDB,设计全文见 `docs/surreal-migration.md`)全部
+落地:默认**嵌入式 SurrealKV**,主路径移除 SQLite,存量数据经迁移工具
+`aikun-migrate` 一次性搬运。`/v1` 代理面与管理面 API(openapi.yaml)对外
+契约不变;变化集中在存储、配置与部署面(逐条列下)。
+
+### 变更(数据库:SQLite → SurrealDB,阶段 S)
+
+- **存储引擎更换**:SQLite → SurrealDB(钉版 `surrealdb = 4.0.1`,
+  BSL 1.1 宽松变体)。默认嵌入式 SurrealKV(数据目录 `./aikun.surreal/`,
+  单二进制零外部依赖不变);远程 `ws://` `wss://` `http://` `https://`
+  端点亦可用(ns/db 默认 `aikun`/`aikun`,URL 参数可覆盖)——是否多实例
+  从架构决策降为部署决策。schema 重设计为 schemafull 12 表(原生
+  `datetime` / `bool` / `array` / record 链接);版本闸门由
+  `PRAGMA user_version` 改为 `store_meta:schema.version`,库版本比二进制
+  新仍拒绝启动(降级保护语义不变)。
+- **新增 `--surreal-url` / `AIKUN_SURREAL_URL`**(优先级 env > CLI >
+  默认,同其余配置):默认 `surrealkv://./aikun.surreal`;非法端点(未知
+  scheme / 空目录 / user 不成对 / 未知参数)**拒绝启动**。
+  `AIKUN_DATABASE_URL` / `--database-url` **废弃**(显式设置时启动告警
+  一次),此后仅迁移工具读取;`AIKUN_SURREAL_URL` 未显式设置而旧库指向
+  非默认位置时,嵌入式目录自动随迁旧库同目录(docker 卷挂载部署的
+  数据位置不变)。
+- **迁移工具 `aikun-migrate`**(Docker 镜像内置):读旧 SQLite 库
+  (**只读**,绝不写源库;源库 `user_version` 必须恰为 3,更低提示先用
+  旧版二进制升满、更高拒绝)→ 按设计文档 §五字段映射全量写入目标库
+  (目标先过 `ensure_schema` 版本闸门)。微元金额原样直搬、渠道 key
+  密文免重加密、旧 uuid 沿用作 record id(管理面展示的旧 ID 不变);
+  **幂等可重跑**(按 record id UPSERT 全字段覆盖),完成后打印各表
+  行数对照,全部一致才报成功。用法见 README「数据与升级」。
+- **备份/恢复故事变化**:嵌入式部署由"复制单个 aikun.db"改为**停机后
+  整目录拷贝**(`./aikun.surreal/`),或 `surreal export`;远程部署用
+  `surreal export` / `surreal import`。
+- **store 能力 trait async 化**:仓储层能力 trait 由同步签名改为
+  `#[async_trait]`(身份 / 渠道 / 计费三域,`Arc<dyn …>` 装配);影响面
+  为 crate 内部签名与二进制装配,**对外 API 行为无变化**。红线逐条保持:
+  计费扣费 / 兑换码核销仍是单次 `BEGIN…COMMIT` 原子事务,渠道 key 仍
+  AES-256-GCM 密文落库,金额仍整数微元。
+- **主路径移除 SQLite**:主二进制与 `aikun-store` 不再依赖 rusqlite
+  (源码 grep 实测 0 引用);SQLite 读能力收口进迁移工具 crate
+  `aikun-migrate`。
+- **运行时栈配置**:嵌入式引擎的查询在调用任务栈上内联递归,主程序
+  显式构建 tokio 多线程运行时并设 `thread_stack_size = 10MiB`(替代
+  `#[tokio::main]` 默认 2MiB,防深查询栈溢出)。
+- e2e 检查通道全部改经管理面 API(seed / 断言不再直连数据库文件,经
+  `AIKUN_RESET_ADMIN_PASSWORD` 注入已知密码登录);store 单测以 `mem://`
+  进程内实例直连断言库内行为(微元口径 / 事务原子性)。e2e 静态统计
+  仍为 65 个 `#[tokio::test]`,行为锚点(登录链路 / 计费 / 兑换)断言
+  不减。
+
+### 性能(阶段 S bench,2026-11-17)
+
+`scripts/bench.js`(mock 上游零延迟,非流式 `/v1/chat/completions`,
+含完整计费链路),12 核 Apple M6 / node v26.13.1:
+
+| 并发 | 请求数 | QPS | P50(ms) | P99(ms) |
+|---|---|---|---|---|
+| 10 | 1000 | 609 | 13.5 | 55.1 |
+| 50 | 5000 | 576 | 78.9 | 202.0 |
+| 100 | 10000 | 569 | 152.8 | 489.7 |
+| 200 | 20000 | 539 | 329.1 | 1033.6 |
+
+历史 SQLite 基线(≈2400 QPS @ 50 并发)出自不同机器(10 核
+i9-12900H),**非同机对照**,不据此判定优劣;如实记录,同机对照待补
+(详见 `docs/plan-next-steps.md` 阶段 S 验收核对)。
+
 ## [0.5.0] - 2026-11-17
 
 `refactor/modular-gateway` 分支的还债版:roadmap-v0.5 阶段 0、阶段 1 与阶段 3 主体
@@ -223,6 +290,7 @@ aikun-protocol,aikun-channels,aikun-admin,aikun-store}`)与 API spec / 生成管
 - **计费整数微元化**:金额列改为整数微元(1 元 = 1e6),启动时幂等迁移,API 边界仍为元。
 - 余额 ≤ 0 时代理入口直接 402 `insufficient_quota`。
 
+[0.6.0]: https://github.com/zumpyx/Aikun/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/zumpyx/Aikun/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/zumpyx/Aikun/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/zumpyx/Aikun/compare/v0.4.2...v0.4.3

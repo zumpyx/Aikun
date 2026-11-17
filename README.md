@@ -227,7 +227,7 @@ crates/
 
 ## 性能与容量
 
-单机嵌入式存储完全够用,瓶颈在上游渠道而不在网关。历史基线(SQLite 后端,10 核 i9-12900H,release 二进制,mock 上游零延迟,非流式请求,含完整计费链路):并发 50 时 **≈2,400 QPS**(P50 19ms)——计费事务随响应落库、不异步丢账的取舍不变。阶段 S(SurrealDB)切换后的 bench 对比见 roadmap 验收项;复现方法:`cargo build --release` 后 `node scripts/bench.js`;详细测试方法与容量估算见管理端「文档」页。
+单机嵌入式存储完全够用,瓶颈在上游渠道而不在网关。SurrealDB(嵌入式 SurrealKV)后端 bench(2026-11-17,12 核 Apple M6,node v26.13.1,release 二进制,mock 上游零延迟,非流式请求,含完整计费链路):并发 50 时 **≈576 QPS**(P50 78.9ms / P99 202ms);并发 10 / 100 / 200 分别 609 / 569 / 539 QPS(完整数字见 `CHANGELOG.md` [0.6.0] 与 `docs/plan-next-steps.md` 阶段 S)——计费事务随响应落库、不异步丢账的取舍不变。历史 SQLite 基线(≈2,400 QPS @ 50 并发)出自另一台机器(10 核 i9-12900H),非同机对照,不据此判定优劣。复现方法:`cargo build --release` 后 `node scripts/bench.js`;详细测试方法与容量估算见管理端「文档」页。
 
 ## 数据与升级
 
