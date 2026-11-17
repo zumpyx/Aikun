@@ -260,6 +260,18 @@ pub async fn record_request_result(
         .mirror_request_result(provider_id, latency_ms, success);
 }
 
+// ---- 失败分类守卫(单测锁定,语义自旧 SQLite selector 迁移)----
+/// 0(传输)/408/429/5xx 属上游侧;其余 4xx 是客户端请求的错,不伤渠道健康。
+pub(crate) fn is_upstream_failure(status: u16) -> bool {
+    status == 0 || status == 408 || status == 429 || status >= 500
+}
+
+/// consecutive_failures 累加守卫:**429 永不计失败**(渠道本身可能健康);
+/// 同请求重试的后续尝试(count_consecutive=false)不重复累加,防误禁用。
+pub(crate) fn counts_toward_disable(status: u16, count_consecutive: bool) -> bool {
+    count_consecutive && is_upstream_failure(status) && status != 429
+}
+
 /// Record a failed upstream attempt. Auto-disables the provider when:
 /// - the upstream returned 401/403 (bad credentials — always dead), or
 /// - consecutive failures reach `threshold`.
@@ -282,21 +294,21 @@ pub async fn record_failure(
     threshold: u32,
     count_consecutive: bool,
 ) {
-    let is_upstream_failure = status == 0 || status == 408 || status == 429 || status >= 500;
-    let counts_as_failure = count_consecutive && is_upstream_failure && status != 429;
+    let upstream_failure = is_upstream_failure(status);
+    let counts_as_failure = counts_toward_disable(status, count_consecutive);
     // 客户端 4xx 按成功方向衰减 error_rate(不推高)。
     ema_step(
         store.channels.as_ref(),
         provider_id,
         latency_ms,
-        !is_upstream_failure,
+        !upstream_failure,
         counts_as_failure,
     )
     .await;
     // EMA 事实镜像到拓扑快照(同公式)。
     registry::shared()
         .cached()
-        .mirror_failure(provider_id, latency_ms, is_upstream_failure);
+        .mirror_failure(provider_id, latency_ms, upstream_failure);
 
     let reason = if status == 401 || status == 403 {
         Some(format!("上游返回 {} 认证失败,自动禁用", status))
@@ -447,6 +459,30 @@ mod tests {
             channel_kind: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn failure_classification_guards() {
+        // 客户端 4xx 不伤渠道健康(不计失败,EMA 按成功方向衰减)
+        for s in [400u16, 402, 403, 404, 422] {
+            assert!(!is_upstream_failure(s), "{s} 应属客户端错误");
+            assert!(
+                !counts_toward_disable(s, true),
+                "{s} 不得计 consecutive_failures"
+            );
+        }
+        // 上游侧失败:0(传输)/408/5xx
+        for s in [0u16, 408, 500, 502, 503] {
+            assert!(is_upstream_failure(s), "{s} 应属上游失败");
+            assert!(counts_toward_disable(s, true), "{s} 首次尝试应计失败");
+        }
+        // 429:渠道可能健康,永不计 consecutive_failures
+        assert!(is_upstream_failure(429));
+        assert!(!counts_toward_disable(429, true), "429 永不计失败");
+        // 同请求重试的后续尝试:不重复累加(防重试放大导致误禁用)
+        for s in [0u16, 408, 500] {
+            assert!(!counts_toward_disable(s, false), "{s} 重试重复尝试不得累加");
         }
     }
 
