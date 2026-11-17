@@ -8,7 +8,7 @@
 //!
 //! * **过渡期 DB/rand/sha2 走端口 trait**:`BillingStore` 由二进制装配层
 //!   (main.rs 的适配器,参照 Auth 批的 `DbAuthStore`)实现;aikun-admin
-//!   不依赖 rusqlite/rand/sha2/uuid,依赖纯净度约束见 playbook 踩坑 #7。
+//!   不依赖存储引擎/rand/sha2/uuid,依赖纯净度约束见 playbook 踩坑 #7。
 //!   明文码生成(熵源)、sha256、行 ID 都经端口注入;**明文只在
 //!   `admin_create_redemption_codes` 的响应里出现一次**,库中只落哈希与
 //!   后缀——这是本组最重要的安全语义,永不出列表。

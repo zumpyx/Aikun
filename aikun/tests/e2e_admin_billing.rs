@@ -13,9 +13,8 @@
 //! * 生成器实际校验行为(422 request_validation_failed / 400
 //!   malformed_request,与 spec 示例的差异是已记录的生成器口径,锚实测)。
 //!
-//! 跨批依赖:兑换入口 `POST /api/users/me/redemptions` 属 User 批
-//! (user.rs),本文件的全流程用例在其挂载后才能全绿——运行时验证由集成
-//! 阶段统一做,本文件保证编译通过与断言语义正确。
+//! 阶段 S 检查通道:seed/断言全走管理面 API(见 tests/common);计费断言
+//! 经 /api/logs(stats)与 /api/users 回读,微元口径换算成元后比对。
 //!
 //! `seed_openai_provider` / `chat_completions` 是 e2e.rs 同名助手的本地
 //! 副本(integration test 目标间不共享非 common 代码;通配计费需要经
@@ -25,12 +24,13 @@ mod common;
 
 use std::time::Duration;
 
-use common::{MockUpstream, ProviderSeed, TestApp, seed_api_key, seed_provider, wait_until};
+use common::{MockUpstream, ProviderSeed, TestApp};
+use serde_json::{Value, json};
 
 const WAIT: Duration = Duration::from_secs(10);
 
 /// problem+json 断言:状态 + content-type + code,返回整个 body 供补充断言。
-async fn assert_problem(res: reqwest::Response, status: u16, code: &str) -> serde_json::Value {
+async fn assert_problem(res: reqwest::Response, status: u16, code: &str) -> Value {
     assert_eq!(res.status(), status, "{:?}", res.text().await);
     let ct = res
         .headers()
@@ -41,37 +41,29 @@ async fn assert_problem(res: reqwest::Response, status: u16, code: &str) -> serd
         ct.starts_with("application/problem+json"),
         "content-type 应为 problem+json,实际 {ct}"
     );
-    let body: serde_json::Value = res.json().await.unwrap();
+    let body: Value = res.json().await.unwrap();
     assert_eq!(body["code"].as_str(), Some(code), "{body}");
     body
 }
 
-fn seed_openai_provider(app: &TestApp, mock: &MockUpstream, id: &str) {
-    seed_provider(
-        &app.db(),
-        &ProviderSeed {
-            id,
-            name: id,
-            protocol: "openai",
-            base_url: &mock.base,
-            models: "[\"gpt-4\"]",
-            priority: 10,
-            weight: 10.0,
-            health_status: "healthy",
-            error_rate: 0.0,
-        },
-    );
+async fn seed_openai_provider(app: &TestApp, mock: &MockUpstream, name: &str) -> String {
+    app.seed_provider(&ProviderSeed {
+        name,
+        base_url: &mock.base,
+        ..ProviderSeed::default()
+    })
+    .await
 }
 
-async fn chat_completions(app: &TestApp) -> reqwest::Response {
+async fn chat_completions(app: &TestApp, key: &str) -> reqwest::Response {
     let req = app
         .client()
         .post(format!("{}/v1/chat/completions", app.base))
-        .json(&serde_json::json!({
+        .json(&json!({
             "model": "gpt-4",
             "messages": [{"role": "user", "content": "hi"}]
         }));
-    app.auth(req).send().await.unwrap()
+    req.bearer_auth(key).send().await.unwrap()
 }
 
 /// 价格 CRUD + 通配计费(核心行为锚点,强度不低于迁移前基线):
@@ -82,21 +74,21 @@ async fn chat_completions(app: &TestApp) -> reqwest::Response {
 async fn admin_prices_crud_wildcard_billing_and_pagination() {
     let mock = MockUpstream::start().await;
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    seed_openai_provider(&app, &mock, "p1");
-    let jwt = common::admin_jwt();
+    let user = app.seed_user_funded().await;
+    seed_openai_provider(&app, &mock, "p1").await;
+    let jwt = app.admin_token().await;
     let client = app.client();
 
     // 创建通配价格 gpt-*(1, 2)/1M → 201;cached_price 未传,显式 null
     let resp = client
         .post(format!("{}/api/prices", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"model": "gpt-*", "prompt_price": 1.0, "completion_price": 2.0}))
+        .json(&json!({"model": "gpt-*", "prompt_price": 1.0, "completion_price": 2.0}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201, "{:?}", resp.text().await);
-    let price: serde_json::Value = resp.json().await.unwrap();
+    let price: Value = resp.json().await.unwrap();
     assert_eq!(price["model"], "gpt-*");
     assert!(
         price["cached_price"].is_null(),
@@ -112,7 +104,7 @@ async fn admin_prices_crud_wildcard_billing_and_pagination() {
     let resp = client
         .post(format!("{}/api/prices", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"model": "gpt-*"}))
+        .json(&json!({"model": "gpt-*"}))
         .send()
         .await
         .unwrap();
@@ -120,18 +112,10 @@ async fn admin_prices_crud_wildcard_billing_and_pagination() {
 
     // 请求命中通配价格:cost = (3+2)×1/1M + 3×2/1M = 0.000011 元 = 11 微元
     // (mock 5 个输入含 2 缓存,无 cached_price 时缓存按输入价计)
-    let resp = chat_completions(&app).await;
+    let resp = chat_completions(&app, &user.api_key).await;
     assert_eq!(resp.status(), 200);
-    wait_until("wildcard price applied", WAIT, || {
-        let cost: i64 = app
-            .db()
-            .query_row(
-                "SELECT COALESCE(SUM(cost), 0) FROM request_logs WHERE user_id = 'u-e2e'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        cost == 11
+    app.wait_admin(&format!("/api/logs/stats?user_id={}", user.id), WAIT, |s| {
+        (s["total_cost"].as_f64().unwrap_or(0.0) - 0.000011).abs() < 1e-12
     })
     .await;
 
@@ -143,7 +127,7 @@ async fn admin_prices_crud_wildcard_billing_and_pagination() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let page: serde_json::Value = resp.json().await.unwrap();
+    let page: Value = resp.json().await.unwrap();
     assert_eq!(page["total"], 1);
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
 
@@ -151,14 +135,12 @@ async fn admin_prices_crud_wildcard_billing_and_pagination() {
     let resp = client
         .post(format!("{}/api/prices", app.base))
         .bearer_auth(&jwt)
-        .json(
-            &serde_json::json!({"model": "other-*", "prompt_price": 1.0, "completion_price": 1.0}),
-        )
+        .json(&json!({"model": "other-*", "prompt_price": 1.0, "completion_price": 1.0}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201);
-    let other_id = resp.json::<serde_json::Value>().await.unwrap()["id"]
+    let other_id = resp.json::<Value>().await.unwrap()["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -169,7 +151,7 @@ async fn admin_prices_crud_wildcard_billing_and_pagination() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let in_use: serde_json::Value = resp.json().await.unwrap();
+    let in_use: Value = resp.json().await.unwrap();
     let items = in_use["items"].as_array().unwrap();
     assert_eq!(in_use["total"], 1);
     assert_eq!(items.len(), 1);
@@ -184,7 +166,7 @@ async fn admin_prices_crud_wildcard_billing_and_pagination() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let all: serde_json::Value = resp.json().await.unwrap();
+    let all: Value = resp.json().await.unwrap();
     assert_eq!(all["total"], 2, "in_use=0 等同缺省:{all}");
 
     // 分页:ORDER BY model(gpt-* < other-*);limit/offset 生效,total 不变
@@ -194,7 +176,7 @@ async fn admin_prices_crud_wildcard_billing_and_pagination() {
         .send()
         .await
         .unwrap();
-    let p1: serde_json::Value = resp.json().await.unwrap();
+    let p1: Value = resp.json().await.unwrap();
     assert_eq!(p1["total"], 2);
     assert_eq!(p1["items"].as_array().unwrap().len(), 1);
     assert_eq!(p1["items"][0]["model"], "gpt-*");
@@ -204,7 +186,7 @@ async fn admin_prices_crud_wildcard_billing_and_pagination() {
         .send()
         .await
         .unwrap();
-    let p2: serde_json::Value = resp.json().await.unwrap();
+    let p2: Value = resp.json().await.unwrap();
     assert_eq!(p2["total"], 2);
     assert_eq!(p2["items"][0]["model"], "other-*");
 
@@ -239,36 +221,30 @@ async fn admin_prices_crud_wildcard_billing_and_pagination() {
     let resp = client
         .patch(format!("{}/api/prices/{}", app.base, id))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"prompt_price": 5.0}))
+        .json(&json!({"prompt_price": 5.0}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.json::<serde_json::Value>().await.unwrap()["prompt_price"],
-        5.0
-    );
+    assert_eq!(resp.json::<Value>().await.unwrap()["prompt_price"], 5.0);
     let resp = client
         .patch(format!("{}/api/prices/{}", app.base, id))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"cached_price": 1.5}))
+        .json(&json!({"cached_price": 1.5}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.json::<serde_json::Value>().await.unwrap()["cached_price"],
-        1.5
-    );
+    assert_eq!(resp.json::<Value>().await.unwrap()["cached_price"], 1.5);
     let resp = client
         .patch(format!("{}/api/prices/{}", app.base, id))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"cached_price": null}))
+        .json(&json!({"cached_price": null}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
     assert!(
         body["cached_price"].is_null(),
         "显式 null 应清空缓存价:{body}"
@@ -279,7 +255,7 @@ async fn admin_prices_crud_wildcard_billing_and_pagination() {
     let resp = client
         .patch(format!("{}/api/prices/{}", app.base, id))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({}))
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -290,13 +266,13 @@ async fn admin_prices_crud_wildcard_billing_and_pagination() {
     // 生成器口径,锚实测)
     for (body, status, code) in [
         (
-            serde_json::json!({"model": "a**", "prompt_price": 1.0}),
+            json!({"model": "a**", "prompt_price": 1.0}),
             400,
             "invalid_model",
         ),
-        (serde_json::json!({"model": "  "}), 400, "invalid_model"),
+        (json!({"model": "  "}), 400, "invalid_model"),
         (
-            serde_json::json!({"model": "ok-model", "prompt_price": -1.0}),
+            json!({"model": "ok-model", "prompt_price": -1.0}),
             422,
             "request_validation_failed",
         ),
@@ -326,37 +302,39 @@ async fn admin_prices_crud_wildcard_billing_and_pagination() {
 #[tokio::test]
 async fn admin_adjust_balance_and_transactions() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let jwt = common::admin_jwt();
+    let user = app.seed_user().await; // 新建用户余额 0,从零起算
+    let jwt = app.admin_token().await;
     let client = app.client();
-    // 从零余额起算(种子默认带 1 元)
-    app.db()
-        .execute("UPDATE users SET balance = 0 WHERE id = 'u-e2e'", [])
-        .unwrap();
 
     // 充值 100 → 201(旧 200),body 为 AdjustBalanceResult
     let resp = client
-        .post(format!("{}/api/users/u-e2e/balance-transactions", app.base))
+        .post(format!(
+            "{}/api/users/{}/balance-transactions",
+            app.base, user.id
+        ))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": 100.0, "note": "首充"}))
+        .json(&json!({"amount": 100.0, "note": "首充"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201, "{:?}", resp.text().await);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
     assert_eq!(body["balance"], 100.0);
     assert_eq!(body["kind"], "recharge");
 
     // 扣减 30 → 余额 70,kind=adjust
     let resp = client
-        .post(format!("{}/api/users/u-e2e/balance-transactions", app.base))
+        .post(format!(
+            "{}/api/users/{}/balance-transactions",
+            app.base, user.id
+        ))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": -30.0}))
+        .json(&json!({"amount": -30.0}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
     assert_eq!(body["balance"], 70.0);
     assert_eq!(body["kind"], "adjust");
 
@@ -368,7 +346,7 @@ async fn admin_adjust_balance_and_transactions() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let page: serde_json::Value = resp.json().await.unwrap();
+    let page: Value = resp.json().await.unwrap();
     let arr = page["items"].as_array().unwrap();
     assert_eq!(page["total"], 2);
     assert_eq!(arr.len(), 2);
@@ -386,9 +364,9 @@ async fn admin_adjust_balance_and_transactions() {
 
     // user_id 过滤:命中/未命中;limit 分页(limit 旧固定 200 → 可传)
     for (qs, expect_total, expect_items) in [
-        ("?user_id=u-e2e", 2, 2),
-        ("?user_id=nobody", 0, 0),
-        ("?limit=1", 2, 1),
+        (format!("?user_id={}", user.id), 2, 2),
+        ("?user_id=nobody".to_string(), 0, 0),
+        ("?limit=1".to_string(), 2, 1),
     ] {
         let resp = client
             .get(format!("{}/api/balance-transactions{qs}", app.base))
@@ -397,7 +375,7 @@ async fn admin_adjust_balance_and_transactions() {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        let page: serde_json::Value = resp.json().await.unwrap();
+        let page: Value = resp.json().await.unwrap();
         assert_eq!(page["total"], expect_total, "{qs}");
         assert_eq!(
             page["items"].as_array().unwrap().len(),
@@ -409,17 +387,23 @@ async fn admin_adjust_balance_and_transactions() {
     // 非零有限:0 → 400;0.0000001 元(四舍五入为 0 微元)→ 400;
     // 不存在的用户 → 404
     let resp = client
-        .post(format!("{}/api/users/u-e2e/balance-transactions", app.base))
+        .post(format!(
+            "{}/api/users/{}/balance-transactions",
+            app.base, user.id
+        ))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": 0}))
+        .json(&json!({"amount": 0}))
         .send()
         .await
         .unwrap();
     assert_problem(resp, 400, "invalid_amount").await;
     let resp = client
-        .post(format!("{}/api/users/u-e2e/balance-transactions", app.base))
+        .post(format!(
+            "{}/api/users/{}/balance-transactions",
+            app.base, user.id
+        ))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": 0.0000001}))
+        .json(&json!({"amount": 0.0000001}))
         .send()
         .await
         .unwrap();
@@ -430,7 +414,7 @@ async fn admin_adjust_balance_and_transactions() {
             app.base
         ))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": 1.0}))
+        .json(&json!({"amount": 1.0}))
         .send()
         .await
         .unwrap();
@@ -444,23 +428,20 @@ async fn admin_adjust_balance_and_transactions() {
 #[tokio::test]
 async fn redemption_code_full_flow() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let jwt = common::admin_jwt();
+    let user = app.seed_user().await; // 余额 0
+    let jwt = app.admin_token().await;
     let client = app.client();
-    app.db()
-        .execute("UPDATE users SET balance = 0 WHERE id = 'u-e2e'", [])
-        .unwrap();
 
     // 批量生成 3 张 10 元码 + 1 张已过期码
     let resp = client
         .post(format!("{}/api/redemption-codes", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"count": 3, "amount": 10.0, "batch": "b1", "note": "活动"}))
+        .json(&json!({"count": 3, "amount": 10.0, "batch": "b1", "note": "活动"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201, "{:?}", resp.text().await);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
     assert_eq!(body["amount"], 10.0);
     assert_eq!(body["batch"], "b1");
     assert_eq!(body["count"], 3);
@@ -480,28 +461,27 @@ async fn redemption_code_full_flow() {
     let resp = client
         .post(format!("{}/api/redemption-codes", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"count": 1, "amount": 5.0, "batch": "b1", "expires_at": "2020-01-01"}))
+        .json(&json!({"count": 1, "amount": 5.0, "batch": "b1", "expires_at": "2020-01-01"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201);
-    let expired_code = resp.json::<serde_json::Value>().await.unwrap()["codes"][0]
+    let expired_code = resp.json::<Value>().await.unwrap()["codes"][0]
         .as_str()
         .unwrap()
         .to_string();
 
     // 用户兑换(新路径,User 批挂载;旧 /api/wallet/redeem)
-    let user_jwt = common::sign_jwt("u-e2e", "e2e", "user");
     let redeem = |code: &str| {
         let client = client.clone();
-        let user_jwt = user_jwt.clone();
+        let token = user.token.clone();
         let url = format!("{}/api/users/me/redemptions", app.base);
         let code = code.to_string();
         async move {
             client
                 .post(url)
-                .bearer_auth(user_jwt)
-                .json(&serde_json::json!({"code": code}))
+                .bearer_auth(token)
+                .json(&json!({"code": code}))
                 .send()
                 .await
                 .unwrap()
@@ -511,7 +491,7 @@ async fn redemption_code_full_flow() {
     // 兑换第一张:余额 0 → 10;201(创建兑换记录语义,旧 200)
     let resp = redeem(&codes[0]).await;
     assert_eq!(resp.status(), 201, "{:?}", resp.text().await);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
     assert_eq!(body["amount"], 10.0);
     assert_eq!(body["balance"], 10.0);
 
@@ -531,7 +511,7 @@ async fn redemption_code_full_flow() {
         .send()
         .await
         .unwrap();
-    let page: serde_json::Value = resp.json().await.unwrap();
+    let page: Value = resp.json().await.unwrap();
     let arr = page["items"].as_array().unwrap();
     assert_eq!(page["total"], 1);
     assert_eq!(arr[0]["amount"], 10.0);
@@ -547,7 +527,7 @@ async fn redemption_code_full_flow() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let list: serde_json::Value = resp.json().await.unwrap();
+    let list: Value = resp.json().await.unwrap();
     assert_eq!(list["total"], 4);
     let arr = list["items"].as_array().unwrap();
     assert_eq!(arr.len(), 4);
@@ -580,7 +560,7 @@ async fn redemption_code_full_flow() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let filtered: serde_json::Value = resp.json().await.unwrap();
+    let filtered: Value = resp.json().await.unwrap();
     assert_eq!(filtered["total"], 1);
     assert_eq!(filtered["items"][0]["expired"], true);
 
@@ -595,7 +575,7 @@ async fn redemption_code_full_flow() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let page2: serde_json::Value = resp.json().await.unwrap();
+    let page2: Value = resp.json().await.unwrap();
     assert_eq!(page2["total"], 4);
     assert_eq!(page2["items"].as_array().unwrap().len(), 2);
 
@@ -646,32 +626,32 @@ async fn redemption_code_full_flow() {
     // invalid_count 不可达,生成器口径,锚实测);其余仍是 impl 侧 400
     for (body, status, code) in [
         (
-            serde_json::json!({"count": 501, "amount": 1.0, "batch": "x"}),
+            json!({"count": 501, "amount": 1.0, "batch": "x"}),
             422,
             "request_validation_failed",
         ),
         (
-            serde_json::json!({"count": 1, "amount": -1.0, "batch": "x"}),
+            json!({"count": 1, "amount": -1.0, "batch": "x"}),
             400,
             "invalid_amount",
         ),
         (
-            serde_json::json!({"count": 1, "amount": 2_000_000.0, "batch": "x"}),
+            json!({"count": 1, "amount": 2_000_000.0, "batch": "x"}),
             400,
             "invalid_amount",
         ),
         (
-            serde_json::json!({"count": 1, "amount": 0.0000001, "batch": "x"}),
+            json!({"count": 1, "amount": 0.0000001, "batch": "x"}),
             400,
             "invalid_amount",
         ),
         (
-            serde_json::json!({"count": 1, "amount": 1.0, "batch": ""}),
+            json!({"count": 1, "amount": 1.0, "batch": ""}),
             400,
             "invalid_batch",
         ),
         (
-            serde_json::json!({"count": 1, "amount": 1.0, "batch": "x", "expires_at": "2026-01-01T00:00:00Z"}),
+            json!({"count": 1, "amount": 1.0, "batch": "x", "expires_at": "2026-01-01T00:00:00Z"}),
             400,
             "invalid_expires_at",
         ),
@@ -693,14 +673,13 @@ async fn redemption_code_full_flow() {
 #[tokio::test]
 async fn redemption_bruteforce_rate_limited() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let user_jwt = common::sign_jwt("u-e2e", "e2e", "user");
+    let user = app.seed_user().await;
     for i in 0..5 {
         let resp = app
             .client()
             .post(format!("{}/api/users/me/redemptions", app.base))
-            .bearer_auth(&user_jwt)
-            .json(&serde_json::json!({"code": format!("AK-XXXX-XXXX-XXXX-{:04}", i)}))
+            .bearer_auth(&user.token)
+            .json(&json!({"code": format!("AK-XXXX-XXXX-XXXX-{:04}", i)}))
             .send()
             .await
             .unwrap();
@@ -709,8 +688,8 @@ async fn redemption_bruteforce_rate_limited() {
     let resp = app
         .client()
         .post(format!("{}/api/users/me/redemptions", app.base))
-        .bearer_auth(&user_jwt)
-        .json(&serde_json::json!({"code": "AK-XXXX-XXXX-XXXX-9999"}))
+        .bearer_auth(&user.token)
+        .json(&json!({"code": "AK-XXXX-XXXX-XXXX-9999"}))
         .send()
         .await
         .unwrap();
@@ -720,8 +699,8 @@ async fn redemption_bruteforce_rate_limited() {
     let resp = app
         .client()
         .post(format!("{}/api/users/me/redemptions", app.base))
-        .bearer_auth(&user_jwt)
-        .json(&serde_json::json!({"code": "AK-XXXX-XXXX-XXXX-9998"}))
+        .bearer_auth(&user.token)
+        .json(&json!({"code": "AK-XXXX-XXXX-XXXX-9998"}))
         .send()
         .await
         .unwrap();

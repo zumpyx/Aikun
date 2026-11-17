@@ -1,6 +1,6 @@
 //! SurrealDB 存储装配(阶段 S 默认切换):连接、schema 初始化、三域能力
 //! 句柄与首启播种。SQLite 后端已收口进迁移工具 crate(aikun-migrate),
-//! 本二进制不再依赖 rusqlite(docs/surreal-migration.md §二/§六)。
+//! 本二进制不再含 SQLite 直连依赖(docs/surreal-migration.md §二/§六)。
 
 use std::sync::Arc;
 

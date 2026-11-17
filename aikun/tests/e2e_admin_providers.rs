@@ -13,12 +13,18 @@
 //! * 批量建渠道(key↔账号 1:1,自动编号,批内去重);
 //! * 跨字段校验(协议↔地址联动)、channel_kind 注册表校验;
 //! * 连通性测试不更新 EMA 延迟;model_health 实测落库 + 过滤/分页。
+//!
+//! 阶段 S 检查通道:密文形态(enc:v1: 前缀、逐 key 独立密文)不再经
+//! 数据库直连断言(SQLite 时代做法)——库内形态由 aikun-store 单测承担
+//! (crypto.rs round_trip 的同明文异密文、channels_store.rs 的密文往返,
+//! docs/surreal-migration.md §七第 2 层);e2e 锚定「api_key 永不出参 +
+//! key 行为可用 + 查重/批量语义」。
 
 mod common;
 
 use std::sync::{Arc, Mutex};
 
-use common::{MockUpstream, TestApp, seed_api_key, seed_provider, wait_until};
+use common::{MockUpstream, ProviderSeed, TestApp};
 use serde_json::{Value, json};
 
 /// POST /api/auth 系之外的失败响应断言为 problem+json 且 code 符合预期,
@@ -53,9 +59,8 @@ fn create_body(name: &str, base_url: &str, api_key: &str) -> Value {
 #[tokio::test]
 async fn providers_crud_envelope_and_sanitization() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
     let client = app.client();
-    let jwt = common::admin_jwt();
+    let jwt = app.admin_token().await;
 
     // 创建:201 + api_key 永不出参 + proxy_url 脱敏(内嵌凭证只回显 host)
     let created = client
@@ -93,18 +98,8 @@ async fn providers_crud_envelope_and_sanitization() {
         json!({}),
         "model_mapping 缺省回空对象"
     );
-
-    // 落库核对:静态加密(enc:v1: 前缀)
-    let stored_key: String = app
-        .db()
-        .query_row("SELECT api_key FROM providers WHERE id = ?1", [&id], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert!(
-        stored_key.starts_with("enc:v1:"),
-        "key must be encrypted at rest"
-    );
+    // 密文静态落库的库内形态(enc:v1: 前缀、不含明文)由 aikun-store
+    // 单测锚定(channels_store 的密文往返;见文件头)。
 
     // 列表:{items,total} 信封
     let list = client
@@ -206,9 +201,8 @@ async fn providers_crud_envelope_and_sanitization() {
 #[tokio::test]
 async fn provider_key_encrypted_and_duplicate_rejected() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
     let client = app.client();
-    let jwt = common::admin_jwt();
+    let jwt = app.admin_token().await;
 
     let created = client
         .post(format!("{}/api/providers", app.base))
@@ -256,13 +250,25 @@ async fn provider_key_encrypted_and_duplicate_rejected() {
     );
     assert_eq!(batch["providers"].as_array().unwrap().len(), 1);
 
-    // 编辑渠道换成已占用的 key → 409
-    let dup_id: String = app
-        .db()
-        .query_row("SELECT id FROM providers WHERE name = 'dup'", [], |r| {
-            r.get(0)
-        })
+    // 编辑渠道换成已占用的 key → 409(渠道 id 经列表按名定位)
+    let list: Value = client
+        .get(format!("{}/api/providers?limit=50", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
+    let dup_id = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == json!("dup"))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let patched = client
         .patch(format!("{}/api/providers/{dup_id}", app.base))
         .bearer_auth(&jwt)
@@ -285,14 +291,14 @@ async fn provider_key_encrypted_and_duplicate_rejected() {
     }
 }
 
-/// 批量建渠道:自动编号 -01..-N、逐 key 独立加密(密文互不相同)、
-/// 请求整体不可用 → 400。
+/// 批量建渠道:自动编号 -01..-N、协议字段落库;逐 key 独立加密的库内
+/// 形态(密文互不相同)由 aikun-store 单测锚定(AES-256-GCM 随机 nonce,
+/// crypto.rs round_trip 的同明文异密文断言);请求整体不可用 → 400。
 #[tokio::test]
 async fn batch_create_providers_names_and_ciphers() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
     let client = app.client();
-    let jwt = common::admin_jwt();
+    let jwt = app.admin_token().await;
 
     let resp = client
         .post(format!("{}/api/providers/batch", app.base))
@@ -319,26 +325,27 @@ async fn batch_create_providers_names_and_ciphers() {
         .collect();
     assert_eq!(names, ["batch-01", "batch-02", "batch-03"]);
 
-    // 落库核对:协议字段与加密 key(enc:v1: 前缀,逐 key 密文不同)
-    let rows: Vec<(String, String, String)> = app
-        .db()
-        .prepare(
-            "SELECT name, api_key, default_protocol FROM providers
-             WHERE name LIKE 'batch-%' ORDER BY name",
-        )
+    // 落库核对(管理面回读):协议字段正确、api_key 永不出参
+    let list: Value = client
+        .get(format!("{}/api/providers?limit=50", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
         .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .json()
+        .await
+        .unwrap();
+    let rows: Vec<&Value> = list["items"]
+        .as_array()
         .unwrap()
-        .filter_map(|r| r.ok())
+        .iter()
+        .filter(|p| p["name"].as_str().is_some_and(|n| n.starts_with("batch-")))
         .collect();
     assert_eq!(rows.len(), 3);
-    let ciphers: std::collections::HashSet<&str> =
-        rows.iter().map(|(_, k, _)| k.as_str()).collect();
-    for (_, key, proto) in &rows {
-        assert_eq!(proto, "openai");
-        assert!(key.starts_with("enc:v1:"), "key must be encrypted at rest");
+    for p in &rows {
+        assert_eq!(p["default_protocol"], "openai");
+        assert!(p.get("api_key").is_none(), "api_key 永不出参:{p}");
     }
-    assert_eq!(ciphers.len(), 3, "每个 key 应独立加密");
 
     // api_keys 全为空白(trim 后为空)→ 400 invalid_api_keys
     // (schema minItems 只拦空数组,空白串穿过生成层由 impl 拦)
@@ -389,19 +396,11 @@ async fn batch_create_providers_names_and_ciphers() {
 #[tokio::test]
 async fn channel_kinds_catalog_and_validation() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
     let client = app.client();
-    let jwt = common::admin_jwt();
+    let jwt = app.admin_token().await;
 
     // 目录:{items,total} 信封,无分页参数(目录型);generic 排第一
-    let kinds = client
-        .get(format!("{}/api/channel-kinds", app.base))
-        .bearer_auth(&jwt)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(kinds.status(), 200);
-    let kinds: Value = kinds.json().await.unwrap();
+    let kinds: Value = app.admin_get("/api/channel-kinds").await;
     let list = kinds["items"].as_array().unwrap();
     assert_eq!(kinds["total"].as_i64().unwrap() as usize, list.len());
     assert_eq!(list[0]["kind"], "generic");
@@ -460,15 +459,11 @@ async fn channel_kinds_catalog_and_validation() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
-    let kind: String = app
-        .db()
-        .query_row(
-            "SELECT channel_kind FROM providers WHERE id = ?1",
-            [&id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(kind, "qoder");
+    assert_eq!(
+        app.provider(&id).await["channel_kind"],
+        json!("qoder"),
+        "PATCH 后渠道类型应生效"
+    );
 }
 
 /// 连通性测试(201 探测结果;不更新 EMA 延迟)+ 模型实测(业务失败也是
@@ -477,54 +472,42 @@ async fn channel_kinds_catalog_and_validation() {
 async fn provider_test_and_model_health() {
     let mock = MockUpstream::start().await;
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    seed_provider(
-        &app.db(),
-        &common::ProviderSeed {
-            id: "p1",
+    let p1 = app
+        .seed_provider(&ProviderSeed {
             name: "probe",
-            protocol: "openai",
             base_url: &mock.base,
-            models: "[\"gpt-4\"]",
-            priority: 10,
             weight: 1.0,
-            health_status: "unknown",
-            error_rate: 0.0,
-        },
-    );
+            api_key: "upstream-key",
+            ..ProviderSeed::default()
+        })
+        .await;
     let client = app.client();
-    let jwt = common::admin_jwt();
+    let jwt = app.admin_token().await;
 
     // 连通性测试:201 + 探测结果字段;落库 health_status/last_health_check
     let r = client
-        .post(format!("{}/api/providers/p1/tests", app.base))
+        .post(format!("{}/api/providers/{p1}/tests", app.base))
         .bearer_auth(&jwt)
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 201, "{:?}", r.text().await);
     let body: Value = r.json().await.unwrap();
-    assert_eq!(body["provider_id"], "p1");
+    assert_eq!(body["provider_id"], p1);
     assert_eq!(body["name"], "probe");
     assert_eq!(body["status"], "healthy"); // 库内 unhealthy 词表收敛为 down
     assert!(body["latency_ms"].as_f64().unwrap() >= 0.0);
     assert!(body["message"].as_str().unwrap().contains("healthy"));
-    let (hs, lhc, latency): (String, Option<String>, f64) = app
-        .db()
-        .query_row(
-            "SELECT health_status, last_health_check, latency_ms FROM providers WHERE id = 'p1'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(hs, "healthy");
-    assert!(lhc.is_some(), "探测时间应落库");
+    // 库内回读:health_status/last_health_check 落库;latency_ms 不被 ping 污染
+    let p = app.provider(&p1).await;
+    assert_eq!(p["health_status"], "healthy", "{p}");
+    assert!(p["last_health_check"].is_string(), "探测时间应落库:{p}");
     // 刻意不更新 latency_ms:ping 延迟不代表真实请求延迟,不污染选路 EMA
-    assert_eq!(latency, 0.0, "连通性测试不应改写 EMA 延迟");
+    assert_eq!(p["latency_ms"], 0.0, "连通性测试不应改写 EMA 延迟");
 
-    // 模型实测(非流式):201;凭证为库存 key(seed 明文直通)
+    // 模型实测(非流式):201;凭证为入库密钥(创建即加密,解密后直通)
     let r = client
-        .post(format!("{}/api/providers/p1/model-tests", app.base))
+        .post(format!("{}/api/providers/{p1}/model-tests", app.base))
         .bearer_auth(&jwt)
         .json(&json!({"model": "gpt-4", "message": "你好"}))
         .send()
@@ -548,7 +531,7 @@ async fn provider_test_and_model_health() {
     // 业务失败也是成功响应:上游 500 → 201 + ok:false + status/error 在 body
     mock.push_json(500, json!({"error": {"message": "boom"}}));
     let r = client
-        .post(format!("{}/api/providers/p1/model-tests", app.base))
+        .post(format!("{}/api/providers/{p1}/model-tests", app.base))
         .bearer_auth(&jwt)
         .json(&json!({"model": "gpt-4"}))
         .send()
@@ -561,23 +544,15 @@ async fn provider_test_and_model_health() {
     assert!(body["error"].as_str().unwrap().contains("boom"), "{body}");
 
     // model-health 列表:{items,total} + provider_id 过滤 + RFC3339 时间
-    wait_until(
-        "model health row recorded",
+    //(实测落库异步,轮询列表端点直到行出现——旧 DB COUNT 的通道等价)
+    app.wait_admin(
+        &format!("/api/model-health?provider_id={p1}"),
         std::time::Duration::from_secs(5),
-        || {
-            app.db()
-            .query_row(
-                "SELECT COUNT(*) FROM model_health WHERE provider_id = 'p1' AND model = 'gpt-4'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false)
-        },
+        |mh| mh["total"].as_i64().unwrap_or(0) >= 1,
     )
     .await;
     let r = client
-        .get(format!("{}/api/model-health?provider_id=p1", app.base))
+        .get(format!("{}/api/model-health?provider_id={p1}", app.base))
         .bearer_auth(&jwt)
         .send()
         .await
@@ -587,7 +562,7 @@ async fn provider_test_and_model_health() {
     let items = mh["items"].as_array().unwrap();
     assert_eq!(mh["total"].as_i64().unwrap() as usize, items.len());
     assert_eq!(items.len(), 1, "每 (渠道,模型) 一行(最新)");
-    assert_eq!(items[0]["provider_id"], "p1");
+    assert_eq!(items[0]["provider_id"], p1);
     assert_eq!(items[0]["model"], "gpt-4");
     assert_eq!(items[0]["status"], "unhealthy"); // 最近一次实测是 500
     assert!(
@@ -606,7 +581,7 @@ async fn provider_test_and_model_health() {
 
     // 渠道未声明的协议 → 400 unsupported_protocol
     let r = client
-        .post(format!("{}/api/providers/p1/model-tests", app.base))
+        .post(format!("{}/api/providers/{p1}/model-tests", app.base))
         .bearer_auth(&jwt)
         .json(&json!({"model": "gpt-4", "protocol": "anthropic"}))
         .send()
@@ -624,7 +599,7 @@ async fn provider_test_and_model_health() {
         .unwrap();
     assert_problem(r, 404, "not_found").await;
     let r = client
-        .post(format!("{}/api/providers/p1/model-tests", app.base))
+        .post(format!("{}/api/providers/{p1}/model-tests", app.base))
         .bearer_auth(&jwt)
         .json(&json!({"model": "   "}))
         .send()
@@ -638,9 +613,8 @@ async fn provider_test_and_model_health() {
 #[tokio::test]
 async fn fetch_models_action_endpoint() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
     let client = app.client();
-    let jwt = common::admin_jwt();
+    let jwt = app.admin_token().await;
     let upstream = FetchModelsUpstream::start().await;
 
     // 正常拉取:{"data":[{"id":...}]} → {models:[...]}
@@ -776,21 +750,14 @@ async fn fetch_models_action_endpoint() {
 async fn model_test_streams_sse() {
     let mock = MockUpstream::start().await;
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    seed_provider(
-        &app.db(),
-        &common::ProviderSeed {
-            id: "p1",
+    let p1 = app
+        .seed_provider(&ProviderSeed {
             name: "sse",
-            protocol: "openai",
             base_url: &mock.base,
-            models: "[\"gpt-4\"]",
-            priority: 1,
             weight: 1.0,
-            health_status: "unknown",
-            error_rate: 0.0,
-        },
-    );
+            ..ProviderSeed::default()
+        })
+        .await;
     mock.push_sse(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"He\"}}]}\n\n\
          data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"}}]}\n\n\
@@ -799,8 +766,8 @@ async fn model_test_streams_sse() {
     let client = app.client();
 
     let r = client
-        .post(format!("{}/api/providers/p1/model-tests", app.base))
-        .bearer_auth(common::admin_jwt())
+        .post(format!("{}/api/providers/{p1}/model-tests", app.base))
+        .bearer_auth(app.admin_token().await)
         .json(&json!({"model": "gpt-4", "message": "hi", "stream": true}))
         .send()
         .await
@@ -836,19 +803,15 @@ async fn model_test_streams_sse() {
     assert_eq!(result["ok"], true, "{result}");
     assert_eq!(result["stream"], true);
 
-    // 流结束落 model_health(适配器在流结束时写库)
-    wait_until(
-        "sse model health recorded",
+    // 流结束落 model_health(适配器在流结束时写库;轮询列表端点)
+    app.wait_admin(
+        &format!("/api/model-health?provider_id={p1}"),
         std::time::Duration::from_secs(5),
-        || {
-            app.db()
-                .query_row(
-                    "SELECT status FROM model_health WHERE provider_id = 'p1' AND model = 'gpt-4'",
-                    [],
-                    |r| r.get::<_, String>(0),
-                )
-                .map(|s| s == "healthy")
-                .unwrap_or(false)
+        |mh| {
+            mh["items"]
+                .as_array()
+                .and_then(|a| a.first())
+                .is_some_and(|m| m["status"] == json!("healthy"))
         },
     )
     .await;
@@ -859,7 +822,6 @@ async fn model_test_streams_sse() {
 #[tokio::test]
 async fn providers_require_admin() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
     let client = app.client();
 
     let anon = client
@@ -884,17 +846,12 @@ async fn providers_require_admin() {
     );
 
     // 非 admin 403:auth 中间件用库内角色覆写 token 声明(auth/mod.rs 的
-    // authenticate_jwt),给 u-e2e 签 user 角色不会降权——须用真实 user 行。
-    app.db()
-        .execute(
-            "INSERT INTO users (id, username, password_hash, role) VALUES ('u-plain', 'plain', 'h', 'user')",
-            [],
-        )
-        .unwrap();
-    let user_jwt = common::sign_jwt("u-plain", "plain", "user");
+    // authenticate_jwt),须用真实 user 行(管理面创建 + 登录)。
+    app.create_user("plain", "plain-password-1", "user").await;
+    let plain_token = app.login("plain", "plain-password-1").await;
     let forbidden = client
         .get(format!("{}/api/providers", app.base))
-        .bearer_auth(user_jwt)
+        .bearer_auth(plain_token)
         .send()
         .await
         .unwrap();

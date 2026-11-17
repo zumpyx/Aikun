@@ -10,14 +10,18 @@
 //!   生成器缺口,见 playbook 踩坑);
 //! * 前端壳与内嵌静态资产:CSP/no-cache 头、嵌套 js 路径(生成路由
 //!   `/static/{path}` 匹配不到,由装配 fallback 兜底)、白名单外 404 纯文本。
+//!
+//! 阶段 S 检查通道:夹具用户经管理面 API 创建(id 从创建响应取,
+//! docs/surreal-migration.md §七)。
 
 mod common;
 
-use common::{TestApp, seed_api_key};
+use common::TestApp;
+use serde_json::{Value, json};
 
 /// POST /api/auth/login 的响应断言为 problem+json 且 code 符合预期,
 /// 返回整个 body 供补充断言。
-async fn assert_problem(res: reqwest::Response, status: u16, code: &str) -> serde_json::Value {
+async fn assert_problem(res: reqwest::Response, status: u16, code: &str) -> Value {
     assert_eq!(res.status(), status, "{:?}", res.text().await);
     let ct = res
         .headers()
@@ -28,7 +32,7 @@ async fn assert_problem(res: reqwest::Response, status: u16, code: &str) -> serd
         ct.starts_with("application/problem+json"),
         "content-type 应为 problem+json,实际 {ct}"
     );
-    let body: serde_json::Value = res.json().await.unwrap();
+    let body: Value = res.json().await.unwrap();
     assert_eq!(body["code"].as_str(), Some(code), "{body}");
     body
 }
@@ -42,26 +46,21 @@ async fn assert_problem(res: reqwest::Response, status: u16, code: &str) -> serd
 #[tokio::test]
 async fn login_flow_and_session_revocation() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db()); // 创建 admin 身份 u-e2e,供 admin_jwt 使用
     let client = app.client();
-    let admin = common::admin_jwt();
+    let admin = app.admin_token().await;
 
     let created = client
         .post(format!("{}/api/users", app.base))
         .bearer_auth(&admin)
-        .json(
-            &serde_json::json!({"username": "alice", "password": "old-password-1", "role": "user"}),
-        )
+        .json(&json!({"username": "alice", "password": "old-password-1", "role": "user"}))
         .send()
         .await
         .unwrap();
     assert_eq!(created.status(), 201, "{:?}", created.text().await);
-    let user_id = app
-        .db()
-        .query_row("SELECT id FROM users WHERE username = 'alice'", [], |r| {
-            r.get::<_, String>(0)
-        })
-        .unwrap();
+    let user_id = created.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let login = |password: &'static str| {
         let client = client.clone();
@@ -69,7 +68,7 @@ async fn login_flow_and_session_revocation() {
         async move {
             client
                 .post(url)
-                .json(&serde_json::json!({"username": "alice", "password": password}))
+                .json(&json!({"username": "alice", "password": password}))
                 .send()
                 .await
                 .unwrap()
@@ -88,7 +87,7 @@ async fn login_flow_and_session_revocation() {
     // 正确密码 → token + user(无密码哈希;时间统一 RFC3339)
     let ok = login("old-password-1").await;
     assert_eq!(ok.status(), 200);
-    let body: serde_json::Value = ok.json().await.unwrap();
+    let body: Value = ok.json().await.unwrap();
     let old_token = body["token"].as_str().unwrap().to_string();
     assert_eq!(body["user"]["username"], "alice");
     assert_eq!(body["user"]["role"], "user");
@@ -102,14 +101,14 @@ async fn login_flow_and_session_revocation() {
     );
     let r = me(old_token.clone()).await;
     assert_eq!(r.status(), 200);
-    let me_body: serde_json::Value = r.json().await.unwrap();
+    let me_body: Value = r.json().await.unwrap();
     assert_eq!(me_body["username"], "alice");
 
     // 管理员改密 → token_version + 1,旧 token 立即失效
     let patched = client
         .patch(format!("{}/api/users/{}", app.base, user_id))
         .bearer_auth(&admin)
-        .json(&serde_json::json!({"password": "new-password-2"}))
+        .json(&json!({"password": "new-password-2"}))
         .send()
         .await
         .unwrap();
@@ -120,7 +119,7 @@ async fn login_flow_and_session_revocation() {
     assert_eq!(login("old-password-1").await.status(), 401);
     let ok = login("new-password-2").await;
     assert_eq!(ok.status(), 200);
-    let new_token = ok.json::<serde_json::Value>().await.unwrap()["token"]
+    let new_token = ok.json::<Value>().await.unwrap()["token"]
         .as_str()
         .unwrap()
         .to_string();
@@ -130,7 +129,7 @@ async fn login_flow_and_session_revocation() {
     let disabled = client
         .patch(format!("{}/api/users/{}", app.base, user_id))
         .bearer_auth(&admin)
-        .json(&serde_json::json!({"is_active": false}))
+        .json(&json!({"is_active": false}))
         .send()
         .await
         .unwrap();
@@ -153,13 +152,12 @@ async fn login_flow_and_session_revocation() {
 #[tokio::test]
 async fn login_rate_limited_by_username() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
     let client = app.client();
 
     let created = client
         .post(format!("{}/api/users", app.base))
-        .bearer_auth(common::admin_jwt())
-        .json(&serde_json::json!({"username": "bob", "password": "right-password", "role": "user"}))
+        .bearer_auth(app.admin_token().await)
+        .json(&json!({"username": "bob", "password": "right-password", "role": "user"}))
         .send()
         .await
         .unwrap();
@@ -168,7 +166,7 @@ async fn login_rate_limited_by_username() {
     for _ in 0..5 {
         let r = client
             .post(format!("{}/api/auth/login", app.base))
-            .json(&serde_json::json!({"username": "bob", "password": "wrong"}))
+            .json(&json!({"username": "bob", "password": "wrong"}))
             .send()
             .await
             .unwrap();
@@ -177,14 +175,14 @@ async fn login_rate_limited_by_username() {
 
     let limited = client
         .post(format!("{}/api/auth/login", app.base))
-        .json(&serde_json::json!({"username": "bob", "password": "right-password"}))
+        .json(&json!({"username": "bob", "password": "right-password"}))
         .send()
         .await
         .unwrap();
     assert_problem(limited, 429, "rate_limited").await;
     let retry_after = client
         .post(format!("{}/api/auth/login", app.base))
-        .json(&serde_json::json!({"username": "bob", "password": "right-password"}))
+        .json(&json!({"username": "bob", "password": "right-password"}))
         .send()
         .await
         .unwrap()
@@ -209,7 +207,7 @@ async fn login_rate_limited_by_ip() {
         for _ in 0..5 {
             let r = client
                 .post(format!("{}/api/auth/login", app.base))
-                .json(&serde_json::json!({
+                .json(&json!({
                     "username": format!("ghost-user-{i}"),
                     "password": "wrong"
                 }))
@@ -223,7 +221,7 @@ async fn login_rate_limited_by_ip() {
     // 全新用户名:用户名维度未触限,IP 维度(30 次/10 分钟)应拦截
     let limited = client
         .post(format!("{}/api/auth/login", app.base))
-        .json(&serde_json::json!({"username": "fresh-user", "password": "whatever"}))
+        .json(&json!({"username": "fresh-user", "password": "whatever"}))
         .send()
         .await
         .unwrap();
@@ -241,7 +239,7 @@ async fn login_rejects_body_missing_fields() {
 
     let missing = client
         .post(format!("{}/api/auth/login", app.base))
-        .json(&serde_json::json!({"username": "x"}))
+        .json(&json!({"username": "x"}))
         .send()
         .await
         .unwrap();

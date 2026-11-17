@@ -132,7 +132,7 @@ fn store_down(status: u16) -> Problem {
 
 // ---------- 过渡期存储端口 ----------
 //
-// aikun-store 就位前(plan 步骤 8)aikun-admin 不直接依赖 rusqlite/uuid/
+// aikun-store 就位前(plan 步骤 8)aikun-admin 不直接依赖存储引擎/uuid/
 // sha2:全部 SQL 与 key 材料生成由二进制装配层的适配器(main.rs 的
 // DbUserStore)实现本端口;业务编排(权限分叉、分页 clamp、校验、限流、
 // 信封映射)在本 crate。SQL 语义逐条迁自旧 handler,见各方法文档。

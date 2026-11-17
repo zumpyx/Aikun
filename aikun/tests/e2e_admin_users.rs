@@ -9,19 +9,23 @@
 //! * last_admin 保护 400 → **409**(语义 #8)与双 admin 解锁;
 //! * 改密 token_version+1(经已交付的 `/api/auth/login` 验证踢会话);
 //! * **调账流水断言**(本批核心):`POST /api/users/{id}/balance-transactions`
-//!   201 + kind 判定 + 同事务"改余额+写流水"(201 后 DB 两侧同时可见),
-//!   `GET /api/balance-transactions` 信封/过滤/分页/元单位
-//!   (impl 在 admin_billing.rs,Billing 批;断言按 spec 契约锚定);
+//!   201 + kind 判定 + 同事务"改余额+写流水"(201 后两侧同时可见,经
+//!   /api/users 与 /api/balance-transactions 回读),`GET /api/balance-transactions`
+//!   信封/过滤/分页/元单位;
 //! * 生成器请求校验实测行为(422 request_validation_failed / 400
 //!   malformed_parameter),与 spec 400 示例的差异在用例注释中指出
 //!   (playbook 踩坑 #3 同类,已记 notes 待裁决)。
+//!
+//! 阶段 S 检查通道:库内形态(is_active/token_version/流水微元)不再
+//! 数据库直连(SQLite 时代做法),全部经管理面回读断言(docs/surreal-migration.md §七)。
 
 mod common;
 
-use common::{TestApp, seed_api_key};
+use common::TestApp;
+use serde_json::{Value, json};
 
 /// 断言 problem+json 错误体:状态 + content-type + code,返回整个 body。
-async fn assert_problem(res: reqwest::Response, status: u16, code: &str) -> serde_json::Value {
+async fn assert_problem(res: reqwest::Response, status: u16, code: &str) -> Value {
     assert_eq!(res.status(), status, "{:?}", res.text().await);
     let ct = res
         .headers()
@@ -32,7 +36,7 @@ async fn assert_problem(res: reqwest::Response, status: u16, code: &str) -> serd
         ct.starts_with("application/problem+json"),
         "content-type 应为 problem+json,实际 {ct}"
     );
-    let body: serde_json::Value = res.json().await.unwrap();
+    let body: Value = res.json().await.unwrap();
     assert_eq!(body["code"].as_str(), Some(code), "{body}");
     body
 }
@@ -49,7 +53,7 @@ async fn create_user(
         .client()
         .post(format!("{}/api/users", app.base))
         .bearer_auth(jwt)
-        .json(&serde_json::json!({
+        .json(&json!({
             "username": username,
             "password": password,
             "display_name": username,
@@ -59,7 +63,7 @@ async fn create_user(
         .await
         .unwrap();
     assert_eq!(resp.status(), 201, "{:?}", resp.text().await);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
     body["id"].as_str().unwrap().to_string()
 }
 
@@ -71,19 +75,20 @@ async fn create_user(
 /// 列表 `{items,total}` + limit clamp → 单查含 balance → PATCH 回
 /// **资源**(语义 #6)→ 未知字段 body 400 no_fields_to_update →
 /// 空对象 422(生成器 minProperties;spec 描述写 400,差异记 notes)→
-/// DELETE **204**(语义 #4)→ 软禁用(行还在,is_active=0)→ 404。
+/// DELETE **204**(语义 #4)→ 软禁用(行还在,is_active=false 经回读)→ 404。
 #[tokio::test]
 async fn users_crud_lifecycle_and_envelope() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db()); // u-e2e(admin,余额 1 元)
-    let jwt = common::admin_jwt();
+    let user = app.seed_user().await; // e2e(admin,余额调到 1 元)
+    app.adjust_balance(&user.id, 1.0).await;
+    let jwt = app.admin_token().await;
     let client = app.client();
 
     // 创建:201,User 资源形状
     let created = client
         .post(format!("{}/api/users", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({
+        .json(&json!({
             "username": "alice",
             "password": "password-1",
             "display_name": "Alice",
@@ -93,7 +98,7 @@ async fn users_crud_lifecycle_and_envelope() {
         .await
         .unwrap();
     assert_eq!(created.status(), 201, "{:?}", created.text().await);
-    let body: serde_json::Value = created.json().await.unwrap();
+    let body: Value = created.json().await.unwrap();
     assert_eq!(body["username"], "alice");
     assert_eq!(body["display_name"], "Alice");
     assert_eq!(body["role"], "user");
@@ -115,7 +120,7 @@ async fn users_crud_lifecycle_and_envelope() {
     let dup = client
         .post(format!("{}/api/users", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"username": "alice", "password": "password-9"}))
+        .json(&json!({"username": "alice", "password": "password-9"}))
         .send()
         .await
         .unwrap();
@@ -126,7 +131,7 @@ async fn users_crud_lifecycle_and_envelope() {
     let blank = client
         .post(format!("{}/api/users", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"username": "   ", "password": "password-1"}))
+        .json(&json!({"username": "   ", "password": "password-1"}))
         .send()
         .await
         .unwrap();
@@ -134,7 +139,7 @@ async fn users_crud_lifecycle_and_envelope() {
     let short = client
         .post(format!("{}/api/users", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"username": "bob", "password": "short"}))
+        .json(&json!({"username": "bob", "password": "short"}))
         .send()
         .await
         .unwrap();
@@ -145,7 +150,7 @@ async fn users_crud_lifecycle_and_envelope() {
     let bad_role = client
         .post(format!("{}/api/users", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"username": "eve", "password": "password-1", "role": "boss"}))
+        .json(&json!({"username": "eve", "password": "password-1", "role": "boss"}))
         .send()
         .await
         .unwrap();
@@ -159,8 +164,8 @@ async fn users_crud_lifecycle_and_envelope() {
         .await
         .unwrap();
     assert_eq!(list.status(), 200);
-    let page: serde_json::Value = list.json().await.unwrap();
-    // 全新库会 seed 默认 admin(db/mod.rs:920)+ 种子 u-e2e + 刚建的 alice
+    let page: Value = list.json().await.unwrap();
+    // 全新库 seed 默认 admin + 种子 e2e + 刚建的 alice
     assert_eq!(page["total"], 3, "{page}");
     let items = page["items"].as_array().unwrap();
     assert_eq!(items.len(), 3);
@@ -176,7 +181,7 @@ async fn users_crud_lifecycle_and_envelope() {
         .send()
         .await
         .unwrap()
-        .json::<serde_json::Value>()
+        .json::<Value>()
         .await
         .unwrap();
     assert_eq!(p1["items"].as_array().unwrap().len(), 1);
@@ -187,7 +192,7 @@ async fn users_crud_lifecycle_and_envelope() {
         .send()
         .await
         .unwrap()
-        .json::<serde_json::Value>()
+        .json::<Value>()
         .await
         .unwrap();
     assert_eq!(
@@ -219,7 +224,7 @@ async fn users_crud_lifecycle_and_envelope() {
         .await
         .unwrap();
     assert_eq!(got.status(), 200);
-    let got: serde_json::Value = got.json().await.unwrap();
+    let got: Value = got.json().await.unwrap();
     assert_eq!(got["username"], "alice");
     assert_eq!(got["balance"], 0.0);
     let missing = client
@@ -234,12 +239,12 @@ async fn users_crud_lifecycle_and_envelope() {
     let patched = client
         .patch(format!("{}/api/users/{}", app.base, alice_id))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"display_name": "Alice II"}))
+        .json(&json!({"display_name": "Alice II"}))
         .send()
         .await
         .unwrap();
     assert_eq!(patched.status(), 200, "{:?}", patched.text().await);
-    let patched: serde_json::Value = patched.json().await.unwrap();
+    let patched: Value = patched.json().await.unwrap();
     assert_eq!(patched["display_name"], "Alice II");
     assert_eq!(patched["username"], "alice");
     assert_eq!(patched["id"], alice_id.as_str());
@@ -249,7 +254,7 @@ async fn users_crud_lifecycle_and_envelope() {
     let unknown_only = client
         .patch(format!("{}/api/users/{}", app.base, alice_id))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"unknown_field": 1}))
+        .json(&json!({"unknown_field": 1}))
         .send()
         .await
         .unwrap();
@@ -257,13 +262,14 @@ async fn users_crud_lifecycle_and_envelope() {
     let empty = client
         .patch(format!("{}/api/users/{}", app.base, alice_id))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({}))
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
     assert_problem(empty, 422, "request_validation_failed").await;
 
-    // DELETE:204 无 body(语义 #4);软禁用保留(行还在,is_active=0)
+    // DELETE:204 无 body(语义 #4);软禁用保留(行还在,is_active=false
+    // 经单查回读——旧直连 SELECT 的管理面通道等价)
     let deleted = client
         .delete(format!("{}/api/users/{}", app.base, alice_id))
         .bearer_auth(&jwt)
@@ -272,25 +278,17 @@ async fn users_crud_lifecycle_and_envelope() {
         .unwrap();
     assert_eq!(deleted.status(), 204);
     assert!(deleted.text().await.unwrap().is_empty(), "204 应无 body");
-    let (n, active): (i64, i64) = app
-        .db()
-        .query_row(
-            "SELECT COUNT(*), is_active FROM users WHERE id = ?1",
-            rusqlite::params![alice_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!((n, active), (1, 0), "DELETE 是软禁用,不物理删除");
     let after = client
         .get(format!("{}/api/users/{}", app.base, alice_id))
         .bearer_auth(&jwt)
         .send()
         .await
         .unwrap();
-    assert_eq!(after.status(), 200);
+    assert_eq!(after.status(), 200, "软禁用后行仍在,单查 200");
     assert_eq!(
-        after.json::<serde_json::Value>().await.unwrap()["is_active"],
-        false
+        after.json::<Value>().await.unwrap()["is_active"],
+        false,
+        "DELETE 是软禁用,不物理删除"
     );
 
     // 未知 id 删除 → 404
@@ -312,8 +310,8 @@ async fn users_crud_lifecycle_and_envelope() {
 #[tokio::test]
 async fn users_batch_create_per_item_results() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let jwt = common::admin_jwt();
+    app.seed_user().await;
+    let jwt = app.admin_token().await;
     let client = app.client();
 
     // 先单个创建 carol,批量里再放一次 → username_exists 逐项失败
@@ -322,7 +320,7 @@ async fn users_batch_create_per_item_results() {
     let resp = client
         .post(format!("{}/api/users/batch", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"users": [
+        .json(&json!({"users": [
             {"username": "b1"},                                              // 随机密码
             {"username": "b2", "password": "password-2", "display_name": "B2"},
             {"username": "carol", "password": "password-3"},                 // 重复
@@ -333,7 +331,7 @@ async fn users_batch_create_per_item_results() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
     assert_eq!(body["created"], 2, "{body}");
     assert_eq!(body["failed"], 3, "{body}");
     let results = body["results"].as_array().unwrap();
@@ -364,24 +362,36 @@ async fn users_batch_create_per_item_results() {
         .expect("全空格用户名应有 invalid_username 失败项");
     assert_eq!(blank["ok"], false);
 
-    // 库内真实生效:b1/b2 落库,carol 仍只有一条
-    let (n_b, n_c): (i64, i64) = app
-        .db()
-        .query_row(
-            "SELECT
-               (SELECT COUNT(*) FROM users WHERE username IN ('b1','b2')),
-               (SELECT COUNT(*) FROM users WHERE username = 'carol')",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+    // 库内真实生效(管理面回读):b1/b2 落库,carol 仍只有一条
+    let page: Value = client
+        .get(format!("{}/api/users?limit=200", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
-    assert_eq!((n_b, n_c), (2, 1));
+    let usernames: Vec<&str> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["username"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        usernames
+            .iter()
+            .filter(|n| **n == "b1" || **n == "b2")
+            .count(),
+        2
+    );
+    assert_eq!(usernames.iter().filter(|n| **n == "carol").count(), 1);
 
     // 空批次 → 400 empty_batch(schema 无 minItems,可达 impl)
     let empty = client
         .post(format!("{}/api/users/batch", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"users": []}))
+        .json(&json!({"users": []}))
         .send()
         .await
         .unwrap();
@@ -389,12 +399,12 @@ async fn users_batch_create_per_item_results() {
 
     // 101 项 → 生成器 maxItems=100 → 422(spec 400 batch_too_large 不可达)
     let too_many: Vec<_> = (0..101)
-        .map(|i| serde_json::json!({"username": format!("bulk-{i}")}))
+        .map(|i| json!({"username": format!("bulk-{i}")}))
         .collect();
     let big = client
         .post(format!("{}/api/users/batch", app.base))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"users": too_many}))
+        .json(&json!({"users": too_many}))
         .send()
         .await
         .unwrap();
@@ -406,22 +416,36 @@ async fn users_batch_create_per_item_results() {
 /// 唯一活跃 admin 不可被降级/禁用/软删:409 last_admin(problem+json,
 /// 语义 #8,旧 400);出现第二个 admin 后保护解除。后续请求用新 admin
 /// 的 JWT——auth 中间件会用库内角色覆写 token 声明
-/// (src/auth/mod.rs:276),u-e2e 被降级后旧 token 不再过 require_admin。
-/// 前置:全新库 seed 了默认 admin(db/mod.rs:920),先软禁用它让 u-e2e
-/// 成为唯一活跃 admin(此时有两个活跃 admin,禁用不触发保护)。
+/// (src/auth/mod.rs 的 authenticate_jwt),u-e2e 被降级后旧 token 不再过
+/// require_admin。前置:全新库 seed 了默认 admin,先软禁用它让 u-e2e
+/// 成为唯一活跃 admin(此时有两个活跃 admin,禁用不触发保护)——所以
+/// 全程以 u-e2e 的登录会话充当管理端,不用默认 admin 的会话。
 #[tokio::test]
 async fn last_admin_guard_returns_409() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let jwt = common::admin_jwt();
+    let user = app.seed_user().await;
+    let jwt = user.token.clone(); // u-e2e(admin)的登录会话
     let client = app.client();
 
-    let seeded_admin_id: String = app
-        .db()
-        .query_row("SELECT id FROM users WHERE username = 'admin'", [], |r| {
-            r.get(0)
-        })
+    // 种子 admin 的 id 经列表按名定位(旧直连 SELECT 的通道等价)
+    let page: Value = client
+        .get(format!("{}/api/users?limit=200", app.base))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
+    let seeded_admin_id = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["username"] == "admin")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let disabled = client
         .delete(format!("{}/api/users/{}", app.base, seeded_admin_id))
         .bearer_auth(&jwt)
@@ -431,9 +455,9 @@ async fn last_admin_guard_returns_409() {
     assert_eq!(disabled.status(), 204, "{:?}", disabled.text().await);
 
     let demote = client
-        .patch(format!("{}/api/users/u-e2e", app.base))
+        .patch(format!("{}/api/users/{}", app.base, user.id))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"role": "user"}))
+        .json(&json!({"role": "user"}))
         .send()
         .await
         .unwrap();
@@ -441,52 +465,54 @@ async fn last_admin_guard_returns_409() {
     assert!(body["detail"].is_string(), "{body}");
 
     let disable = client
-        .patch(format!("{}/api/users/u-e2e", app.base))
+        .patch(format!("{}/api/users/{}", app.base, user.id))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"is_active": false}))
+        .json(&json!({"is_active": false}))
         .send()
         .await
         .unwrap();
     assert_problem(disable, 409, "last_admin").await;
 
     let del = client
-        .delete(format!("{}/api/users/u-e2e", app.base))
+        .delete(format!("{}/api/users/{}", app.base, user.id))
         .bearer_auth(&jwt)
         .send()
         .await
         .unwrap();
     assert_problem(del, 409, "last_admin").await;
 
-    // 保护生效:三条都被拒,库内状态未变
-    let (role, active): (String, i64) = app
-        .db()
-        .query_row(
-            "SELECT role, is_active FROM users WHERE id = 'u-e2e'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+    // 保护生效:三条都被拒,库内状态未变(单查回读)
+    let still: Value = client
+        .get(format!("{}/api/users/{}", app.base, user.id))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
-    assert_eq!((role.as_str(), active), ("admin", 1));
+    assert_eq!(still["role"], "admin", "{still}");
+    assert_eq!(still["is_active"], true, "{still}");
 
     // 第二个 admin 出现 → 降级 u-e2e 放行,且返回更新后资源
     let root2_id = create_user(&app, &jwt, "root2", "password-2", "admin").await;
     let demote = client
-        .patch(format!("{}/api/users/u-e2e", app.base))
+        .patch(format!("{}/api/users/{}", app.base, user.id))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"role": "user"}))
+        .json(&json!({"role": "user"}))
         .send()
         .await
         .unwrap();
     assert_eq!(demote.status(), 200, "{:?}", demote.text().await);
-    let demoted: serde_json::Value = demote.json().await.unwrap();
+    let demoted: Value = demote.json().await.unwrap();
     assert_eq!(demoted["role"], "user", "PATCH 应返回更新后的资源");
 
-    // 此时 root2 成为唯一活跃 admin,保护转移
-    let root2_jwt = common::sign_jwt(&root2_id, "root2", "admin");
+    // 此时 root2 成为唯一活跃 admin,保护转移(root2 的 JWT 经登录签发)
+    let root2_token = app.login("root2", "password-2").await;
     let guard = client
-        .patch(format!("{}/api/users/{}", app.base, root2_id))
-        .bearer_auth(&root2_jwt)
-        .json(&serde_json::json!({"is_active": false}))
+        .patch(format!("{}/api/users/{root2_id}", app.base))
+        .bearer_auth(root2_token)
+        .json(&json!({"is_active": false}))
         .send()
         .await
         .unwrap();
@@ -496,14 +522,15 @@ async fn last_admin_guard_returns_409() {
 // ---------- 改密踢会话 ----------
 
 /// 改密后 token_version+1:旧密码登录 401、新密码 200(登录端点已随
-/// Auth 批交付,链路全程新路径)。
+/// Auth 批交付,链路全程新路径);token_version 的库内递增由其行为
+/// 等价断言覆盖(旧 token 立即失效 = 版本号已变)。
 #[tokio::test]
 async fn password_rotation_revokes_login_sessions() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let jwt = common::admin_jwt();
+    app.seed_user().await;
+    let jwt = app.admin_token().await;
     let client = app.client();
-    create_user(&app, &jwt, "dave", "old-password-1", "user").await;
+    let dave_id = create_user(&app, &jwt, "dave", "old-password-1", "user").await;
 
     let login = |password: &'static str| {
         let client = client.clone();
@@ -511,40 +538,41 @@ async fn password_rotation_revokes_login_sessions() {
         async move {
             client
                 .post(url)
-                .json(&serde_json::json!({"username": "dave", "password": password}))
+                .json(&json!({"username": "dave", "password": password}))
                 .send()
                 .await
                 .unwrap()
         }
     };
-    assert_eq!(login("old-password-1").await.status(), 200);
-
-    let dave_id: String = app
-        .db()
-        .query_row("SELECT id FROM users WHERE username = 'dave'", [], |r| {
-            r.get(0)
-        })
+    // 改密前的会话:登录拿 token,/api/users/me 可用
+    let old_token = app.login("dave", "old-password-1").await;
+    let me = client
+        .get(format!("{}/api/users/me", app.base))
+        .bearer_auth(&old_token)
+        .send()
+        .await
         .unwrap();
+    assert_eq!(me.status(), 200);
+
     let patched = client
         .patch(format!("{}/api/users/{}", app.base, dave_id))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"password": "new-password-2"}))
+        .json(&json!({"password": "new-password-2"}))
         .send()
         .await
         .unwrap();
     assert_eq!(patched.status(), 200, "{:?}", patched.text().await);
-    let rotated: serde_json::Value = patched.json().await.unwrap();
+    let rotated: Value = patched.json().await.unwrap();
     assert_eq!(rotated["username"], "dave", "改密 PATCH 应回更新后资源");
 
-    let tv: i64 = app
-        .db()
-        .query_row(
-            "SELECT token_version FROM users WHERE username = 'dave'",
-            [],
-            |r| r.get(0),
-        )
+    // token_version+1 ⇒ 旧会话立即失效(行为等价断言)
+    let me = client
+        .get(format!("{}/api/users/me", app.base))
+        .bearer_auth(&old_token)
+        .send()
+        .await
         .unwrap();
-    assert_eq!(tv, 1, "改密应递增 token_version");
+    assert_eq!(me.status(), 401, "改密后旧会话应被踢下线");
 
     assert_problem(login("old-password-1").await, 401, "invalid_credentials").await;
     assert_eq!(login("new-password-2").await.status(), 200);
@@ -553,69 +581,74 @@ async fn password_rotation_revokes_login_sessions() {
 // ---------- 调账流水(本批核心断言;impl 在 admin_billing.rs) ----------
 
 /// 调账事务原子性与 201 语义:改余额与写流水同事务落库(201 返回后
-/// DB 两侧立即可见、金额一致),正 recharge / 负 adjust,金额出参元;
-/// 非法金额 400、未知用户 404。
+/// /api/users 的余额与 /api/balance-transactions 的流水同时可见、金额
+/// 一致),正 recharge / 负 adjust,金额出参元;非法金额 400、未知用户 404。
 #[tokio::test]
 async fn balance_adjust_records_transaction_atomically() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let jwt = common::admin_jwt();
+    let user = app.seed_user().await; // 新建用户余额 0,从零起算
+    let jwt = app.admin_token().await;
     let client = app.client();
-    // 从零余额起算(种子默认带 1 元)
-    app.db()
-        .execute("UPDATE users SET balance = 0 WHERE id = 'u-e2e'", [])
-        .unwrap();
 
     // 充值 100 → 201(旧 200,语义 #5),kind=recharge
     let resp = client
-        .post(format!("{}/api/users/u-e2e/balance-transactions", app.base))
+        .post(format!(
+            "{}/api/users/{}/balance-transactions",
+            app.base, user.id
+        ))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": 100.0, "note": "首充"}))
+        .json(&json!({"amount": 100.0, "note": "首充"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201, "{:?}", resp.text().await);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
     assert_eq!(body["balance"], 100.0, "{body}");
     assert_eq!(body["kind"], "recharge");
 
     // 扣减 30 → 余额 70,kind=adjust
     let resp = client
-        .post(format!("{}/api/users/u-e2e/balance-transactions", app.base))
+        .post(format!(
+            "{}/api/users/{}/balance-transactions",
+            app.base, user.id
+        ))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": -30.0}))
+        .json(&json!({"amount": -30.0}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
     assert_eq!(body["balance"], 70.0, "{body}");
     assert_eq!(body["kind"], "adjust");
 
-    // 原子性:余额已改 AND 流水已写,两行金额(微元)与响应一致
-    let (balance, rows): (i64, i64) = app
-        .db()
-        .query_row(
-            "SELECT
-               (SELECT balance FROM users WHERE id = 'u-e2e'),
-               (SELECT COUNT(*) FROM billing_transactions WHERE user_id = 'u-e2e')",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+    // 原子性:余额已改 AND 流水已写,两侧金额一致(同一用户视角回读)
+    assert_eq!(
+        app.user_balance(&user.id).await,
+        70.0,
+        "库内微元 70_000_000"
+    );
+    let page: Value = client
+        .get(format!(
+            "{}/api/balance-transactions?user_id={}",
+            app.base, user.id
+        ))
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
-    assert_eq!(balance, 70_000_000, "库内微元口径");
-    assert_eq!(rows, 2, "改余额与写流水必须同事务:不能只有一边");
-    let (sum_micro,): (i64,) = app
-        .db()
-        .query_row(
-            "SELECT COALESCE(SUM(amount), 0) FROM billing_transactions WHERE user_id = 'u-e2e'",
-            [],
-            |r| Ok((r.get(0)?,)),
-        )
-        .unwrap();
-    assert_eq!(sum_micro, balance, "流水累计应等于余额(从零起算)");
+    let items = page["items"].as_array().unwrap();
+    assert_eq!(page["total"], 2, "改余额与写流水必须同事务:不能只有一边");
+    let sum: f64 = items.iter().map(|t| t["amount"].as_f64().unwrap()).sum();
+    assert!(
+        (sum - 70.0).abs() < 1e-9,
+        "流水累计应等于余额(从零起算):{sum}"
+    );
 
-    // 流水列表:{items,total} 信封,最新在前,amount/balance_after 出参元
+    // 流水列表:最新在前,amount/balance_after 出参元
     let resp = client
         .get(format!("{}/api/balance-transactions", app.base))
         .bearer_auth(&jwt)
@@ -623,14 +656,14 @@ async fn balance_adjust_records_transaction_atomically() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let page: serde_json::Value = resp.json().await.unwrap();
+    let page: Value = resp.json().await.unwrap();
     assert_eq!(page["total"], 2, "{page}");
     let items = page["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
     assert_eq!(items[0]["amount"], -30.0);
     assert_eq!(items[0]["balance_after"], 70.0);
     assert_eq!(items[0]["kind"], "adjust");
-    assert_eq!(items[0]["user_id"], "u-e2e");
+    assert_eq!(items[0]["user_id"], user.id.as_str());
     assert_eq!(items[0]["username"], "e2e", "LEFT JOIN 用户名");
     assert_eq!(items[1]["amount"], 100.0);
     assert_eq!(items[1]["kind"], "recharge");
@@ -642,17 +675,23 @@ async fn balance_adjust_records_transaction_atomically() {
 
     // 非法金额:0 与低于最小记账单位(1 微元)→ 400 invalid_amount
     let zero = client
-        .post(format!("{}/api/users/u-e2e/balance-transactions", app.base))
+        .post(format!(
+            "{}/api/users/{}/balance-transactions",
+            app.base, user.id
+        ))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": 0}))
+        .json(&json!({"amount": 0}))
         .send()
         .await
         .unwrap();
     assert_problem(zero, 400, "invalid_amount").await;
     let tiny = client
-        .post(format!("{}/api/users/u-e2e/balance-transactions", app.base))
+        .post(format!(
+            "{}/api/users/{}/balance-transactions",
+            app.base, user.id
+        ))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": 0.0000001}))
+        .json(&json!({"amount": 0.0000001}))
         .send()
         .await
         .unwrap();
@@ -665,7 +704,7 @@ async fn balance_adjust_records_transaction_atomically() {
             app.base
         ))
         .bearer_auth(&jwt)
-        .json(&serde_json::json!({"amount": 1.0}))
+        .json(&json!({"amount": 1.0}))
         .send()
         .await
         .unwrap();
@@ -678,12 +717,9 @@ async fn balance_adjust_records_transaction_atomically() {
 #[tokio::test]
 async fn transactions_list_filter_and_pagination() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
-    let jwt = common::admin_jwt();
+    let user = app.seed_user().await; // 余额 0
+    let jwt = app.admin_token().await;
     let client = app.client();
-    app.db()
-        .execute("UPDATE users SET balance = 0 WHERE id = 'u-e2e'", [])
-        .unwrap();
 
     let adjust = |uid: &str, amount: f64| {
         let client = client.clone();
@@ -693,15 +729,15 @@ async fn transactions_list_filter_and_pagination() {
             let resp = client
                 .post(url)
                 .bearer_auth(&jwt)
-                .json(&serde_json::json!({"amount": amount}))
+                .json(&json!({"amount": amount}))
                 .send()
                 .await
                 .unwrap();
             assert_eq!(resp.status(), 201, "{:?}", resp.text().await);
         }
     };
-    adjust("u-e2e", 100.0).await;
-    adjust("u-e2e", 50.0).await;
+    adjust(&user.id, 100.0).await;
+    adjust(&user.id, 50.0).await;
     let other_id = create_user(&app, &jwt, "zoe", "password-1", "user").await;
     adjust(&other_id, 5.0).await;
 
@@ -712,7 +748,7 @@ async fn transactions_list_filter_and_pagination() {
         .send()
         .await
         .unwrap()
-        .json::<serde_json::Value>()
+        .json::<Value>()
         .await
         .unwrap();
     assert_eq!(all["total"], 3, "{all}");
@@ -720,14 +756,14 @@ async fn transactions_list_filter_and_pagination() {
 
     let mine = client
         .get(format!(
-            "{}/api/balance-transactions?user_id=u-e2e",
-            app.base
+            "{}/api/balance-transactions?user_id={}",
+            app.base, user.id
         ))
         .bearer_auth(&jwt)
         .send()
         .await
         .unwrap()
-        .json::<serde_json::Value>()
+        .json::<Value>()
         .await
         .unwrap();
     assert_eq!(mine["total"], 2);
@@ -736,7 +772,7 @@ async fn transactions_list_filter_and_pagination() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|t| t["user_id"] == "u-e2e"),
+            .all(|t| t["user_id"] == user.id.as_str()),
         "{mine}"
     );
 
@@ -749,7 +785,7 @@ async fn transactions_list_filter_and_pagination() {
         .send()
         .await
         .unwrap()
-        .json::<serde_json::Value>()
+        .json::<Value>()
         .await
         .unwrap();
     assert_eq!(others["total"], 1);
@@ -762,7 +798,7 @@ async fn transactions_list_filter_and_pagination() {
         .send()
         .await
         .unwrap()
-        .json::<serde_json::Value>()
+        .json::<Value>()
         .await
         .unwrap();
     assert_eq!(page1["items"].as_array().unwrap().len(), 1);
@@ -776,7 +812,7 @@ async fn transactions_list_filter_and_pagination() {
         .send()
         .await
         .unwrap()
-        .json::<serde_json::Value>()
+        .json::<Value>()
         .await
         .unwrap();
     assert_eq!(page2["items"].as_array().unwrap().len(), 1);
@@ -791,7 +827,7 @@ async fn transactions_list_filter_and_pagination() {
         .send()
         .await
         .unwrap()
-        .json::<serde_json::Value>()
+        .json::<Value>()
         .await
         .unwrap();
     assert_eq!(
@@ -805,7 +841,7 @@ async fn transactions_list_filter_and_pagination() {
         .send()
         .await
         .unwrap()
-        .json::<serde_json::Value>()
+        .json::<Value>()
         .await
         .unwrap();
     assert_eq!(
@@ -824,7 +860,7 @@ async fn transactions_list_filter_and_pagination() {
         .send()
         .await
         .unwrap()
-        .json::<serde_json::Value>()
+        .json::<Value>()
         .await
         .unwrap();
     assert_eq!(none["total"], 0);
@@ -839,7 +875,7 @@ async fn transactions_list_filter_and_pagination() {
 #[tokio::test]
 async fn admin_users_requires_admin_role() {
     let app = TestApp::spawn().await;
-    seed_api_key(&app.db());
+    app.seed_user().await;
     let client = app.client();
 
     let anon = client
@@ -849,13 +885,21 @@ async fn admin_users_requires_admin_role() {
         .unwrap();
     assert_eq!(anon.status(), 401);
 
-    let plain_id = create_user(&app, &common::admin_jwt(), "plain", "password-1", "user").await;
-    let plain_jwt = common::sign_jwt(&plain_id, "plain", "user");
+    let plain_id = create_user(
+        &app,
+        &app.admin_token().await,
+        "plain",
+        "password-1",
+        "user",
+    )
+    .await;
+    let plain_token = app.login("plain", "password-1").await;
     let forbidden = client
         .get(format!("{}/api/users", app.base))
-        .bearer_auth(&plain_jwt)
+        .bearer_auth(plain_token)
         .send()
         .await
         .unwrap();
     assert_eq!(forbidden.status(), 403);
+    assert!(!plain_id.is_empty());
 }

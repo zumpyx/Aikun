@@ -118,7 +118,7 @@ fn asset_mime(path: &str) -> &'static str {
 
 // ---------- 过渡期存储端口 ----------
 //
-// aikun-store 就位前(plan 步骤 8)aikun-admin 不直接依赖 rusqlite /
+// aikun-store 就位前(plan 步骤 8)aikun-admin 不直接依赖存储引擎 /
 // jsonwebtoken / argon2:DB 查询、Argon2 验密、JWT 签发由二进制装配层
 // (main.rs 的适配器)实现本端口。登录的业务编排(防枚举时序均衡、失败
 // 记账、状态码映射、限流窗口)全部在本 crate,端口只是数据/加密通道。

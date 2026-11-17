@@ -146,10 +146,10 @@ Content-Type: application/json
     <div class="card">
       <div class="card-header"><h2>性能与容量</h2></div>
       <p style="font-size:14px;color:var(--muted);margin-bottom:12px">
-        以下数字在本机实测(<b>10 核 i9-12900H,release 二进制</b>),上游为<b>零业务延迟的 mock</b>,
+        以下数字在本机实测(<b>10 核 i9-12900H,release 二进制</b>,SQLite 后端时代基线;SurrealDB 后端的对比基准随阶段 S 验收补录),上游为<b>零业务延迟的 mock</b>,
         打的是非流式 <code>/v1/chat/completions</code>,每请求走完整链路:认证 → 选路 → 转发 →
         计费(查价 + 写日志 + 扣余额,同一事务)。先 <code>cargo build --release</code> 再用
-        <code>node scripts/bench.js</code> 在你的机器上复现(需 sqlite3 CLI)。
+        <code>node scripts/bench.js</code> 在你的机器上复现(夹具经管理面 API 注入,无外部 CLI 依赖)。
       </p>
       <div class="table-wrap" style="margin-bottom:12px">
         <table>
@@ -164,7 +164,7 @@ Content-Type: application/json
       </div>
       <p style="font-size:14px;color:var(--muted);margin-bottom:8px">
         <b>怎么读这些数字:</b>并发 ≤ 50 时网关自身引入的开销只有几毫秒,吞吐 2,000+ QPS;
-        并发升到 200 时吞吐下降,瓶颈是 <b>SQLite 单写者</b>:每个请求的计费(日志 + 扣费)是一
+        并发升到 200 时吞吐下降,瓶颈是<b>计费写事务的串行化</b>:每个请求的计费(日志 + 扣费)是一
         次串行写事务,在途请求多了就在写锁上排队——这是有意的设计取舍(计费必须随响应落库,
         不能异步丢账),不是网络或协议转换的开销。
       </p>

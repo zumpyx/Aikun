@@ -584,7 +584,7 @@ fn user_role(role: &str) -> UserRole {
 }
 
 /// 微元 → 元。与二进制 `billing::micro_to_yuan` 同式(aikun/src/billing/
-/// mod.rs:20;1e6 整除在 f64 下精确)。aikun-admin 不依赖 rusqlite 侧模块,
+/// mod.rs:20;1e6 整除在 f64 下精确)。aikun-admin 不引入存储侧模块,
 /// 本地同式实现,口径注释互相指向。
 fn micro_to_yuan(micro: i64) -> f64 {
     micro as f64 / 1_000_000.0

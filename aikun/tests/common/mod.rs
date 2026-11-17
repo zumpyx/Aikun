@@ -1,22 +1,26 @@
-//! E2E 测试基建:axum mock 上游 + 拉起真实 aikun 二进制 + DB 夹具。
+//! E2E 测试基建:axum mock 上游 + 拉起真实 aikun 二进制 + 管理面 API 检查通道。
 //! 不改生产代码结构:测试通过 CARGO_BIN_EXE 启动完整应用。
 //!
-//! 阶段 S 切换过渡:被测二进制已改用 SurrealDB(见 spawn_child 的
-//! AIKUN_SURREAL_URL 注入与 E2E_ADMIN_PASSWORD 检查通道预留);旧的
-//! rusqlite 直连夹具(下方 db())已与服务实际存储脱钩——seed/断言改造
-//! 为管理面 API 通道由下一批统一完成(docs/surreal-migration.md §七)。
+//! 阶段 S 检查通道(docs/surreal-migration.md §七):嵌入式 SurrealKV 数据
+//! 文件被服务进程独占,测试进程不能直连 seed/断言——全部改经管理面 API:
+//! spawn 时注入已知 admin 密码(AIKUN_RESET_ADMIN_PASSWORD,启动即重置)
+//! → 登录 /api/auth/login 拿 JWT → seed(建用户/渠道/价格)与断言(日志/
+//! 余额/渠道状态)全走管理面端点。库内形态检查(密文落库、哈希存储、微元
+//! 整数)由 aikun-store 的 surreal 单测承担(设计文档 §七第 2 层)。
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::net::TcpListener;
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-pub const TEST_KEY: &str = "sk-e2e-test-key";
+/// 检查通道的已知 admin 密码(spawn 注入 AIKUN_RESET_ADMIN_PASSWORD;
+/// restart 后启动期同样重置,故 restart 会丢弃缓存的 admin token)。
+pub const E2E_ADMIN_PASSWORD: &str = "e2e-admin-password-2026";
+const ADMIN_USERNAME: &str = "admin";
 
 /// 取一个空闲端口(绑定后立刻释放,竞态窗口极小,可接受)。
 pub fn free_port() -> u16 {
@@ -25,12 +29,6 @@ pub fn free_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
-}
-
-/// 与 src/auth 的 hash_api_key 同算法:hex(sha256(key))。
-pub fn sha256_hex(s: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(s.as_bytes()))
 }
 
 // ---------- Mock 上游 ----------
@@ -184,6 +182,7 @@ async fn mock_handler(
     }
 }
 
+/// 默认 mock 补全:usage 5 输入(含 2 缓存)+ 3 输出。
 pub fn openai_completion(text: &str) -> Value {
     json!({
         "id": "chatcmpl-mock",
@@ -208,41 +207,27 @@ pub fn openai_completion(text: &str) -> Value {
 
 pub struct TestApp {
     pub base: String,
-    pub db_path: PathBuf,
     port: u16,
     child: Child,
     dir: tempfile::TempDir,
     extra_env: Vec<(String, String)>,
+    /// 缓存的 admin JWT;restart 后启动期会重置 admin 密码(token_version+1),
+    /// 缓存随之作废。
+    admin_token: tokio::sync::Mutex<Option<String>>,
 }
 
-/// e2e 检查通道(阶段 S 预留,docs/surreal-migration.md §七):嵌入式
-/// SurrealKV 数据文件被服务进程独占,测试进程不能像 rusqlite 那样直连
-/// seed/断言——改经管理面 API:spawn 时注入已知 admin 密码
-/// (AIKUN_RESET_ADMIN_PASSWORD,启动即重置)→ 登录拿 JWT → seed 与断言
-/// 全走管理面端点。本批只预留通道;测试改造由下一批统一完成。
-pub const E2E_ADMIN_PASSWORD: &str = "e2e-admin-password-2026";
-
-fn spawn_child(
-    dir: &std::path::Path,
-    db_path: &std::path::Path,
-    port: u16,
-    extra_env: &[(String, String)],
-) -> Child {
+fn spawn_child(dir: &std::path::Path, port: u16, extra_env: &[(String, String)]) -> Child {
     Command::new(env!("CARGO_BIN_EXE_aikun"))
         .envs(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .current_dir(dir)
         .env("AIKUN_HOST", format!("127.0.0.1:{}", port))
         .env("AIKUN_JWT_SECRET", "e2e-test-secret-not-for-production")
-        // 阶段 S 默认切换:被测二进制读 SurrealDB(嵌入式 SurrealKV,
-        // 临时目录);db_path 仅供旧 rusqlite 夹具继续编译,下一批移除。
+        // 阶段 S:被测二进制读嵌入式 SurrealKV(临时目录,随 TempDir 清理)
         .env(
             "AIKUN_SURREAL_URL",
-            format!(
-                "surrealkv://{}/test.surreal",
-                db_path.parent().unwrap().display()
-            ),
+            format!("surrealkv://{}/test.surreal", dir.display()),
         )
-        // 管理面检查通道:已知密码重置 admin,登录 /api/auth/login 拿 JWT
+        // 检查通道:已知密码重置 admin,登录 /api/auth/login 拿 JWT
         .env("AIKUN_RESET_ADMIN_PASSWORD", E2E_ADMIN_PASSWORD)
         .env("AIKUN_HEALTH_CHECK_INTERVAL", "3600")
         .stdout(Stdio::null())
@@ -272,9 +257,61 @@ async fn probe_ready(child: &mut Child, base: &str) -> bool {
     }
 }
 
+/// 测试用户夹具:经管理面 API 创建 + 登录 + 建 API key(明文仅此一次)。
+pub struct TestUser {
+    pub id: String,
+    pub username: String,
+    pub password: String,
+    /// 登录签发的 JWT(User/Admin tag 端点用)。
+    pub token: String,
+    /// /v1 代理面的 Bearer 明文。
+    pub api_key: String,
+    pub api_key_id: String,
+}
+
+/// API key 三项限额(0 = 不限;建 key 时一次性写入)。
+#[derive(Default, Clone, Copy)]
+pub struct KeyLimits {
+    pub rpm: i64,
+    pub quota_daily_tokens: i64,
+    pub max_concurrent: i64,
+}
+
+/// 渠道种子(经 POST /api/providers;health_status 起始恒 unknown,
+/// 选路仅排除 unhealthy,unknown 可用)。
+pub struct ProviderSeed<'a> {
+    pub name: &'a str,
+    /// "openai" | "anthropic" | "responses"(responses 自动伴随 openai)。
+    pub protocol: &'a str,
+    pub base_url: &'a str,
+    pub models: &'a [&'a str],
+    pub priority: i64,
+    pub weight: f64,
+    pub api_key: &'a str,
+    pub model_mapping: Option<Value>,
+}
+
+impl Default for ProviderSeed<'_> {
+    fn default() -> Self {
+        Self {
+            name: "p",
+            protocol: "openai",
+            base_url: "http://127.0.0.1:1",
+            models: &["gpt-4"],
+            priority: 10,
+            weight: 10.0,
+            // 空 key 不参与查重(多渠道种子可并存);需要断言上游凭证的
+            // 用例显式传 api_key(管理面创建即加密,转发时解密回明文)。
+            api_key: "",
+            model_mapping: None,
+        }
+    }
+}
+
 impl TestApp {
     /// 拉起真实 aikun 二进制:独立临时目录作为 cwd(避免读到仓库的
-    /// .env)、独立 SQLite、随机端口、超长健康检查间隔(不干扰断言)。
+    /// .env)与嵌入式 SurrealKV 数据目录、随机端口、超长健康检查间隔
+    /// (不干扰断言);就绪后经管理面 API 清空默认价格保证用例隔离。
     pub async fn spawn() -> Self {
         Self::spawn_with_env(&[]).await
     }
@@ -286,13 +323,12 @@ impl TestApp {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
         // 端口竞态根治:free_port() 释放端口后、子进程 bind 前的窗口里,端口可能
         // 被并行测试抢注,子进程 bind 失败秒退。表现为偶发 readiness 超时
-        // (全量套件 33 测试并行时可复现)。对策:探测到子进程早退或超时,换端口
+        // (全量套件并行时可复现)。对策:探测到子进程早退或超时,换端口
         // 重拉,至多 3 次——正常路径零额外开销。
         let mut port = free_port();
-        let mut child = spawn_child(dir.path(), &db_path, port, &extra_env);
+        let mut child = spawn_child(dir.path(), port, &extra_env);
         let mut ready = false;
         for attempt in 0..3 {
             if probe_ready(&mut child, &format!("http://127.0.0.1:{}", port)).await {
@@ -306,30 +342,33 @@ impl TestApp {
             let _ = child.kill();
             let _ = child.wait();
             port = free_port();
-            child = spawn_child(dir.path(), &db_path, port, &extra_env);
+            child = spawn_child(dir.path(), port, &extra_env);
         }
         assert!(ready);
         let mut app = Self {
             base: format!("http://127.0.0.1:{}", port),
-            db_path: db_path.clone(),
             port,
             child,
             dir,
             extra_env,
+            admin_token: tokio::sync::Mutex::new(None),
         };
         app.wait_ready().await;
-        // 全新库启动时会 seed 内置默认价格(见 billing::seed_default_prices);
-        // 各用例自行维护价格数据,这里清空以保证隔离。
-        app.db().execute("DELETE FROM model_prices", []).unwrap();
+        // 全新库启动时会 seed 内置默认价格;各用例自行维护价格数据,
+        // 这里经管理面 API 清空以保证隔离(旧直连 DELETE 的等价通道)。
+        app.clear_prices().await;
         app
     }
 
-    /// 杀掉进程并在同一目录/数据库/端口上重新拉起——用于验证启动期
-    /// 迁移(如存量明文渠道 key 的重加密)。
+    /// 杀掉进程并在同一目录/数据目录/端口上重新拉起——用于验证重启语义
+    /// (如默认价格重播种、渠道密钥跨重启可用)。
     pub async fn restart(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        self.child = spawn_child(self.dir.path(), &self.db_path, self.port, &self.extra_env);
+        self.child = spawn_child(self.dir.path(), self.port, &self.extra_env);
+        // 启动期 AIKUN_RESET_ADMIN_PASSWORD 再次重置(token_version+1),
+        // 旧 admin JWT 全部失效:丢弃缓存,下次按需重新登录。
+        *self.admin_token.lock().await = None;
         self.wait_ready().await;
     }
 
@@ -340,19 +379,346 @@ impl TestApp {
         );
     }
 
-    pub fn db(&self) -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open(&self.db_path).unwrap();
-        conn.execute_batch("PRAGMA busy_timeout=5000;").unwrap();
-        conn
-    }
-
     pub fn client(&self) -> reqwest::Client {
         reqwest::Client::new()
     }
 
-    /// 给请求加上测试 API key 的 Bearer 头。
-    pub fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        req.header("Authorization", format!("Bearer {}", TEST_KEY))
+    // ---------- 检查通道:管理面 API ----------
+
+    /// 登录任意用户拿 JWT(断言 200)。
+    pub async fn login(&self, username: &str, password: &str) -> String {
+        let resp = self
+            .client()
+            .post(format!("{}/api/auth/login", self.base))
+            .json(&json!({"username": username, "password": password}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "login({username}) 必须成功: {:?}",
+            resp.text().await
+        );
+        resp.json::<Value>().await.unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// admin JWT(缓存;restart 后自动重登)。
+    pub async fn admin_token(&self) -> String {
+        let mut cached = self.admin_token.lock().await;
+        if let Some(t) = cached.as_ref() {
+            return t.clone();
+        }
+        let t = self.login(ADMIN_USERNAME, E2E_ADMIN_PASSWORD).await;
+        *cached = Some(t.clone());
+        t
+    }
+
+    /// 管理面 GET → JSON(断言 200)。
+    pub async fn admin_get(&self, path: &str) -> Value {
+        let resp = self
+            .client()
+            .get(format!("{}{}", self.base, path))
+            .bearer_auth(self.admin_token().await)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "GET {path}: {:?}", resp.text().await);
+        resp.json().await.unwrap()
+    }
+
+    async fn clear_prices(&self) {
+        let token = self.admin_token().await;
+        loop {
+            let page: Value = self
+                .client()
+                .get(format!("{}/api/prices?limit=200&offset=0", self.base))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let items = page["items"].as_array().cloned().unwrap_or_default();
+            if items.is_empty() {
+                return;
+            }
+            for id in items
+                .iter()
+                .map(|p| p["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+            {
+                let resp = self
+                    .client()
+                    .delete(format!("{}/api/prices/{}", self.base, id))
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), 204);
+            }
+        }
+    }
+
+    // ---------- 种子夹具(全部经管理面 API)----------
+
+    /// 创建用户(admin API),返回 id。
+    pub async fn create_user(&self, username: &str, password: &str, role: &str) -> String {
+        let resp = self
+            .client()
+            .post(format!("{}/api/users", self.base))
+            .bearer_auth(self.admin_token().await)
+            .json(&json!({
+                "username": username,
+                "password": password,
+                "display_name": username,
+                "role": role,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            201,
+            "创建用户 {username} 失败: {:?}",
+            resp.text().await
+        );
+        resp.json::<Value>().await.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// 创建用户 + 登录 + 建 API key(限额可选)。
+    pub async fn create_user_with_key(
+        &self,
+        username: &str,
+        role: &str,
+        limits: KeyLimits,
+    ) -> TestUser {
+        let password = format!("{username}-password-1");
+        let id = self.create_user(username, &password, role).await;
+        let token = self.login(username, &password).await;
+        let resp = self
+            .client()
+            .post(format!("{}/api/api-keys", self.base))
+            .bearer_auth(&token)
+            .json(&json!({
+                "name": username,
+                "rate_limit_rpm": limits.rpm,
+                "quota_daily_tokens": limits.quota_daily_tokens,
+                "max_concurrent": limits.max_concurrent,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            201,
+            "为 {username} 建 API key 失败: {:?}",
+            resp.text().await
+        );
+        let body: Value = resp.json().await.unwrap();
+        TestUser {
+            api_key_id: body["id"].as_str().unwrap().to_string(),
+            api_key: body["key"].as_str().unwrap().to_string(),
+            id,
+            username: username.to_string(),
+            password,
+            token,
+        }
+    }
+
+    /// 默认测试用户:username=e2e、role=admin、无限额、余额 0。
+    /// (旧 SQLite 直连夹具 seed_api_key 的 API 等价;调账流水计数
+    /// 的用例用本形态保持纯净,余额按需 adjust。)
+    pub async fn seed_user(&self) -> TestUser {
+        self.create_user_with_key("e2e", "admin", KeyLimits::default())
+            .await
+    }
+
+    /// 同 seed_user,但预充 1 元(/v1 余额预检要求 balance > 0;
+    /// 与旧 SQLite 种子行带 1_000_000 微元对齐)。会多一条充值流水。
+    pub async fn seed_user_funded(&self) -> TestUser {
+        let user = self.seed_user().await;
+        assert_eq!(self.adjust_balance(&user.id, 1.0).await, 1.0);
+        user
+    }
+
+    /// 同 seed_user,但设置 rate_limit_rpm / quota_daily_tokens(0 = 不限)。
+    pub async fn seed_user_with_limits(&self, rpm: i64, daily_quota: i64) -> TestUser {
+        self.create_user_with_key(
+            "e2e",
+            "admin",
+            KeyLimits {
+                rpm,
+                quota_daily_tokens: daily_quota,
+                max_concurrent: 0,
+            },
+        )
+        .await
+    }
+
+    /// 调账(元;正=充值 recharge,负=扣减 adjust),返回新余额(元)。
+    pub async fn adjust_balance(&self, user_id: &str, amount_yuan: f64) -> f64 {
+        let resp = self
+            .client()
+            .post(format!(
+                "{}/api/users/{user_id}/balance-transactions",
+                self.base
+            ))
+            .bearer_auth(self.admin_token().await)
+            .json(&json!({"amount": amount_yuan}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            201,
+            "调账 {user_id} +{amount_yuan} 失败: {:?}",
+            resp.text().await
+        );
+        resp.json::<Value>().await.unwrap()["balance"]
+            .as_f64()
+            .unwrap()
+    }
+
+    /// 用户当前余额(元;GET /api/users/{id})。
+    pub async fn user_balance(&self, user_id: &str) -> f64 {
+        self.admin_get(&format!("/api/users/{user_id}")).await["balance"]
+            .as_f64()
+            .unwrap()
+    }
+
+    /// 建渠道(POST /api/providers),返回 id。
+    pub async fn seed_provider(&self, p: &ProviderSeed<'_>) -> String {
+        let protocols: Vec<&str> = match p.protocol {
+            "anthropic" => vec!["anthropic"],
+            // responses 不能单独成渠道(跨字段约束),伴随 openai;
+            // /v1/responses 请求仍优先走原生 responses(Upstream protocol negotiation)
+            "responses" => vec!["responses", "openai"],
+            _ => vec!["openai"],
+        };
+        let mut body = json!({
+            "name": p.name,
+            "api_key": p.api_key,
+            "models": p.models,
+            "protocols": protocols,
+            "priority": p.priority,
+            "weight": p.weight,
+        });
+        if p.protocol == "anthropic" {
+            body["anthropic_base_url"] = json!(p.base_url);
+        } else {
+            body["openai_base_url"] = json!(p.base_url);
+        }
+        if let Some(m) = &p.model_mapping {
+            body["model_mapping"] = m.clone();
+        }
+        let resp = self
+            .client()
+            .post(format!("{}/api/providers", self.base))
+            .bearer_auth(self.admin_token().await)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            201,
+            "建渠道 {} 失败: {:?}",
+            p.name,
+            resp.text().await
+        );
+        resp.json::<Value>().await.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// 建价格行(元/1M tokens),返回 id。
+    pub async fn seed_price(
+        &self,
+        model: &str,
+        prompt_price: f64,
+        completion_price: f64,
+        cached_price: Option<f64>,
+    ) -> String {
+        let mut body = json!({
+            "model": model,
+            "prompt_price": prompt_price,
+            "completion_price": completion_price,
+        });
+        if let Some(c) = cached_price {
+            body["cached_price"] = json!(c);
+        }
+        let resp = self
+            .client()
+            .post(format!("{}/api/prices", self.base))
+            .bearer_auth(self.admin_token().await)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            201,
+            "建价格 {model} 失败: {:?}",
+            resp.text().await
+        );
+        resp.json::<Value>().await.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    // ---------- 断言夹具(管理面 API 回读)----------
+
+    /// 某用户的日志列表(admin 视角,可跨用户),按时间倒序。
+    pub async fn logs(&self, user_id: &str) -> Vec<Value> {
+        self.admin_get(&format!("/api/logs?user_id={user_id}&limit=200"))
+            .await["items"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 某用户的日志统计(total_tokens / total_cost 元 / success_rate)。
+    pub async fn log_stats(&self, user_id: &str) -> Value {
+        self.admin_get(&format!("/api/logs/stats?user_id={user_id}"))
+            .await
+    }
+
+    /// 渠道当前状态(health_status / is_active / error_rate / …)。
+    pub async fn provider(&self, id: &str) -> Value {
+        self.admin_get(&format!("/api/providers/{id}")).await
+    }
+
+    /// 轮询管理面 GET 直到谓词命中,返回该次响应体。记账失败行为是
+    /// 异步 fire-and-forget:断言前轮询等待条件成立(谓词是同步闭包,
+    /// 捕获只发生在闭包调用内,不跨 await 逃逸)。
+    pub async fn wait_admin(
+        &self,
+        path: &str,
+        timeout: Duration,
+        mut pred: impl FnMut(&Value) -> bool,
+    ) -> Value {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let v = self.admin_get(path).await;
+            if pred(&v) {
+                return v;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for condition on: {path}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 }
 
@@ -363,71 +729,10 @@ impl Drop for TestApp {
     }
 }
 
-// ---------- DB 夹具 ----------
+// ---------- JWT 直签(用户行存在且 token_version=0 时可用) ----------
 
-/// 插入一个用户和一把 API key(TEST_KEY 的 sha256)。
-pub fn seed_api_key(db: &rusqlite::Connection) {
-    seed_api_key_with_limits(db, 0, 0);
-}
-
-/// 同 seed_api_key,但设置 rate_limit_rpm / quota_daily_tokens(0 = 不限)。
-/// 用户默认带 1 元余额(1_000_000 微元):代理入口对 balance <= 0 一律
-/// 402,需要零余额场景的用例应显式 UPDATE 覆盖。
-pub fn seed_api_key_with_limits(db: &rusqlite::Connection, rpm: i64, daily_quota: i64) {
-    db.execute(
-        "INSERT INTO users (id, username, password_hash, display_name, role, balance)
-         VALUES ('u-e2e', 'e2e', 'unused', 'E2E', 'admin', 1000000)",
-        [],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO api_keys (id, user_id, key, name, rate_limit_rpm, quota_daily_tokens)
-         VALUES ('k-e2e', 'u-e2e', ?1, 'e2e', ?2, ?3)",
-        rusqlite::params![sha256_hex(TEST_KEY), rpm, daily_quota],
-    )
-    .unwrap();
-}
-
-pub struct ProviderSeed<'a> {
-    pub id: &'a str,
-    pub name: &'a str,
-    /// "openai" | "anthropic",同时写入 provider_type/protocols/default_protocol。
-    pub protocol: &'a str,
-    /// mock 的 base,两路地址写同一个。
-    pub base_url: &'a str,
-    /// JSON array,如 "[\"gpt-4\"]"。
-    pub models: &'a str,
-    pub priority: i32,
-    pub weight: f64,
-    pub health_status: &'a str,
-    pub error_rate: f64,
-}
-
-pub fn seed_provider(db: &rusqlite::Connection, p: &ProviderSeed) {
-    let protocols = format!("[\"{}\"]", p.protocol);
-    db.execute(
-        "INSERT INTO providers (id, name, provider_type, openai_base_url, anthropic_base_url,
-                                api_key, models, priority, weight, health_status, error_rate,
-                                protocols, default_protocol)
-         VALUES (?1, ?2, ?3, ?4, ?4, 'upstream-key', ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
-        rusqlite::params![
-            p.id,
-            p.name,
-            p.protocol,
-            p.base_url,
-            p.models,
-            p.priority,
-            p.weight,
-            p.health_status,
-            p.error_rate,
-            protocols,
-        ],
-    )
-    .unwrap();
-}
-
-/// 用测试密钥签发任意身份的 JWT(token_version=0;用户需在 users 表中
-/// 存在且 is_active=1,否则 authenticate_jwt 会拒绝)。
+/// 用测试密钥签发任意身份的 JWT(管理面创建的用户 token_version 起始为 0;
+/// 改密/重置后会失效,由各用例自行规避)。
 pub fn sign_jwt(sub: &str, username: &str, role: &str) -> String {
     #[derive(serde::Serialize)]
     struct TestClaims {
@@ -458,16 +763,28 @@ pub fn sign_jwt(sub: &str, username: &str, role: &str) -> String {
     .unwrap()
 }
 
-/// 用测试密钥直接签发 admin JWT(u-e2e 角色为 admin、token_version=0)。
-pub fn admin_jwt() -> String {
-    sign_jwt("u-e2e", "e2e", "admin")
-}
-
-/// 记账/禁用都是异步 fire-and-forget:断言前轮询等待条件成立。
-pub async fn wait_until(desc: &str, timeout: Duration, mut f: impl FnMut() -> bool) {
-    let deadline = Instant::now() + timeout;
-    while !f() {
-        assert!(Instant::now() < deadline, "timed out waiting for: {}", desc);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+/// 记账失败行为异步 fire-and-forget:断言前轮询等待条件成立。
+/// 轮询统一走 [`TestApp::wait_admin`](管理面 GET + 同步谓词);该自由函数
+/// 是等用户首条成功日志的常用形态,返回命中的那一行。
+pub async fn wait_success_log(app: &TestApp, user_id: &str, timeout: Duration) -> Value {
+    let page = app
+        .wait_admin(
+            &format!("/api/logs?user_id={user_id}&limit=200"),
+            timeout,
+            |page| {
+                page["items"].as_array().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|l| l["success"] == serde_json::json!(true))
+                })
+            },
+        )
+        .await;
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["success"] == serde_json::json!(true))
+        .cloned()
+        .unwrap()
 }

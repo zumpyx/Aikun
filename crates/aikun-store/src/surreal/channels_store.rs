@@ -1497,13 +1497,21 @@ impl ChannelStore for SurrealChannels {
         if key_hash.is_empty() {
             return Ok(None);
         }
+        // 排除串为空(创建场景)不能拼 `type::record('provider', '')`:
+        // 空字符串不是合法 record key,查询会报错并被上游按"查重失败
+        // 放行"吞掉,同 key 重复创建漏拦(单测 find_key_owner_dedup_…)。
+        let exclude_clause = if exclude_id.is_empty() {
+            ""
+        } else {
+            " AND id != type::record('provider', $ex)"
+        };
         let mut res = self
             .handle
             .db()
-            .query(
+            .query(format!(
                 "SELECT name FROM provider \
-                 WHERE key_hash = $h AND id != type::record('provider', $ex) LIMIT 1",
-            )
+                 WHERE key_hash = $h{exclude_clause} LIMIT 1"
+            ))
             .bind(("h", key_hash))
             .bind(("ex", exclude_id))
             .await
@@ -1760,6 +1768,33 @@ mod tests {
 
             // updated_at 恒 bump:PATCH 后行内时间戳非空。
             assert!(!reenabled.updated_at.is_empty());
+        });
+    }
+
+    /// key_hash 归属查重(管理面建渠道的 409 duplicate_key 数据源):
+    /// 排除串为空(创建场景)不得让查询报错或漏命中——空 exclude 曾把
+    /// `type::record('provider', '')` 拼进 != 比较,查询失败被上游当
+    /// Ok(None) 放行,同 key 重复创建漏拦(e2e 锚定)。
+    #[test]
+    fn find_key_owner_dedup_and_exclude() {
+        big_stack(async {
+            let store = fixture().await;
+            let p1 = store
+                .create_provider(new_provider("dup", "same-key"))
+                .await
+                .unwrap();
+
+            // 创建场景(exclude 为空):命中已有归属
+            let h = crate::password::hash_api_key("same-key");
+            assert_eq!(
+                store.find_key_owner(&h, "").await.unwrap().as_deref(),
+                Some("dup"),
+                "空 exclude 的查重必须命中已有渠道"
+            );
+            // 换 key 场景(排除自身):无其他归属
+            assert_eq!(store.find_key_owner(&h, &p1.id).await.unwrap(), None);
+            // 空 hash 不参与查重
+            assert_eq!(store.find_key_owner("", "").await.unwrap(), None);
         });
     }
 

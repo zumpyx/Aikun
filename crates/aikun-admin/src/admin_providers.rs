@@ -32,7 +32,7 @@
 //!
 //! # 过渡期端口(aikun-store 就位前)
 //!
-//! aikun-admin 不依赖 rusqlite / reqwest / uuid / sha2(依赖纯净度,
+//! aikun-admin 不依赖存储引擎 / reqwest / uuid / sha2(依赖纯净度,
 //! architecture §三):DB 行级读写、key 加密/哈希、上游 HTTP 探测分别经
 //! [`ProviderStore`] / [`ProviderProbes`] 端口注入,适配器写在 main.rs
 //! (参照 Auth 批的 `DbAuthStore` 模式),由集成工人装配;阶段 3 store

@@ -2,7 +2,7 @@
 //!
 //! 阶段 S 默认切换(docs/surreal-migration.md):主二进制只装配
 //! SurrealDB 后端(`surreal/`);SQLite 读能力收口进迁移工具 crate
-//! `aikun-migrate`(读旧库搬运),本 crate 不再依赖 rusqlite。
+//! `aikun-migrate`(读旧库搬运),本 crate 不再含 SQLite 直连依赖。
 //!
 //! ## 纪律:能力 trait 签名零 SQL 方言
 //!

@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 // Aikun 网关吞吐基准:mock 上游(零业务延迟)+ 分级并发打 /v1/chat/completions
-// 非流式请求,测量网关自身引入的开销与 SQLite 记账链路的上限。
+// 非流式请求,测量网关自身引入的开销与 SurrealDB 记账链路的上限。
 //
 // 用法: node scripts/bench.js [二进制路径]
-// 依赖: sqlite3 CLI(夹具注入),target/release/aikun 已构建(cargo build --release)。
-// 注意: 数字只在同机同环境下可比;上游真实延迟是生产瓶颈(见 docs.js「性能与容量」)。
-const { spawn, execFileSync } = require('child_process');
-const crypto = require('crypto');
+// 依赖: target/release/aikun 已构建(cargo build --release)。
+// 夹具注入走管理面 API(已知 admin 密码重置 → 登录 → 建用户/渠道/价格,
+// 与 e2e 检查通道同源,docs/surreal-migration.md §七),无 sqlite3 CLI 依赖。
+// 注意: 数字只在同机同环境下可比;上游真实延迟是生产瓶颈(见 docs「性能与容量」)。
+const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
 const AIKUN = path.resolve(process.argv[2] || path.join(__dirname, '..', 'target', 'release', 'aikun'));
-const API_KEY = 'sk-bench-key';
+const ADMIN_PASSWORD = 'bench-admin-password-2026';
+const BENCH_USER = 'bench';
+const BENCH_PASSWORD = 'bench-user-password-2026';
 const CONCURRENCY_LEVELS = [10, 50, 100, 200];
 // 每级请求数:并发 × 100,保证每级至少有统计学意义的样本
 const REQUESTS_PER_CONCURRENCY = 100;
@@ -60,7 +63,62 @@ async function waitReady(base, deadlineMs = 15000) {
   }
 }
 
-async function benchLevel(base, concurrency, total) {
+async function login(base, username, password) {
+  const r = await fetch(`${base}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!r.ok) throw new Error(`登录 ${username} 失败: HTTP ${r.status}`);
+  return (await r.json()).token;
+}
+
+// 管理面请求封装(断言 2xx)。
+async function adminReq(base, token, method, apiPath, body) {
+  const r = await fetch(`${base}${apiPath}`, {
+    method,
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`${method} ${apiPath} 失败: HTTP ${r.status} ${await r.text()}`);
+  return r.status === 204 ? null : r.json();
+}
+
+// 夹具注入(管理面 API 通道):用户(大额余额)+ API key + 指向 mock 的
+// 渠道 + gpt-4 价格行(默认价未含时补一条)。
+async function seedFixtures(base, mockBase) {
+  const admin = await login(base, 'admin', ADMIN_PASSWORD);
+  const userId = (await adminReq(base, admin, 'POST', '/api/users', {
+    username: BENCH_USER,
+    password: BENCH_PASSWORD,
+    display_name: BENCH_USER,
+    role: 'user',
+  })).id;
+  // 余额 100 万元(微元整数口径经调账端点换算)
+  await adminReq(base, admin, 'POST', `/api/users/${userId}/balance-transactions`, {
+    amount: 1_000_000.0,
+  });
+  const userToken = await login(base, BENCH_USER, BENCH_PASSWORD);
+  const apiKey = (await adminReq(base, userToken, 'POST', '/api/api-keys', {
+    name: 'bench',
+  })).key;
+  await adminReq(base, admin, 'POST', '/api/providers', {
+    name: 'bench-mock',
+    openai_base_url: mockBase,
+    api_key: 'mock-key',
+    models: ['gpt-4'],
+    protocols: ['openai'],
+  });
+  const prices = await adminReq(base, admin, 'GET', '/api/prices?limit=200');
+  if (!prices.items.some((p) => p.model === 'gpt-4')) {
+    await adminReq(base, admin, 'POST', '/api/prices', {
+      model: 'gpt-4', prompt_price: 10.0, completion_price: 30.0,
+    });
+  }
+  return apiKey;
+}
+
+async function benchLevel(base, concurrency, total, apiKey) {
   const latencies = [];
   let done = 0;
   const started = process.hrtime.bigint();
@@ -71,7 +129,7 @@ async function benchLevel(base, concurrency, total) {
       const t0 = process.hrtime.bigint();
       const r = await fetch(`${base}/v1/chat/completions`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${API_KEY}` },
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({ model: 'gpt-4', messages: [{ role: 'user', content: 'hi' }] }),
       });
       await r.arrayBuffer();
@@ -98,7 +156,6 @@ async function benchLevel(base, concurrency, total) {
     process.exit(1);
   }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aikun-bench-'));
-  const dbPath = path.join(dir, 'bench.db');
   const appPort = await freePort();
   const appBase = `http://127.0.0.1:${appPort}`;
   const mock = await startMockUpstream();
@@ -109,7 +166,9 @@ async function benchLevel(base, concurrency, total) {
       ...process.env,
       AIKUN_HOST: `127.0.0.1:${appPort}`,
       AIKUN_JWT_SECRET: 'bench-secret-bench-secret-bench-secret',
-      AIKUN_DATABASE_URL: `sqlite://${dbPath}?mode=rwc`,
+      // 阶段 S:嵌入式 SurrealKV(临时目录);检查通道密码重置供夹具登录
+      AIKUN_SURREAL_URL: `surrealkv://${dir}/bench.surreal`,
+      AIKUN_RESET_ADMIN_PASSWORD: ADMIN_PASSWORD,
       AIKUN_HEALTH_CHECK_INTERVAL: '3600',
     },
     stdio: 'ignore',
@@ -126,22 +185,12 @@ async function benchLevel(base, concurrency, total) {
 
   try {
     await waitReady(appBase);
-    // 夹具:用户(大额余额)+ API key(sha256 落库)+ 指向 mock 的渠道 + 一条价格
-    const keyHash = crypto.createHash('sha256').update(API_KEY).digest('hex');
-    execFileSync('sqlite3', [dbPath, `
-      INSERT INTO users (id, username, password_hash, role, balance) VALUES ('u-bench', 'bench', 'x', 'admin', 1000000000000);
-      INSERT INTO api_keys (id, user_id, key, name) VALUES ('k-bench', 'u-bench', '${keyHash}', 'bench');
-      INSERT INTO providers (id, name, provider_type, openai_base_url, anthropic_base_url, api_key, models,
-                             health_status, protocols, default_protocol)
-        VALUES ('p-bench', 'mock', 'openai', '${mock.base}', '${mock.base}', 'mock-key', '["gpt-4"]',
-                'healthy', '["openai"]', 'openai');
-      INSERT OR REPLACE INTO model_prices (id, model, prompt_price, completion_price) VALUES ('mp-bench', 'gpt-4', 10.0, 30.0);
-    `]);
+    const apiKey = await seedFixtures(appBase, mock.base);
 
     console.log(`环境: ${os.cpus().length} 核 ${os.cpus()[0].model}, node ${process.version}, 非流式 /v1/chat/completions`);
     console.log('concurrency | requests | QPS | P50(ms) | P99(ms)');
     for (const c of CONCURRENCY_LEVELS) {
-      const r = await benchLevel(appBase, c, c * REQUESTS_PER_CONCURRENCY);
+      const r = await benchLevel(appBase, c, c * REQUESTS_PER_CONCURRENCY, apiKey);
       console.log(`${r.concurrency} | ${r.requests} | ${r.qps} | ${r.p50} | ${r.p99}`);
     }
   } finally {
