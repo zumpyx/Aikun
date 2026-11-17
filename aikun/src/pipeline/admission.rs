@@ -1,9 +1,6 @@
 //! 准入检查:API Key 限额(每分钟请求数 / 每日 token / 并发)、余额预检、
 //! 模型白名单。全部在选路之前完成,拒绝时不触达任何上游。
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
 use tracing::warn;
 
 use aikun_store::KeyUsageSnapshot;
@@ -25,22 +22,8 @@ pub(crate) fn model_allowed(allowed: &Option<Vec<String>>, model: &str) -> bool 
 /// API key 并发槽位:Drop 时归还在途计数。非流式请求在响应体读完、函数
 /// 返回时释放;流式请求被 move 进 stream 生成器,持有到流结束/客户端断连/
 /// 进程关停(生成器 Drop 全覆盖)。
-pub(crate) struct ConcurrencyGuard {
-    key_id: String,
-    inflight: Arc<Mutex<HashMap<String, usize>>>,
-}
-
-impl Drop for ConcurrencyGuard {
-    fn drop(&mut self) {
-        let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = map.get_mut(&self.key_id) {
-            *n -= 1;
-            if *n == 0 {
-                map.remove(&self.key_id);
-            }
-        }
-    }
-}
+/// 并发槽位守卫:阶段 3 起由 aikun-store 的限流组件提供(Drop 释放)。
+pub(crate) type ConcurrencyGuard = aikun_store::limiter::CounterGuard;
 
 /// Per-API-key 限流/日额度/并发检查。返回 Err(message) 表示应以 429 拒绝;
 /// Ok(guard) 携带并发槽位(未配置并发上限时为 None),调用方须把 guard
@@ -86,43 +69,34 @@ pub(crate) async fn enforce_key_limits(
     }
 
     if rpm > 0 {
-        // 锁中毒时跳过 RPM 检查放行,与整体 fail-open 口径一致。
-        if let Ok(mut windows) = state.api_key_rate.lock() {
-            let now = std::time::Instant::now();
-            let window = windows.entry(key_id.to_string()).or_default();
-            window.retain(|t| now.duration_since(*t).as_secs() < 60);
-            if window.len() >= rpm as usize {
-                // 空窗口的 key 顺手清掉,避免 map 随 key 数量无限增长(这里
-                // 窗口非空不处理,空窗口在下一次请求 retain 后同样被清)。
-                return Err(format!(
-                    "Rate limit exceeded for this API key ({} requests/minute)",
-                    rpm
-                ));
-            }
-            window.push(now);
-            windows.retain(|_, w| !w.is_empty());
+        // 原子"判定 + 记一次"(单次持锁);组件锁中毒恢复而非放行
+        //(语义收紧点见 CHANGELOG:仅 panic 场景有差异)。
+        if !state.limiters.api_key_rate.try_hit(
+            key_id,
+            std::time::Duration::from_secs(60),
+            rpm as usize,
+        ) {
+            return Err(format!(
+                "Rate limit exceeded for this API key ({} requests/minute)",
+                rpm
+            ));
         }
     }
 
     // 并发槽位最后占用:RPM/额度拒绝时不消耗槽位;槽位超限时 RPM 窗口已
     // 推入一格,与"被 429 的请求也计入限流"的既有口径一致。
     if max_concurrent > 0 {
-        let mut map = state
+        return match state
+            .limiters
             .api_key_inflight
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let n = map.entry(key_id.to_string()).or_insert(0);
-        if *n >= max_concurrent as usize {
-            return Err(format!(
+            .acquire(key_id, max_concurrent as usize)
+        {
+            Some(guard) => Ok(Some(guard)),
+            None => Err(format!(
                 "Concurrent request limit exceeded for this API key ({} in-flight)",
                 max_concurrent
-            ));
-        }
-        *n += 1;
-        return Ok(Some(ConcurrencyGuard {
-            key_id: key_id.to_string(),
-            inflight: state.api_key_inflight.clone(),
-        }));
+            )),
+        };
     }
 
     Ok(None)

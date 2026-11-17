@@ -26,6 +26,7 @@
 //! 承担"读旧库"的职责(设计文档 §五的迁移工具口径)。
 
 pub mod crypto;
+pub mod limiter;
 pub mod password;
 pub mod pricing;
 pub mod surreal;

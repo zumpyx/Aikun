@@ -15,10 +15,11 @@
 //!   斜杠(实测,见 playbook 踩坑)。main.rs 把 `static_fallback` 挂成应用
 //!   级 fallback 兜底;两条路最终都查同一张 `STATIC_ASSETS` 表。
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
+
+use aikun_store::limiter::SlidingWindows;
 
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
@@ -175,7 +176,7 @@ const MAX_FAILS_PER_IP: usize = 30;
 /// 成功登录只清 user 键、保留 ip 键的语义才成立。
 pub struct AuthService<S: AuthStore> {
     store: Arc<S>,
-    attempts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    attempts: Arc<SlidingWindows>,
     trust_x_forwarded_for: bool,
 }
 
@@ -189,19 +190,8 @@ impl<S: AuthStore> Clone for AuthService<S> {
     }
 }
 
-/// 锁中毒时取回内部数据继续工作,不静默 fail-open/fail-closed。
-fn lock_login_attempts(
-    attempts: &Arc<Mutex<HashMap<String, Vec<Instant>>>>,
-) -> MutexGuard<'_, HashMap<String, Vec<Instant>>> {
-    attempts.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 impl<S: AuthStore> AuthService<S> {
-    pub fn new(
-        store: Arc<S>,
-        attempts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
-        trust_x_forwarded_for: bool,
-    ) -> Self {
+    pub fn new(store: Arc<S>, attempts: Arc<SlidingWindows>, trust_x_forwarded_for: bool) -> Self {
         Self {
             store,
             attempts,
@@ -212,52 +202,32 @@ impl<S: AuthStore> AuthService<S> {
     /// True if either key has exhausted its failure budget within the window.
     /// 顺手清理过期条目(机会式)。
     fn limited(&self, keys: &[String]) -> bool {
-        let now = Instant::now();
-        let mut attempts = lock_login_attempts(&self.attempts);
-        attempts.retain(|_, v| {
-            v.retain(|t| now.duration_since(*t) < LOGIN_WINDOW);
-            !v.is_empty()
-        });
+        // 机会式全表清理(原语义保留,组件化后由 sweep 承担)。
+        self.attempts.sweep(LOGIN_WINDOW);
         keys.iter().any(|k| {
             let limit = if k.starts_with("ip:") {
                 MAX_FAILS_PER_IP
             } else {
                 MAX_FAILS_PER_USER
             };
-            attempts.get(k).is_some_and(|v| v.len() >= limit)
+            self.attempts.count(k, LOGIN_WINDOW) >= limit
         })
     }
 
     fn record_failure(&self, keys: &[String]) {
-        let mut attempts = lock_login_attempts(&self.attempts);
-        let now = Instant::now();
-        for k in keys {
-            attempts.entry(k.clone()).or_default().push(now);
-        }
+        self.attempts.record_many(keys);
     }
 
     fn clear_failures(&self, keys: &[String]) {
-        let mut attempts = lock_login_attempts(&self.attempts);
         for k in keys {
-            attempts.remove(k);
+            self.attempts.clear(k);
         }
     }
 
     /// 429 的 `Retry-After` 建议秒数:窗口内最早一次失败到期为止,向上取
     /// 整、至少 1s(spec 目标态新增,api-mapping 全局语义 #12)。
     fn retry_after_secs(&self, key: &str) -> u64 {
-        let now = Instant::now();
-        let attempts = lock_login_attempts(&self.attempts);
-        attempts
-            .get(key)
-            .and_then(|v| v.first())
-            .map(|oldest| now.duration_since(*oldest))
-            .map(|elapsed| {
-                let rem = LOGIN_WINDOW.saturating_sub(elapsed);
-                rem.as_secs() + u64::from(rem.subsec_nanos() > 0)
-            })
-            .unwrap_or(1)
-            .max(1)
+        self.attempts.retry_after_secs(key, LOGIN_WINDOW)
     }
 
     fn too_many_requests(&self, key: &str) -> LoginServerResponse {

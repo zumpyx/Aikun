@@ -63,8 +63,10 @@
 //!   再包装(避免双层信封)。/v1 代理面 401 维持旧扁平体(契约冻结)。
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
+
+use aikun_store::limiter::SlidingWindows;
 
 use axum::extract::Request;
 use axum::http::{HeaderValue, StatusCode, header};
@@ -341,13 +343,6 @@ fn clamp_page(limit: Option<i64>, offset: Option<i64>) -> (i64, i64) {
     )
 }
 
-/// 锁中毒时取回内部数据继续干(踩坑 #9:不 fail-open 也不 fail-closed)。
-fn lock_map(
-    map: &Arc<Mutex<HashMap<String, Vec<Instant>>>>,
-) -> MutexGuard<'_, HashMap<String, Vec<Instant>>> {
-    map.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// 微元 → 元(整除 1e6 在 f64 下精确;口径同 billing::micro_to_yuan)。
 fn micro_to_yuan(micro: i64) -> f64 {
     micro as f64 / 1_000_000.0
@@ -443,8 +438,8 @@ fn to_api_log(rec: LogRecord) -> RequestLog {
 /// AppState 共享同一实例(同 Auth 批 login_attempts 的注入模式)。
 pub struct UserService<S: UserStore> {
     store: Arc<S>,
-    redeem_attempts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
-    api_key_rate: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    redeem_attempts: Arc<SlidingWindows>,
+    api_key_rate: Arc<SlidingWindows>,
     /// 服务版本(装配层注入二进制 env!("CARGO_PKG_VERSION"))
     version: String,
 }
@@ -463,8 +458,8 @@ impl<S: UserStore> Clone for UserService<S> {
 impl<S: UserStore> UserService<S> {
     pub fn new(
         store: Arc<S>,
-        redeem_attempts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
-        api_key_rate: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+        redeem_attempts: Arc<SlidingWindows>,
+        api_key_rate: Arc<SlidingWindows>,
         version: impl Into<String>,
     ) -> Self {
         Self {
@@ -478,42 +473,23 @@ impl<S: UserStore> UserService<S> {
     // ---- 兑换限流(内存滑动窗口;与登录限流同构) ----
 
     fn redeem_limited(&self, user_id: &str) -> bool {
-        let now = Instant::now();
-        let mut attempts = lock_map(&self.redeem_attempts);
-        attempts.retain(|_, v| {
-            v.retain(|t| now.duration_since(*t) < REDEEM_WINDOW);
-            !v.is_empty()
-        });
-        attempts
-            .get(user_id)
-            .is_some_and(|v| v.len() >= REDEEM_MAX_FAILS)
+        self.redeem_attempts.sweep(REDEEM_WINDOW);
+        self.redeem_attempts.count(user_id, REDEEM_WINDOW) >= REDEEM_MAX_FAILS
     }
 
     fn record_redeem_failure(&self, user_id: &str) {
-        lock_map(&self.redeem_attempts)
-            .entry(user_id.to_string())
-            .or_default()
-            .push(Instant::now());
+        self.redeem_attempts.record(user_id);
     }
 
     fn clear_redeem_failures(&self, user_id: &str) {
-        lock_map(&self.redeem_attempts).remove(user_id);
+        self.redeem_attempts.clear(user_id);
     }
 
     /// 429 的 `Retry-After` 建议秒数:窗口内最早一次失败到期为止,向上
     /// 取整、至少 1s(目标态新增,api-mapping 全局语义 #12)。
     fn redeem_retry_after_secs(&self, user_id: &str) -> u64 {
-        let now = Instant::now();
-        lock_map(&self.redeem_attempts)
-            .get(user_id)
-            .and_then(|v| v.first())
-            .map(|oldest| now.duration_since(*oldest))
-            .map(|elapsed| {
-                let rem = REDEEM_WINDOW.saturating_sub(elapsed);
-                rem.as_secs() + u64::from(rem.subsec_nanos() > 0)
-            })
-            .unwrap_or(1)
-            .max(1)
+        self.redeem_attempts
+            .retry_after_secs(user_id, REDEEM_WINDOW)
     }
 
     fn redeem_rate_limited(&self, user_id: &str) -> RedeemCodeResponse {
@@ -789,9 +765,7 @@ impl<S: UserStore> UserApi for UserService<S> {
             Some(n) if n > 0 => {
                 // 清内存 RPM 滑动窗口死条目(窗口只在 key 自身有请求时才
                 // 被 retain,被删 key 的非空窗口会常驻)。
-                if let Ok(mut windows) = self.api_key_rate.lock() {
-                    windows.remove(&id);
-                }
+                self.api_key_rate.clear(&id);
                 DeleteApiKeyResponse::NoContent
             }
             // 未命中(不存在或非属主,不暴露存在性)

@@ -159,6 +159,7 @@ version = "0.5.0"
 dependencies = [
  "aikun-channels",
  "aikun-openapi",
+ "aikun-store",
  "async-trait",
  "axum",
  "chrono",

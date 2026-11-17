@@ -36,19 +36,12 @@ pub struct AppState {
     /// Cached reqwest clients keyed by "proxy_url|timeout_secs" — building a
     /// client per request is expensive and defeats connection pooling.
     pub clients: Arc<Mutex<HashMap<String, reqwest::Client>>>,
-    /// Sliding-window login-attempt tracker keyed by "ip:..." / "user:..." —
-    /// brute-force protection for POST /api/auth/login(ip 维度在装配层
-    /// 中间件、user 维度在 crates/aikun-admin/src/auth.rs,共享本表)。
-    pub login_attempts: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
-    /// Sliding-window per-API-key request timestamps (keyed by api_keys.id) —
-    /// enforces api_keys.rate_limit_rpm. In-memory only: a restart resets the
-    /// window, which is acceptable for a per-minute limit.
-    pub api_key_rate: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
-    /// 兑换码失败滑动窗口(keyed by user id):防爆破,10 分钟 5 次失败即 429。
-    pub redeem_attempts: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
-    /// API key 并发在途计数(keyed by api_keys.id):max_concurrent 的执行层。
-    /// 请求结束时由 ConcurrencyGuard 的 Drop 归还槽位;内存口径,重启清零。
-    pub api_key_inflight: Arc<Mutex<HashMap<String, usize>>>,
+    /// 进程内限流器聚合(阶段 3 Limiter 合并,取代此前四个散落的
+    /// `Arc<Mutex<HashMap>>`):登录失败 / API key RPM / 兑换失败三个
+    /// 滑动窗口 + 并发在途计数。内存口径,重启清零(分钟级窗口可接受);
+    /// 组件语义(访问时清理 + 删除时清理 + 锁中毒恢复)见
+    /// aikun-store/src/limiter.rs。
+    pub limiters: aikun_store::limiter::Limiters,
     /// 关停信号:收到 SIGINT/SIGTERM 后取消,流式生成器据此主动收尾——
     /// 已捕获 usage 照常记账,而不是被 30s 强杀跳过 Drop 丢账。
     pub shutdown: tokio_util::sync::CancellationToken,
@@ -110,6 +103,12 @@ async fn async_main() {
     );
     info!("Database initialized (SurrealDB)");
 
+    // 渠道熔断参数(9.5):选路层短周期冷却,进程内全局单例。
+    channel::breaker::configure(
+        config.breaker_failure_threshold,
+        config.breaker_cooldown_secs,
+    );
+
     // 运维逃生口:设置 AIKUN_RESET_ADMIN_PASSWORD 后,启动即重置 admin 密码
     // 并 token_version + 1(旧会话全部失效)。密码本身绝不打印到日志。
     if let Ok(new_password) = std::env::var("AIKUN_RESET_ADMIN_PASSWORD") {
@@ -133,10 +132,7 @@ async fn async_main() {
         store: store.clone(),
         config: config.clone(),
         clients: Arc::new(Mutex::new(HashMap::new())),
-        login_attempts: Arc::new(Mutex::new(HashMap::new())),
-        api_key_rate: Arc::new(Mutex::new(HashMap::new())),
-        redeem_attempts: Arc::new(Mutex::new(HashMap::new())),
-        api_key_inflight: Arc::new(Mutex::new(HashMap::new())),
+        limiters: aikun_store::limiter::Limiters::new(),
         shutdown: tokio_util::sync::CancellationToken::new(),
         cache: Arc::new(cache::GatewayCache::from_config(&config)),
     };
@@ -150,7 +146,7 @@ async fn async_main() {
             store: store.clone(),
             config: config.clone(),
         }),
-        state.login_attempts.clone(),
+        state.limiters.login_attempts.clone(),
         config.trust_x_forwarded_for,
     );
     let auth_routes = aikun_openapi::openapi::server::router::auth_api_router(auth_service.clone())
@@ -170,8 +166,8 @@ async fn async_main() {
         Arc::new(SurrealUserStore {
             store: store.clone(),
         }),
-        state.redeem_attempts.clone(),
-        state.api_key_rate.clone(),
+        state.limiters.redeem_attempts.clone(),
+        state.limiters.api_key_rate.clone(),
         env!("CARGO_PKG_VERSION"),
     );
     let user_routes = aikun_openapi::openapi::server::router::user_api_router(user_service.clone())
