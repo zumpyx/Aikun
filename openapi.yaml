@@ -3,10 +3,12 @@
 # Aikun Gateway API — 系统 API 全景图(手写 spec,仓库根,单一真相)
 # =============================================================================
 # 定位与纪律(出处:docs/architecture-v0.5.md 决策 2/3/4):
-#   * 代理面(前缀 /v1,tag = Proxy)→ 仅作文档:loose schema、不镜像厂商契约;
-#   * 管理面(前缀 /api,tag = Auth / User / Admin)→ 进 openapi-to-rust 生成白名单,
-#     绝不入生成白名单(生成器自带的 jsonschema 运行时校验会误拒第三方扩展字段,
-#     直接打坏透传);
+#   * **全量生成**(2026-11-18):spec 的全部 operationId 都经 openapi-to-rust
+#     生成(无手工白名单,gen-api.sh 从本文件机械提取注入;代理面八端点
+#     同日纳入,见决策 4);/v1 用混合宽松 schema(核心字段 optional 类型化,
+#     未知字段 flatten 透传),不镜像厂商契约;
+#   * /v1/{*path} 通配兜底(白名单外路径 404)不进生成(OpenAPI 无通配语法),
+#     保留手写;
 #   * /api/health 不进本 spec(全系统唯一无鉴权 JSON 接口,运维探针,非资源 API)。
 #
 # 关键决策(为什么长这样,YAML 写给人读):
@@ -38,15 +40,16 @@ info:
   license:
     name: AGPL-3.0
     url: https://www.gnu.org/licenses/agpl-3.0.html
-  summary: Aikun 网关管理面(生成白名单)与 /v1 代理面(仅文档)的系统 API 全景图
+  summary: Aikun 网关系统 API 全景图(全部 operationId 经 openapi-to-rust 生成)
   description: |
-    Aikun 是多渠道聚合的 AI 网关。本 spec 覆盖两块平面:
+    Aikun 是多渠道聚合的 AI 网关。本 spec 覆盖两块平面,**全部 operationId
+    都进 openapi-to-rust 生成**(2026-11-18 起无手工白名单):
 
     * **管理面**(`/api/**`,tag `Auth` / `User` / `Admin`):登录、用户自助、
-      管理员三层,JWT 鉴权,是代码生成(openapi-to-rust)的白名单范围。
+      管理员三层,JWT 鉴权。
     * **代理面**(`/v1/**`,tag `Proxy`):OpenAI / Anthropic 兼容端点,
-      API key(`sk-`)鉴权,字节级透传。**仅作文档**,契约属各厂商,
-      不入生成白名单。
+      API key(`sk-`)鉴权。混合宽松 schema:核心字段类型化,未知字段经
+      flatten 原样透传;契约属各厂商,不镜像进本 spec。
 
     `/api/health` 刻意不进本 spec。
 
@@ -76,26 +79,31 @@ security:
 tags:
   - name: Proxy
     description: |
-      /v1 代理端点。**仅作文档:契约属各厂商,不入生成白名单**;
-      管理面代码生成器的 operations 白名单必须排除本 tag 的全部 operationId。
-      鉴权:Bearer sk-<key>(或 JWT,或 Anthropic 客户端的 x-api-key 头)。
-      错误体按客户端协议(OpenAI/Anthropic 格式)返回,不用 problem+json。
+      /v1 代理端点。**进全量生成**(2026-11-18 决策:推翻此前"仅作文档"裁决)。
+      生成用**混合宽松 schema**:核心字段 optional 类型化,未知字段经
+      #[serde(flatten)] 原样透传;**每个 object 层必须显式
+      additionalProperties: true**——漏写的层不生成 flatten,会静默丢字段。
+      鉴权:Bearer sk-<key>(或 JWT,或 Anthropic 客户端的 x-api-key 头),
+      装配层 auth_middleware 与手写时代一致。
+      错误体按客户端协议(OpenAI/Anthropic 格式)返回,不用 problem+json
+      (生成校验链的 problem+json 输出经装配层中间件改写为厂商格式)。
+      /v1/{*path} 通配兜底(白名单外 404)不进生成(OpenAPI 无通配语法),保留手写。
 
   - name: Auth
     description: |
       公开层:内嵌前端、静态资产、登录。装配时裸挂(无 auth_middleware)。
       **不含 /api/health**(唯一无鉴权 JSON 接口,不进 spec)。
-      属生成白名单。
+      进全量生成。
   - name: User
     description: |
       用户自助层:本人信息、API key、日志、钱包、兑换、在售价目。
       装配时包 auth_middleware(JWT);跨用户查询参数(user_id)仅 admin 生效。
-      属生成白名单。
+      进全量生成。
   - name: Admin
     description: |
       管理面:用户/渠道/价格/兑换码/流水/统计的完整管理。
       装配时包 auth_middleware + require_admin(JWT 且 role=admin)。
-      属生成白名单;路径上不再有 /admin 段(角色由中间件承担)。
+      进全量生成;路径上不再有 /admin 段(角色由中间件承担)。
 
 paths:
   # ===========================================================================
@@ -105,7 +113,8 @@ paths:
       operationId: createChatCompletion
       summary: OpenAI 兼容对话补全(统一代理管道)
       description: |
-        **代理端点,契约属各厂商,不入生成白名单。**
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
         统一代理管道(Protocol::OpenAi):按渠道声明协议转换或原生转发;
         stream:true 走 SSE。支持响应缓存(默认 off,命中按配置计费)。
       security:
@@ -116,7 +125,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ProxyJsonObject'
+              $ref: '#/components/schemas/ChatCompletionRequest'
             examples:
               minimal:
                 value:
@@ -190,7 +199,8 @@ paths:
       operationId: createMessage
       summary: Anthropic Messages 端点(同管道,协议转换)
       description: |
-        **代理端点,契约属各厂商,不入生成白名单。**
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
         接受 Anthropic 格式,按渠道声明协议转换或原生转发;
         Anthropic 客户端可用 x-api-key 头鉴权。
         错误体为 Anthropic 格式;准入与 402/429/403 语义同 chat/completions。
@@ -202,7 +212,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ProxyJsonObject'
+              $ref: '#/components/schemas/MessagesRequest'
             examples:
               minimal:
                 value:
@@ -274,7 +284,8 @@ paths:
       operationId: createResponse
       summary: OpenAI Responses API 端点
       description: |
-        **代理端点,契约属各厂商,不入生成白名单。**
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
         声明 responses 协议的渠道原样转发;其余渠道转换到其原生协议
         (chat/completions 或 Anthropic 组合)。注意:渠道侧 responses
         只能作为附加协议(必须同时勾选 openai 或 anthropic)。
@@ -286,7 +297,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ProxyJsonObject'
+              $ref: '#/components/schemas/ResponsesRequest'
             examples:
               minimal:
                 value:
@@ -355,7 +366,7 @@ paths:
       operationId: listModels
       summary: 可用模型列表(聚合健康渠道)
       description: |
-        **代理端点,契约属各厂商,不入生成白名单。**
+        **代理端点;经 openapi-to-rust 生成(见 Proxy tag)。**
         聚合自健康渠道;受限 key 只返回白名单内模型(精确名或 * 前缀匹配)。
         响应为 OpenAI list 格式(本端点由网关聚合产出,给轻量类型)。
       security:
@@ -384,10 +395,11 @@ paths:
       operationId: createEmbedding
       summary: OpenAI embeddings 字节级透传
       description: |
-        **代理端点,契约属各厂商,不入生成白名单。**
-        经 POST /v1/{*path} 通配路由,白名单端点之一;白名单外路径 404。
-        请求体必须有 model 字段。字节级透传:只走声明 openai 协议的渠道,
-        无协议转换;应用渠道模型映射后原样转发。
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
+        显式路由(不再经 POST /v1/{*path} 通配);白名单外路径由保留的
+        手写通配兜底 404。请求体必须有 model 字段。字节级透传:只走声明
+        openai 协议的渠道,无协议转换;应用渠道模型映射后原样转发。
         有 usage 则按价格表计费,无 usage 按 0 元记账但日志照落。
       security:
         - apiKeyAuth: []
@@ -397,7 +409,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ProxyJsonObject'
+              $ref: '#/components/schemas/EmbeddingsRequest'
             examples:
               minimal:
                 value:
@@ -462,7 +474,8 @@ paths:
       operationId: createModeration
       summary: OpenAI moderations 字节级透传(0 元记账)
       description: |
-        **代理端点,契约属各厂商,不入生成白名单。**
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
         白名单透传端点;响应通常无 usage,按 0 元记账(日志照落)。
         同样要求 body 带 model。
       security:
@@ -473,7 +486,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ProxyJsonObject'
+              $ref: '#/components/schemas/ModerationsRequest'
             examples:
               minimal:
                 value:
@@ -538,7 +551,8 @@ paths:
       operationId: createImage
       summary: OpenAI 图片生成字节级透传(0 元记账)
       description: |
-        **代理端点,契约属各厂商,不入生成白名单。**
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
         白名单透传端点;无 usage 按 0 元记账,日志照落。
         注意:multipart 端点(audio/*)与无 model 的 files/batches
         刻意不在白名单(无法按 model 选路,且会暴露渠道账号级接口)。
@@ -550,7 +564,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ProxyJsonObject'
+              $ref: '#/components/schemas/ImagesRequest'
             examples:
               minimal:
                 value:
@@ -615,7 +629,8 @@ paths:
       operationId: createRerank
       summary: rerank 端点字节级透传(白名单第 4 项)
       description: |
-        **代理端点,契约属各厂商,不入生成白名单。**
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
         非 OpenAI 官方端点(部分供应商兼容)。若响应含 usage 则计费,
         否则 0 元记账。
       security:
@@ -626,7 +641,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ProxyJsonObject'
+              $ref: '#/components/schemas/RerankRequest'
             examples:
               minimal:
                 value:
@@ -2205,7 +2220,7 @@ paths:
           $ref: '#/components/responses/Forbidden'
 
   # ===========================================================================
-  # Proxy tag — /v1 代理端点(仅文档,绝不进生成白名单)
+  # Proxy tag — /v1 代理端点(2026-11-18 起进全量生成,混合宽松 schema)
   # ===========================================================================
   # 通用说明(每个端点 description 只写差异):
   #   * 鉴权三选一:Authorization: Bearer sk-<key>(推荐)/ JWT /
@@ -2447,6 +2462,100 @@ components:
           type: string
       required: [error, message]
       additionalProperties: false
+
+    # --------- Proxy 请求(混合宽松:核心字段 optional 类型化 + flatten)---------
+    # 纪律(见 Proxy tag):本组每个 schema 与所有嵌套 object 层必须显式
+    # additionalProperties: true——漏写的层不生成 #[serde(flatten)],
+    # 未知字段会在生成类型的反序列化中被静默丢弃。类型开放的字段
+    # (如 messages[].content 的 string|array 双态、Responses 的 input)
+    # 刻意不进核心字段,经 flatten 原样透传。
+    ChatCompletionRequest:
+      type: object
+      description: OpenAI chat/completions 请求(混合宽松;字段全 optional,
+        缺 model 等校验留在网关管线以保持厂商格式错误体)。
+      properties:
+        model:
+          type: string
+        stream:
+          type: boolean
+        messages:
+          type: array
+          description: 元素形态开放(role/content 双态与厂商扩展字段),不类型化。
+          items: {}
+      additionalProperties: true
+
+    MessagesRequest:
+      type: object
+      description: Anthropic Messages 请求(混合宽松;字段全 optional)。
+      properties:
+        model:
+          type: string
+        stream:
+          type: boolean
+        max_tokens:
+          type: integer
+        messages:
+          type: array
+          description: 元素形态开放(content block 数组含厂商扩展),不类型化。
+          items: {}
+      additionalProperties: true
+
+    ResponsesRequest:
+      type: object
+      description: OpenAI Responses 请求(混合宽松;input 为 string|array
+        双态,刻意经 flatten 透传,不类型化)。
+      properties:
+        model:
+          type: string
+        stream:
+          type: boolean
+        instructions:
+          type: string
+      additionalProperties: true
+
+    EmbeddingsRequest:
+      type: object
+      description: embeddings 请求(混合宽松;input 为 string|array 双态,
+        经 flatten 透传)。
+      properties:
+        model:
+          type: string
+      additionalProperties: true
+
+    ModerationsRequest:
+      type: object
+      description: moderations 请求(混合宽松;input 双态,经 flatten 透传)。
+      properties:
+        model:
+          type: string
+      additionalProperties: true
+
+    ImagesRequest:
+      type: object
+      description: images/generations 请求(混合宽松)。
+      properties:
+        model:
+          type: string
+        prompt:
+          type: string
+        size:
+          type: string
+        n:
+          type: integer
+      additionalProperties: true
+
+    RerankRequest:
+      type: object
+      description: rerank 请求(混合宽松)。
+      properties:
+        model:
+          type: string
+        query:
+          type: string
+        documents:
+          type: array
+          items: {}
+      additionalProperties: true
 
     ProxyJsonObject:
       type: object

@@ -18,7 +18,7 @@ pub enum AdminListRedemptionCodesStatus {
     Expired,
 }
 #[derive(Debug, Clone, PartialEq, Eq, ::serde::Deserialize, ::serde::Serialize, Default)]
-pub enum GetLogStatsSuccess {
+pub enum ListLogsSuccess {
     #[default]
     #[serde(rename = "0")]
     Variant0,
@@ -26,7 +26,7 @@ pub enum GetLogStatsSuccess {
     Variant1,
 }
 #[derive(Debug, Clone, PartialEq, Eq, ::serde::Deserialize, ::serde::Serialize, Default)]
-pub enum ListLogsSuccess {
+pub enum GetLogStatsSuccess {
     #[default]
     #[serde(rename = "0")]
     Variant0,
@@ -36,6 +36,50 @@ pub enum ListLogsSuccess {
 /// Operations under the `Admin` tag.
 #[async_trait::async_trait]
 pub trait AdminApi: Send + Sync + 'static {
+    /// 用户列表
+    ///
+    /// `GET /api/users`
+    async fn admin_list_users(
+        &self,
+        limit: ::std::option::Option<i64>,
+        offset: ::std::option::Option<i64>,
+    ) -> AdminListUsersResponse;
+    /// 创建用户
+    ///
+    /// `POST /api/users`
+    async fn admin_create_user(&self, body: CreateUserRequest) -> AdminCreateUserResponse;
+    /// 批量创建用户(逐项独立成功/失败)
+    ///
+    /// `POST /api/users/batch`
+    async fn admin_create_users_batch(
+        &self,
+        body: BatchCreateUsersRequest,
+    ) -> AdminCreateUsersBatchResponse;
+    /// 查单个用户(含余额)
+    ///
+    /// `GET /api/users/{id}`
+    async fn admin_get_user(&self, id: String) -> AdminGetUserResponse;
+    /// 部分更新用户(改密/启停/改角色)
+    ///
+    /// `PATCH /api/users/{id}`
+    async fn admin_update_user(
+        &self,
+        id: String,
+        body: UpdateUserRequest,
+    ) -> AdminUpdateUserResponse;
+    /// 禁用用户(软删除)
+    ///
+    /// `DELETE /api/users/{id}`
+    async fn admin_delete_user(&self, id: String) -> AdminDeleteUserResponse;
+    /// 调账/充值流水查询
+    ///
+    /// `GET /api/balance-transactions`
+    async fn admin_list_billing_transactions(
+        &self,
+        limit: ::std::option::Option<i64>,
+        offset: ::std::option::Option<i64>,
+        user_id: ::std::option::Option<String>,
+    ) -> AdminListBillingTransactionsResponse;
     /// 管理员手工调账(创建一条余额流水)
     ///
     /// `POST /api/users/{id}/balance-transactions`
@@ -44,10 +88,14 @@ pub trait AdminApi: Send + Sync + 'static {
         id: String,
         body: AdjustBalanceRequest,
     ) -> AdminAdjustUserBalanceResponse;
-    /// 新建价格条目
+    /// 渠道列表
     ///
-    /// `POST /api/prices`
-    async fn admin_create_price(&self, body: UpsertPriceRequest) -> AdminCreatePriceResponse;
+    /// `GET /api/providers`
+    async fn admin_list_providers(
+        &self,
+        limit: ::std::option::Option<i64>,
+        offset: ::std::option::Option<i64>,
+    ) -> AdminListProvidersResponse;
     /// 创建渠道(上游配置 + 加密 key)
     ///
     /// `POST /api/providers`
@@ -62,45 +110,6 @@ pub trait AdminApi: Send + Sync + 'static {
         &self,
         body: CreateProvidersBatchRequest,
     ) -> AdminCreateProvidersBatchResponse;
-    /// 批量生成兑换码
-    ///
-    /// `POST /api/redemption-codes`
-    async fn admin_create_redemption_codes(
-        &self,
-        body: CreateRedemptionCodesRequest,
-    ) -> AdminCreateRedemptionCodesResponse;
-    /// 创建用户
-    ///
-    /// `POST /api/users`
-    async fn admin_create_user(&self, body: CreateUserRequest) -> AdminCreateUserResponse;
-    /// 批量创建用户(逐项独立成功/失败)
-    ///
-    /// `POST /api/users/batch`
-    async fn admin_create_users_batch(
-        &self,
-        body: BatchCreateUsersRequest,
-    ) -> AdminCreateUsersBatchResponse;
-    /// 删除价格条目
-    ///
-    /// `DELETE /api/prices/{id}`
-    async fn admin_delete_price(&self, id: String) -> AdminDeletePriceResponse;
-    /// 物理删除渠道
-    ///
-    /// `DELETE /api/providers/{id}`
-    async fn admin_delete_provider(&self, id: String) -> AdminDeleteProviderResponse;
-    /// 禁用用户(软删除)
-    ///
-    /// `DELETE /api/users/{id}`
-    async fn admin_delete_user(&self, id: String) -> AdminDeleteUserResponse;
-    /// 禁用未使用的兑换码
-    ///
-    /// `DELETE /api/redemption-codes/{id}`
-    async fn admin_disable_redemption_code(&self, id: String)
-    -> AdminDisableRedemptionCodeResponse;
-    /// 复制渠道(创建一个副本)
-    ///
-    /// `POST /api/providers/{id}/duplicates`
-    async fn admin_duplicate_provider(&self, id: String) -> AdminDuplicateProviderResponse;
     /// 为(尚未保存的)渠道配置拉取上游模型列表
     ///
     /// `POST /api/providers/fetch-models`
@@ -108,79 +117,22 @@ pub trait AdminApi: Send + Sync + 'static {
         &self,
         body: FetchModelsRequest,
     ) -> AdminFetchUpstreamModelsResponse;
-    /// 全局计数快照
-    ///
-    /// `GET /api/system/stats`
-    async fn admin_get_global_stats(&self) -> AdminGetGlobalStatsResponse;
     /// 渠道详情
     ///
     /// `GET /api/providers/{id}`
     async fn admin_get_provider(&self, id: String) -> AdminGetProviderResponse;
-    /// 仪表盘用量聚合
+    /// 部分更新渠道
     ///
-    /// `GET /api/usage-stats`
-    async fn admin_get_usage_stats(&self) -> AdminGetUsageStatsResponse;
-    /// 查单个用户(含余额)
-    ///
-    /// `GET /api/users/{id}`
-    async fn admin_get_user(&self, id: String) -> AdminGetUserResponse;
-    /// 调账/充值流水查询
-    ///
-    /// `GET /api/balance-transactions`
-    async fn admin_list_billing_transactions(
+    /// `PATCH /api/providers/{id}`
+    async fn admin_update_provider(
         &self,
-        limit: ::std::option::Option<i64>,
-        offset: ::std::option::Option<i64>,
-        user_id: ::std::option::Option<String>,
-    ) -> AdminListBillingTransactionsResponse;
-    /// 渠道适配器类型下拉(目录)
+        id: String,
+        body: UpdateProviderRequest,
+    ) -> AdminUpdateProviderResponse;
+    /// 物理删除渠道
     ///
-    /// `GET /api/channel-kinds`
-    async fn admin_list_channel_kinds(&self) -> AdminListChannelKindsResponse;
-    /// 每(渠道, 模型)对的最近实测健康
-    ///
-    /// `GET /api/model-health`
-    async fn admin_list_model_health(
-        &self,
-        limit: ::std::option::Option<i64>,
-        offset: ::std::option::Option<i64>,
-        provider_id: ::std::option::Option<String>,
-    ) -> AdminListModelHealthResponse;
-    /// 模型价格表(管理端全量,含通配条目)
-    ///
-    /// `GET /api/prices`
-    async fn admin_list_prices(
-        &self,
-        limit: ::std::option::Option<i64>,
-        offset: ::std::option::Option<i64>,
-        in_use: ::std::option::Option<String>,
-    ) -> AdminListPricesResponse;
-    /// 渠道列表
-    ///
-    /// `GET /api/providers`
-    async fn admin_list_providers(
-        &self,
-        limit: ::std::option::Option<i64>,
-        offset: ::std::option::Option<i64>,
-    ) -> AdminListProvidersResponse;
-    /// 兑换码列表(掩码)
-    ///
-    /// `GET /api/redemption-codes`
-    async fn admin_list_redemption_codes(
-        &self,
-        limit: ::std::option::Option<i64>,
-        offset: ::std::option::Option<i64>,
-        batch: ::std::option::Option<String>,
-        status: ::std::option::Option<AdminListRedemptionCodesStatus>,
-    ) -> AdminListRedemptionCodesResponse;
-    /// 用户列表
-    ///
-    /// `GET /api/users`
-    async fn admin_list_users(
-        &self,
-        limit: ::std::option::Option<i64>,
-        offset: ::std::option::Option<i64>,
-    ) -> AdminListUsersResponse;
+    /// `DELETE /api/providers/{id}`
+    async fn admin_delete_provider(&self, id: String) -> AdminDeleteProviderResponse;
     /// 渠道连通性测试(创建一次探测)
     ///
     /// `POST /api/providers/{id}/tests`
@@ -193,6 +145,36 @@ pub trait AdminApi: Send + Sync + 'static {
         id: String,
         body: ModelTestRequest,
     ) -> AdminTestProviderModelResponse;
+    /// 复制渠道(创建一个副本)
+    ///
+    /// `POST /api/providers/{id}/duplicates`
+    async fn admin_duplicate_provider(&self, id: String) -> AdminDuplicateProviderResponse;
+    /// 每(渠道, 模型)对的最近实测健康
+    ///
+    /// `GET /api/model-health`
+    async fn admin_list_model_health(
+        &self,
+        limit: ::std::option::Option<i64>,
+        offset: ::std::option::Option<i64>,
+        provider_id: ::std::option::Option<String>,
+    ) -> AdminListModelHealthResponse;
+    /// 渠道适配器类型下拉(目录)
+    ///
+    /// `GET /api/channel-kinds`
+    async fn admin_list_channel_kinds(&self) -> AdminListChannelKindsResponse;
+    /// 模型价格表(管理端全量,含通配条目)
+    ///
+    /// `GET /api/prices`
+    async fn admin_list_prices(
+        &self,
+        limit: ::std::option::Option<i64>,
+        offset: ::std::option::Option<i64>,
+        in_use: ::std::option::Option<String>,
+    ) -> AdminListPricesResponse;
+    /// 新建价格条目
+    ///
+    /// `POST /api/prices`
+    async fn admin_create_price(&self, body: UpsertPriceRequest) -> AdminCreatePriceResponse;
     /// 部分更新价格条目
     ///
     /// `PATCH /api/prices/{id}`
@@ -201,30 +183,44 @@ pub trait AdminApi: Send + Sync + 'static {
         id: String,
         body: UpsertPriceRequest,
     ) -> AdminUpdatePriceResponse;
-    /// 部分更新渠道
+    /// 删除价格条目
     ///
-    /// `PATCH /api/providers/{id}`
-    async fn admin_update_provider(
-        &self,
-        id: String,
-        body: UpdateProviderRequest,
-    ) -> AdminUpdateProviderResponse;
-    /// 部分更新用户(改密/启停/改角色)
+    /// `DELETE /api/prices/{id}`
+    async fn admin_delete_price(&self, id: String) -> AdminDeletePriceResponse;
+    /// 兑换码列表(掩码)
     ///
-    /// `PATCH /api/users/{id}`
-    async fn admin_update_user(
+    /// `GET /api/redemption-codes`
+    async fn admin_list_redemption_codes(
         &self,
-        id: String,
-        body: UpdateUserRequest,
-    ) -> AdminUpdateUserResponse;
+        limit: ::std::option::Option<i64>,
+        offset: ::std::option::Option<i64>,
+        batch: ::std::option::Option<String>,
+        status: ::std::option::Option<AdminListRedemptionCodesStatus>,
+    ) -> AdminListRedemptionCodesResponse;
+    /// 批量生成兑换码
+    ///
+    /// `POST /api/redemption-codes`
+    async fn admin_create_redemption_codes(
+        &self,
+        body: CreateRedemptionCodesRequest,
+    ) -> AdminCreateRedemptionCodesResponse;
+    /// 禁用未使用的兑换码
+    ///
+    /// `DELETE /api/redemption-codes/{id}`
+    async fn admin_disable_redemption_code(&self, id: String)
+    -> AdminDisableRedemptionCodeResponse;
+    /// 仪表盘用量聚合
+    ///
+    /// `GET /api/usage-stats`
+    async fn admin_get_usage_stats(&self) -> AdminGetUsageStatsResponse;
+    /// 全局计数快照
+    ///
+    /// `GET /api/system/stats`
+    async fn admin_get_global_stats(&self) -> AdminGetGlobalStatsResponse;
 }
 /// Operations under the `Auth` tag.
 #[async_trait::async_trait]
 pub trait AuthApi: Send + Sync + 'static {
-    /// 用户名密码登录,签发 JWT
-    ///
-    /// `POST /api/auth/login`
-    async fn login(&self, body: LoginRequest) -> LoginServerResponse;
     /// 返回内嵌的管理前端单页应用
     ///
     /// `GET /`
@@ -233,40 +229,61 @@ pub trait AuthApi: Send + Sync + 'static {
     ///
     /// `GET /static/{path}`
     async fn serve_static_asset(&self, path: String) -> ServeStaticAssetResponse;
+    /// 用户名密码登录,签发 JWT
+    ///
+    /// `POST /api/auth/login`
+    async fn login(&self, body: LoginRequest) -> LoginServerResponse;
+}
+/// Operations under the `Proxy` tag.
+#[async_trait::async_trait]
+pub trait ProxyApi: Send + Sync + 'static {
+    /// OpenAI 兼容对话补全(统一代理管道)
+    ///
+    /// `POST /v1/chat/completions`
+    async fn create_chat_completion(
+        &self,
+        body: ChatCompletionRequest,
+    ) -> CreateChatCompletionResponse;
+    /// Anthropic Messages 端点(同管道,协议转换)
+    ///
+    /// `POST /v1/messages`
+    async fn create_message(&self, body: MessagesRequest) -> CreateMessageResponse;
+    /// OpenAI Responses API 端点
+    ///
+    /// `POST /v1/responses`
+    async fn create_response(&self, body: ResponsesRequest) -> CreateResponseResponse;
+    /// 可用模型列表(聚合健康渠道)
+    ///
+    /// `GET /v1/models`
+    async fn list_models(&self) -> ListModelsResponse;
+    /// OpenAI embeddings 字节级透传
+    ///
+    /// `POST /v1/embeddings`
+    async fn create_embedding(&self, body: EmbeddingsRequest) -> CreateEmbeddingResponse;
+    /// OpenAI moderations 字节级透传(0 元记账)
+    ///
+    /// `POST /v1/moderations`
+    async fn create_moderation(&self, body: ModerationsRequest) -> CreateModerationResponse;
+    /// OpenAI 图片生成字节级透传(0 元记账)
+    ///
+    /// `POST /v1/images/generations`
+    async fn create_image(&self, body: ImagesRequest) -> CreateImageResponse;
+    /// rerank 端点字节级透传(白名单第 4 项)
+    ///
+    /// `POST /v1/rerank`
+    async fn create_rerank(&self, body: RerankRequest) -> CreateRerankResponse;
 }
 /// Operations under the `User` tag.
 #[async_trait::async_trait]
 pub trait UserApi: Send + Sync + 'static {
-    /// 创建 API key
-    ///
-    /// `POST /api/api-keys`
-    async fn create_api_key(&self, body: CreateApiKeyRequest) -> CreateApiKeyResponse;
-    /// 删除 API key
-    ///
-    /// `DELETE /api/api-keys/{id}`
-    async fn delete_api_key(&self, id: String) -> DeleteApiKeyResponse;
     /// 当前登录用户信息 + 余额
     ///
     /// `GET /api/users/me`
     async fn get_current_user(&self) -> GetCurrentUserResponse;
-    /// 日志统计(与列表共用筛选条件)
-    ///
-    /// `GET /api/logs/stats`
-    async fn get_log_stats(
-        &self,
-        model: ::std::option::Option<String>,
-        success: ::std::option::Option<GetLogStatsSuccess>,
-        user_id: ::std::option::Option<String>,
-        since: ::std::option::Option<String>,
-    ) -> GetLogStatsResponse;
     /// 服务版本号
     ///
     /// `GET /api/system/version`
     async fn get_version(&self) -> GetVersionResponse;
-    /// 钱包:本人余额 + 近 30 天消费分析
-    ///
-    /// `GET /api/users/me/wallet`
-    async fn get_wallet_stats(&self) -> GetWalletStatsResponse;
     /// 列出本人(或 admin 指定用户)的 API key
     ///
     /// `GET /api/api-keys`
@@ -276,6 +293,18 @@ pub trait UserApi: Send + Sync + 'static {
         offset: ::std::option::Option<i64>,
         user_id: ::std::option::Option<String>,
     ) -> ListApiKeysResponse;
+    /// 创建 API key
+    ///
+    /// `POST /api/api-keys`
+    async fn create_api_key(&self, body: CreateApiKeyRequest) -> CreateApiKeyResponse;
+    /// 部分更新 API key
+    ///
+    /// `PATCH /api/api-keys/{id}`
+    async fn update_api_key(&self, id: String, body: UpdateApiKeyRequest) -> UpdateApiKeyResponse;
+    /// 删除 API key
+    ///
+    /// `DELETE /api/api-keys/{id}`
+    async fn delete_api_key(&self, id: String) -> DeleteApiKeyResponse;
     /// 请求日志列表
     ///
     /// `GET /api/logs`
@@ -288,6 +317,24 @@ pub trait UserApi: Send + Sync + 'static {
         user_id: ::std::option::Option<String>,
         since: ::std::option::Option<String>,
     ) -> ListLogsResponse;
+    /// 日志统计(与列表共用筛选条件)
+    ///
+    /// `GET /api/logs/stats`
+    async fn get_log_stats(
+        &self,
+        model: ::std::option::Option<String>,
+        success: ::std::option::Option<GetLogStatsSuccess>,
+        user_id: ::std::option::Option<String>,
+        since: ::std::option::Option<String>,
+    ) -> GetLogStatsResponse;
+    /// 钱包:本人余额 + 近 30 天消费分析
+    ///
+    /// `GET /api/users/me/wallet`
+    async fn get_wallet_stats(&self) -> GetWalletStatsResponse;
+    /// 兑换充值码
+    ///
+    /// `POST /api/users/me/redemptions`
+    async fn redeem_code(&self, body: RedeemRequest) -> RedeemCodeResponse;
     /// 在售模型价目(登录用户只读)
     ///
     /// `GET /api/models/prices`
@@ -296,12 +343,4 @@ pub trait UserApi: Send + Sync + 'static {
         limit: ::std::option::Option<i64>,
         offset: ::std::option::Option<i64>,
     ) -> ListPublicPricesResponse;
-    /// 兑换充值码
-    ///
-    /// `POST /api/users/me/redemptions`
-    async fn redeem_code(&self, body: RedeemRequest) -> RedeemCodeResponse;
-    /// 部分更新 API key
-    ///
-    /// `PATCH /api/api-keys/{id}`
-    async fn update_api_key(&self, id: String, body: UpdateApiKeyRequest) -> UpdateApiKeyResponse;
 }

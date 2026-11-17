@@ -2098,6 +2098,20 @@ impl AdjustBalanceRequestBuilder {
         self.value
     }
 }
+///OpenAI chat/completions 请求(混合宽松;字段全 optional, 缺 model 等校验留在网关管线以保持厂商格式错误体)。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ChatCompletionRequest {
+    ///元素形态开放(role/content 双态与厂商扩展字段),不类型化。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    /// Additional properties not explicitly defined in the schema
+    #[serde(flatten)]
+    pub additional_properties: std::collections::BTreeMap<String, serde_json::Value>,
+}
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct CreateApiKeyRequest {
     /**过期时间;**空串/缺省 = 永不过期**。非空值必须可解析且在未来,
@@ -2193,6 +2207,15 @@ pub struct CreatedRedemptionCodes {
     pub codes: Vec<String>,
     pub count: i64,
 }
+///embeddings 请求(混合宽松;input 为 string|array 双态, 经 flatten 透传)。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct EmbeddingsRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Additional properties not explicitly defined in the schema
+    #[serde(flatten)]
+    pub additional_properties: std::collections::BTreeMap<String, serde_json::Value>,
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FetchedModels {
     pub models: Vec<String>,
@@ -2203,6 +2226,21 @@ pub struct GlobalStats {
     pub providers: i64,
     pub requests_today: i64,
     pub users: i64,
+}
+///images/generations 请求(混合宽松)。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ImagesRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    /// Additional properties not explicitly defined in the schema
+    #[serde(flatten)]
+    pub additional_properties: std::collections::BTreeMap<String, serde_json::Value>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LogStats {
@@ -2218,6 +2256,22 @@ pub struct LogStats {
 pub struct LoginRequest {
     pub password: String,
     pub username: String,
+}
+///Anthropic Messages 请求(混合宽松;字段全 optional)。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct MessagesRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i64>,
+    ///元素形态开放(content block 数组含厂商扩展),不类型化。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    /// Additional properties not explicitly defined in the schema
+    #[serde(flatten)]
+    pub additional_properties: std::collections::BTreeMap<String, serde_json::Value>,
 }
 /**业务失败也是成功响应:ok=false 时错误信息在 status / error 字段里
 (HTTP 层只表达"测试已执行")。结果已持久化到 model_health。
@@ -2248,6 +2302,15 @@ pub struct ModelTestResult {
     )]
     pub status: Option<Option<i64>>,
     pub stream: bool,
+}
+///moderations 请求(混合宽松;input 双态,经 flatten 透传)。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ModerationsRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Additional properties not explicitly defined in the schema
+    #[serde(flatten)]
+    pub additional_properties: std::collections::BTreeMap<String, serde_json::Value>,
 }
 /**RFC 9457 problem+json 统一错误信封。`code` 是机器可读短码
 (snake_case),管理面词表:
@@ -2313,6 +2376,32 @@ pub struct RedemptionResult {
     pub amount: f64,
     ///兑换后余额(元)
     pub balance: f64,
+}
+///rerank 请求(混合宽松)。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct RerankRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documents: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Additional properties not explicitly defined in the schema
+    #[serde(flatten)]
+    pub additional_properties: std::collections::BTreeMap<String, serde_json::Value>,
+}
+///OpenAI Responses 请求(混合宽松;input 为 string|array 双态,刻意经 flatten 透传,不类型化)。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ResponsesRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    /// Additional properties not explicitly defined in the schema
+    #[serde(flatten)]
+    pub additional_properties: std::collections::BTreeMap<String, serde_json::Value>,
 }
 ///部分更新;expires_at 传空串 = 清除过期时间;无字段 400
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

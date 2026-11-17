@@ -81,6 +81,27 @@ fn __query_empty_marker(
         None => Ok(false),
     }
 }
+/// Query parameters for `GET /api/users` (operationId `adminListUsers`).
+#[derive(Debug, Default)]
+pub struct AdminListUsersQuery {
+    pub limit: ::std::option::Option<i64>,
+    pub offset: ::std::option::Option<i64>,
+}
+fn __decode_admin_list_users_query(
+    raw: ::std::option::Option<&str>,
+) -> ::std::result::Result<AdminListUsersQuery, String> {
+    if let Some(raw) = raw {
+        __validate_urlencoded(raw)?;
+    }
+    let __pairs = __query_pairs(raw);
+    let limit = __query_one(&__pairs, "limit")?
+        .map(|raw| __decode_query_scalar(&raw, "limit"))
+        .transpose()?;
+    let offset = __query_one(&__pairs, "offset")?
+        .map(|raw| __decode_query_scalar(&raw, "offset"))
+        .transpose()?;
+    Ok(AdminListUsersQuery { limit, offset })
+}
 /// Query parameters for `GET /api/balance-transactions` (operationId `adminListBillingTransactions`).
 #[derive(Debug, Default)]
 pub struct AdminListBillingTransactionsQuery {
@@ -109,6 +130,27 @@ fn __decode_admin_list_billing_transactions_query(
         offset,
         user_id,
     })
+}
+/// Query parameters for `GET /api/providers` (operationId `adminListProviders`).
+#[derive(Debug, Default)]
+pub struct AdminListProvidersQuery {
+    pub limit: ::std::option::Option<i64>,
+    pub offset: ::std::option::Option<i64>,
+}
+fn __decode_admin_list_providers_query(
+    raw: ::std::option::Option<&str>,
+) -> ::std::result::Result<AdminListProvidersQuery, String> {
+    if let Some(raw) = raw {
+        __validate_urlencoded(raw)?;
+    }
+    let __pairs = __query_pairs(raw);
+    let limit = __query_one(&__pairs, "limit")?
+        .map(|raw| __decode_query_scalar(&raw, "limit"))
+        .transpose()?;
+    let offset = __query_one(&__pairs, "offset")?
+        .map(|raw| __decode_query_scalar(&raw, "offset"))
+        .transpose()?;
+    Ok(AdminListProvidersQuery { limit, offset })
 }
 /// Query parameters for `GET /api/model-health` (operationId `adminListModelHealth`).
 #[derive(Debug, Default)]
@@ -168,27 +210,6 @@ fn __decode_admin_list_prices_query(
         in_use,
     })
 }
-/// Query parameters for `GET /api/providers` (operationId `adminListProviders`).
-#[derive(Debug, Default)]
-pub struct AdminListProvidersQuery {
-    pub limit: ::std::option::Option<i64>,
-    pub offset: ::std::option::Option<i64>,
-}
-fn __decode_admin_list_providers_query(
-    raw: ::std::option::Option<&str>,
-) -> ::std::result::Result<AdminListProvidersQuery, String> {
-    if let Some(raw) = raw {
-        __validate_urlencoded(raw)?;
-    }
-    let __pairs = __query_pairs(raw);
-    let limit = __query_one(&__pairs, "limit")?
-        .map(|raw| __decode_query_scalar(&raw, "limit"))
-        .transpose()?;
-    let offset = __query_one(&__pairs, "offset")?
-        .map(|raw| __decode_query_scalar(&raw, "offset"))
-        .transpose()?;
-    Ok(AdminListProvidersQuery { limit, offset })
-}
 /// Query parameters for `GET /api/redemption-codes` (operationId `adminListRedemptionCodes`).
 #[derive(Debug, Default)]
 pub struct AdminListRedemptionCodesQuery {
@@ -221,61 +242,6 @@ fn __decode_admin_list_redemption_codes_query(
         offset,
         batch,
         status,
-    })
-}
-/// Query parameters for `GET /api/users` (operationId `adminListUsers`).
-#[derive(Debug, Default)]
-pub struct AdminListUsersQuery {
-    pub limit: ::std::option::Option<i64>,
-    pub offset: ::std::option::Option<i64>,
-}
-fn __decode_admin_list_users_query(
-    raw: ::std::option::Option<&str>,
-) -> ::std::result::Result<AdminListUsersQuery, String> {
-    if let Some(raw) = raw {
-        __validate_urlencoded(raw)?;
-    }
-    let __pairs = __query_pairs(raw);
-    let limit = __query_one(&__pairs, "limit")?
-        .map(|raw| __decode_query_scalar(&raw, "limit"))
-        .transpose()?;
-    let offset = __query_one(&__pairs, "offset")?
-        .map(|raw| __decode_query_scalar(&raw, "offset"))
-        .transpose()?;
-    Ok(AdminListUsersQuery { limit, offset })
-}
-/// Query parameters for `GET /api/logs/stats` (operationId `getLogStats`).
-#[derive(Debug, Default)]
-pub struct GetLogStatsQuery {
-    pub model: ::std::option::Option<String>,
-    pub success: ::std::option::Option<GetLogStatsSuccess>,
-    pub user_id: ::std::option::Option<String>,
-    pub since: ::std::option::Option<String>,
-}
-fn __decode_get_log_stats_query(
-    raw: ::std::option::Option<&str>,
-) -> ::std::result::Result<GetLogStatsQuery, String> {
-    if let Some(raw) = raw {
-        __validate_urlencoded(raw)?;
-    }
-    let __pairs = __query_pairs(raw);
-    let model = __query_one(&__pairs, "model")?
-        .map(|raw| __decode_query_scalar(&raw, "model"))
-        .transpose()?;
-    let success = __query_one(&__pairs, "success")?
-        .map(|raw| __decode_query_scalar(&raw, "success"))
-        .transpose()?;
-    let user_id = __query_one(&__pairs, "user_id")?
-        .map(|raw| __decode_query_scalar(&raw, "user_id"))
-        .transpose()?;
-    let since = __query_one(&__pairs, "since")?
-        .map(|raw| __decode_query_scalar(&raw, "since"))
-        .transpose()?;
-    Ok(GetLogStatsQuery {
-        model,
-        success,
-        user_id,
-        since,
     })
 }
 /// Query parameters for `GET /api/api-keys` (operationId `listApiKeys`).
@@ -351,6 +317,40 @@ fn __decode_list_logs_query(
         since,
     })
 }
+/// Query parameters for `GET /api/logs/stats` (operationId `getLogStats`).
+#[derive(Debug, Default)]
+pub struct GetLogStatsQuery {
+    pub model: ::std::option::Option<String>,
+    pub success: ::std::option::Option<GetLogStatsSuccess>,
+    pub user_id: ::std::option::Option<String>,
+    pub since: ::std::option::Option<String>,
+}
+fn __decode_get_log_stats_query(
+    raw: ::std::option::Option<&str>,
+) -> ::std::result::Result<GetLogStatsQuery, String> {
+    if let Some(raw) = raw {
+        __validate_urlencoded(raw)?;
+    }
+    let __pairs = __query_pairs(raw);
+    let model = __query_one(&__pairs, "model")?
+        .map(|raw| __decode_query_scalar(&raw, "model"))
+        .transpose()?;
+    let success = __query_one(&__pairs, "success")?
+        .map(|raw| __decode_query_scalar(&raw, "success"))
+        .transpose()?;
+    let user_id = __query_one(&__pairs, "user_id")?
+        .map(|raw| __decode_query_scalar(&raw, "user_id"))
+        .transpose()?;
+    let since = __query_one(&__pairs, "since")?
+        .map(|raw| __decode_query_scalar(&raw, "since"))
+        .transpose()?;
+    Ok(GetLogStatsQuery {
+        model,
+        success,
+        user_id,
+        since,
+    })
+}
 /// Query parameters for `GET /api/models/prices` (operationId `listPublicPrices`).
 #[derive(Debug, Default)]
 pub struct ListPublicPricesQuery {
@@ -379,24 +379,8 @@ where
 {
     ::axum::Router::new()
         .route(
-            "/api/users/{id}/balance-transactions",
-            ::axum::routing::post(admin_adjust_user_balance_handler::<T>),
-        )
-        .route(
-            "/api/prices",
-            ::axum::routing::post(admin_create_price_handler::<T>),
-        )
-        .route(
-            "/api/providers",
-            ::axum::routing::post(admin_create_provider_handler::<T>),
-        )
-        .route(
-            "/api/providers/batch",
-            ::axum::routing::post(admin_create_providers_batch_handler::<T>),
-        )
-        .route(
-            "/api/redemption-codes",
-            ::axum::routing::post(admin_create_redemption_codes_handler::<T>),
+            "/api/users",
+            ::axum::routing::get(admin_list_users_handler::<T>),
         )
         .route(
             "/api/users",
@@ -407,72 +391,52 @@ where
             ::axum::routing::post(admin_create_users_batch_handler::<T>),
         )
         .route(
-            "/api/prices/{id}",
-            ::axum::routing::delete(admin_delete_price_handler::<T>),
+            "/api/users/{id}",
+            ::axum::routing::get(admin_get_user_handler::<T>),
         )
         .route(
-            "/api/providers/{id}",
-            ::axum::routing::delete(admin_delete_provider_handler::<T>),
+            "/api/users/{id}",
+            ::axum::routing::patch(admin_update_user_handler::<T>),
         )
         .route(
             "/api/users/{id}",
             ::axum::routing::delete(admin_delete_user_handler::<T>),
         )
         .route(
-            "/api/redemption-codes/{id}",
-            ::axum::routing::delete(admin_disable_redemption_code_handler::<T>),
-        )
-        .route(
-            "/api/providers/{id}/duplicates",
-            ::axum::routing::post(admin_duplicate_provider_handler::<T>),
-        )
-        .route(
-            "/api/providers/fetch-models",
-            ::axum::routing::post(admin_fetch_upstream_models_handler::<T>),
-        )
-        .route(
-            "/api/system/stats",
-            ::axum::routing::get(admin_get_global_stats_handler::<T>),
-        )
-        .route(
-            "/api/providers/{id}",
-            ::axum::routing::get(admin_get_provider_handler::<T>),
-        )
-        .route(
-            "/api/usage-stats",
-            ::axum::routing::get(admin_get_usage_stats_handler::<T>),
-        )
-        .route(
-            "/api/users/{id}",
-            ::axum::routing::get(admin_get_user_handler::<T>),
-        )
-        .route(
             "/api/balance-transactions",
             ::axum::routing::get(admin_list_billing_transactions_handler::<T>),
         )
         .route(
-            "/api/channel-kinds",
-            ::axum::routing::get(admin_list_channel_kinds_handler::<T>),
-        )
-        .route(
-            "/api/model-health",
-            ::axum::routing::get(admin_list_model_health_handler::<T>),
-        )
-        .route(
-            "/api/prices",
-            ::axum::routing::get(admin_list_prices_handler::<T>),
+            "/api/users/{id}/balance-transactions",
+            ::axum::routing::post(admin_adjust_user_balance_handler::<T>),
         )
         .route(
             "/api/providers",
             ::axum::routing::get(admin_list_providers_handler::<T>),
         )
         .route(
-            "/api/redemption-codes",
-            ::axum::routing::get(admin_list_redemption_codes_handler::<T>),
+            "/api/providers",
+            ::axum::routing::post(admin_create_provider_handler::<T>),
         )
         .route(
-            "/api/users",
-            ::axum::routing::get(admin_list_users_handler::<T>),
+            "/api/providers/batch",
+            ::axum::routing::post(admin_create_providers_batch_handler::<T>),
+        )
+        .route(
+            "/api/providers/fetch-models",
+            ::axum::routing::post(admin_fetch_upstream_models_handler::<T>),
+        )
+        .route(
+            "/api/providers/{id}",
+            ::axum::routing::get(admin_get_provider_handler::<T>),
+        )
+        .route(
+            "/api/providers/{id}",
+            ::axum::routing::patch(admin_update_provider_handler::<T>),
+        )
+        .route(
+            "/api/providers/{id}",
+            ::axum::routing::delete(admin_delete_provider_handler::<T>),
         )
         .route(
             "/api/providers/{id}/tests",
@@ -483,185 +447,90 @@ where
             ::axum::routing::post(admin_test_provider_model_handler::<T>),
         )
         .route(
+            "/api/providers/{id}/duplicates",
+            ::axum::routing::post(admin_duplicate_provider_handler::<T>),
+        )
+        .route(
+            "/api/model-health",
+            ::axum::routing::get(admin_list_model_health_handler::<T>),
+        )
+        .route(
+            "/api/channel-kinds",
+            ::axum::routing::get(admin_list_channel_kinds_handler::<T>),
+        )
+        .route(
+            "/api/prices",
+            ::axum::routing::get(admin_list_prices_handler::<T>),
+        )
+        .route(
+            "/api/prices",
+            ::axum::routing::post(admin_create_price_handler::<T>),
+        )
+        .route(
             "/api/prices/{id}",
             ::axum::routing::patch(admin_update_price_handler::<T>),
         )
         .route(
-            "/api/providers/{id}",
-            ::axum::routing::patch(admin_update_provider_handler::<T>),
+            "/api/prices/{id}",
+            ::axum::routing::delete(admin_delete_price_handler::<T>),
         )
         .route(
-            "/api/users/{id}",
-            ::axum::routing::patch(admin_update_user_handler::<T>),
+            "/api/redemption-codes",
+            ::axum::routing::get(admin_list_redemption_codes_handler::<T>),
+        )
+        .route(
+            "/api/redemption-codes",
+            ::axum::routing::post(admin_create_redemption_codes_handler::<T>),
+        )
+        .route(
+            "/api/redemption-codes/{id}",
+            ::axum::routing::delete(admin_disable_redemption_code_handler::<T>),
+        )
+        .route(
+            "/api/usage-stats",
+            ::axum::routing::get(admin_get_usage_stats_handler::<T>),
+        )
+        .route(
+            "/api/system/stats",
+            ::axum::routing::get(admin_get_global_stats_handler::<T>),
         )
         .layer(::axum::extract::DefaultBodyLimit::max(2097152usize))
         .with_state(api)
 }
-async fn admin_adjust_user_balance_handler<T>(
+async fn admin_list_users_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
-    __path_result: ::std::result::Result<
-        ::axum::extract::Path<::std::collections::HashMap<String, String>>,
-        ::axum::extract::rejection::PathRejection,
-    >,
-    __request: ::axum::extract::Request,
+    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
 ) -> ::axum::response::Response
 where
     T: super::api::AdminApi + Clone + Send + Sync + 'static,
 {
-    let ::axum::extract::Path(mut __path_values) = match __path_result {
-        Ok(path) => path,
+    let __q: AdminListUsersQuery = match __decode_admin_list_users_query(__raw_query.as_deref()) {
+        Ok(query) => query,
         Err(_) => {
             return ::axum::response::IntoResponse::into_response(
-                ::axum::http::StatusCode::BAD_REQUEST,
+                super::validation::malformed_parameter("/query"),
             );
         }
     };
-    let id: String = match __path_values.remove("id") {
-        Some(raw) => {
-            match super::validation::decode_parameter(
-                &raw,
-                super::validation::VALIDATION_TARGET_23_PATH_0,
-                "/path/id",
-                true,
-            ) {
-                Ok(value) => value,
-                Err(rejection) => {
-                    return ::axum::response::IntoResponse::into_response(rejection);
-                }
-            }
+    if let Some(value) = &__q.limit {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_29_QUERY_0,
+            "/query/limit",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
         }
-        None => {
-            return ::axum::response::IntoResponse::into_response(
-                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            );
+    }
+    if let Some(value) = &__q.offset {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_30_QUERY_1,
+            "/query/offset",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
         }
-    };
-    let body: AdjustBalanceRequest =
-        match super::validation::decode_json_body::<AdjustBalanceRequest>(
-            __request,
-            super::validation::VALIDATION_TARGET_22_BODY,
-            "application/json",
-            true,
-            2097152usize,
-        )
-        .await
-        {
-            Ok(Some(body)) => body,
-            Ok(None) => {
-                return ::axum::response::IntoResponse::into_response(
-                    super::validation::generated_contract_error(),
-                );
-            }
-            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
-        };
-    ::axum::response::IntoResponse::into_response(api.admin_adjust_user_balance(id, body).await)
-}
-async fn admin_create_price_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    __request: ::axum::extract::Request,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    let body: UpsertPriceRequest = match super::validation::decode_json_body::<UpsertPriceRequest>(
-        __request,
-        super::validation::VALIDATION_TARGET_24_BODY,
-        "application/json",
-        true,
-        2097152usize,
-    )
-    .await
-    {
-        Ok(Some(body)) => body,
-        Ok(None) => {
-            return ::axum::response::IntoResponse::into_response(
-                super::validation::generated_contract_error(),
-            );
-        }
-        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
-    };
-    ::axum::response::IntoResponse::into_response(api.admin_create_price(body).await)
-}
-async fn admin_create_provider_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    __request: ::axum::extract::Request,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    let body: CreateProviderRequest =
-        match super::validation::decode_json_body::<CreateProviderRequest>(
-            __request,
-            super::validation::VALIDATION_TARGET_25_BODY,
-            "application/json",
-            true,
-            2097152usize,
-        )
-        .await
-        {
-            Ok(Some(body)) => body,
-            Ok(None) => {
-                return ::axum::response::IntoResponse::into_response(
-                    super::validation::generated_contract_error(),
-                );
-            }
-            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
-        };
-    ::axum::response::IntoResponse::into_response(api.admin_create_provider(body).await)
-}
-async fn admin_create_providers_batch_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    __request: ::axum::extract::Request,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    let body: CreateProvidersBatchRequest =
-        match super::validation::decode_json_body::<CreateProvidersBatchRequest>(
-            __request,
-            super::validation::VALIDATION_TARGET_26_BODY,
-            "application/json",
-            true,
-            2097152usize,
-        )
-        .await
-        {
-            Ok(Some(body)) => body,
-            Ok(None) => {
-                return ::axum::response::IntoResponse::into_response(
-                    super::validation::generated_contract_error(),
-                );
-            }
-            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
-        };
-    ::axum::response::IntoResponse::into_response(api.admin_create_providers_batch(body).await)
-}
-async fn admin_create_redemption_codes_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    __request: ::axum::extract::Request,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    let body: CreateRedemptionCodesRequest =
-        match super::validation::decode_json_body::<CreateRedemptionCodesRequest>(
-            __request,
-            super::validation::VALIDATION_TARGET_27_BODY,
-            "application/json",
-            true,
-            2097152usize,
-        )
-        .await
-        {
-            Ok(Some(body)) => body,
-            Ok(None) => {
-                return ::axum::response::IntoResponse::into_response(
-                    super::validation::generated_contract_error(),
-                );
-            }
-            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
-        };
-    ::axum::response::IntoResponse::into_response(api.admin_create_redemption_codes(body).await)
+    }
+    ::axum::response::IntoResponse::into_response(api.admin_list_users(__q.limit, __q.offset).await)
 }
 async fn admin_create_user_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
@@ -672,7 +541,7 @@ where
 {
     let body: CreateUserRequest = match super::validation::decode_json_body::<CreateUserRequest>(
         __request,
-        super::validation::VALIDATION_TARGET_28_BODY,
+        super::validation::VALIDATION_TARGET_31_BODY,
         "application/json",
         true,
         2097152usize,
@@ -699,7 +568,7 @@ where
     let body: BatchCreateUsersRequest =
         match super::validation::decode_json_body::<BatchCreateUsersRequest>(
             __request,
-            super::validation::VALIDATION_TARGET_29_BODY,
+            super::validation::VALIDATION_TARGET_32_BODY,
             "application/json",
             true,
             2097152usize,
@@ -716,127 +585,7 @@ where
         };
     ::axum::response::IntoResponse::into_response(api.admin_create_users_batch(body).await)
 }
-async fn admin_delete_price_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    __path_result: ::std::result::Result<
-        ::axum::extract::Path<::std::collections::HashMap<String, String>>,
-        ::axum::extract::rejection::PathRejection,
-    >,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    let ::axum::extract::Path(mut __path_values) = match __path_result {
-        Ok(path) => path,
-        Err(_) => {
-            return ::axum::response::IntoResponse::into_response(
-                ::axum::http::StatusCode::BAD_REQUEST,
-            );
-        }
-    };
-    let id: String = match __path_values.remove("id") {
-        Some(raw) => {
-            match super::validation::decode_parameter(
-                &raw,
-                super::validation::VALIDATION_TARGET_30_PATH_0,
-                "/path/id",
-                true,
-            ) {
-                Ok(value) => value,
-                Err(rejection) => {
-                    return ::axum::response::IntoResponse::into_response(rejection);
-                }
-            }
-        }
-        None => {
-            return ::axum::response::IntoResponse::into_response(
-                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            );
-        }
-    };
-    ::axum::response::IntoResponse::into_response(api.admin_delete_price(id).await)
-}
-async fn admin_delete_provider_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    __path_result: ::std::result::Result<
-        ::axum::extract::Path<::std::collections::HashMap<String, String>>,
-        ::axum::extract::rejection::PathRejection,
-    >,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    let ::axum::extract::Path(mut __path_values) = match __path_result {
-        Ok(path) => path,
-        Err(_) => {
-            return ::axum::response::IntoResponse::into_response(
-                ::axum::http::StatusCode::BAD_REQUEST,
-            );
-        }
-    };
-    let id: String = match __path_values.remove("id") {
-        Some(raw) => {
-            match super::validation::decode_parameter(
-                &raw,
-                super::validation::VALIDATION_TARGET_31_PATH_0,
-                "/path/id",
-                true,
-            ) {
-                Ok(value) => value,
-                Err(rejection) => {
-                    return ::axum::response::IntoResponse::into_response(rejection);
-                }
-            }
-        }
-        None => {
-            return ::axum::response::IntoResponse::into_response(
-                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            );
-        }
-    };
-    ::axum::response::IntoResponse::into_response(api.admin_delete_provider(id).await)
-}
-async fn admin_delete_user_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    __path_result: ::std::result::Result<
-        ::axum::extract::Path<::std::collections::HashMap<String, String>>,
-        ::axum::extract::rejection::PathRejection,
-    >,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    let ::axum::extract::Path(mut __path_values) = match __path_result {
-        Ok(path) => path,
-        Err(_) => {
-            return ::axum::response::IntoResponse::into_response(
-                ::axum::http::StatusCode::BAD_REQUEST,
-            );
-        }
-    };
-    let id: String = match __path_values.remove("id") {
-        Some(raw) => {
-            match super::validation::decode_parameter(
-                &raw,
-                super::validation::VALIDATION_TARGET_32_PATH_0,
-                "/path/id",
-                true,
-            ) {
-                Ok(value) => value,
-                Err(rejection) => {
-                    return ::axum::response::IntoResponse::into_response(rejection);
-                }
-            }
-        }
-        None => {
-            return ::axum::response::IntoResponse::into_response(
-                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            );
-        }
-    };
-    ::axum::response::IntoResponse::into_response(api.admin_delete_user(id).await)
-}
-async fn admin_disable_redemption_code_handler<T>(
+async fn admin_get_user_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
     __path_result: ::std::result::Result<
         ::axum::extract::Path<::std::collections::HashMap<String, String>>,
@@ -874,14 +623,15 @@ where
             );
         }
     };
-    ::axum::response::IntoResponse::into_response(api.admin_disable_redemption_code(id).await)
+    ::axum::response::IntoResponse::into_response(api.admin_get_user(id).await)
 }
-async fn admin_duplicate_provider_handler<T>(
+async fn admin_update_user_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
     __path_result: ::std::result::Result<
         ::axum::extract::Path<::std::collections::HashMap<String, String>>,
         ::axum::extract::rejection::PathRejection,
     >,
+    __request: ::axum::extract::Request,
 ) -> ::axum::response::Response
 where
     T: super::api::AdminApi + Clone + Send + Sync + 'static,
@@ -898,7 +648,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_34_PATH_0,
+                super::validation::VALIDATION_TARGET_35_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -914,18 +664,9 @@ where
             );
         }
     };
-    ::axum::response::IntoResponse::into_response(api.admin_duplicate_provider(id).await)
-}
-async fn admin_fetch_upstream_models_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    __request: ::axum::extract::Request,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    let body: FetchModelsRequest = match super::validation::decode_json_body::<FetchModelsRequest>(
+    let body: UpdateUserRequest = match super::validation::decode_json_body::<UpdateUserRequest>(
         __request,
-        super::validation::VALIDATION_TARGET_35_BODY,
+        super::validation::VALIDATION_TARGET_34_BODY,
         "application/json",
         true,
         2097152usize,
@@ -940,17 +681,9 @@ where
         }
         Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
     };
-    ::axum::response::IntoResponse::into_response(api.admin_fetch_upstream_models(body).await)
+    ::axum::response::IntoResponse::into_response(api.admin_update_user(id, body).await)
 }
-async fn admin_get_global_stats_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    ::axum::response::IntoResponse::into_response(api.admin_get_global_stats().await)
-}
-async fn admin_get_provider_handler<T>(
+async fn admin_delete_user_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
     __path_result: ::std::result::Result<
         ::axum::extract::Path<::std::collections::HashMap<String, String>>,
@@ -988,17 +721,251 @@ where
             );
         }
     };
-    ::axum::response::IntoResponse::into_response(api.admin_get_provider(id).await)
+    ::axum::response::IntoResponse::into_response(api.admin_delete_user(id).await)
 }
-async fn admin_get_usage_stats_handler<T>(
+async fn admin_list_billing_transactions_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
+    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
 ) -> ::axum::response::Response
 where
     T: super::api::AdminApi + Clone + Send + Sync + 'static,
 {
-    ::axum::response::IntoResponse::into_response(api.admin_get_usage_stats().await)
+    if let Some(raw) = __raw_query.as_deref() {
+        if __validate_urlencoded(raw).is_err() {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    }
+    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "user_id") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_39_QUERY_2,
+            "/query/user_id",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    let __q: AdminListBillingTransactionsQuery =
+        match __decode_admin_list_billing_transactions_query(__raw_query.as_deref()) {
+            Ok(query) => query,
+            Err(_) => {
+                return ::axum::response::IntoResponse::into_response(
+                    super::validation::malformed_parameter("/query"),
+                );
+            }
+        };
+    if let Some(value) = &__q.limit {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_37_QUERY_0,
+            "/query/limit",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.offset {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_38_QUERY_1,
+            "/query/offset",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.user_id {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_39_QUERY_2,
+            "/query/user_id",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    ::axum::response::IntoResponse::into_response(
+        api.admin_list_billing_transactions(__q.limit, __q.offset, __q.user_id)
+            .await,
+    )
 }
-async fn admin_get_user_handler<T>(
+async fn admin_adjust_user_balance_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __path_result: ::std::result::Result<
+        ::axum::extract::Path<::std::collections::HashMap<String, String>>,
+        ::axum::extract::rejection::PathRejection,
+    >,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    let ::axum::extract::Path(mut __path_values) = match __path_result {
+        Ok(path) => path,
+        Err(_) => {
+            return ::axum::response::IntoResponse::into_response(
+                ::axum::http::StatusCode::BAD_REQUEST,
+            );
+        }
+    };
+    let id: String = match __path_values.remove("id") {
+        Some(raw) => {
+            match super::validation::decode_parameter(
+                &raw,
+                super::validation::VALIDATION_TARGET_41_PATH_0,
+                "/path/id",
+                true,
+            ) {
+                Ok(value) => value,
+                Err(rejection) => {
+                    return ::axum::response::IntoResponse::into_response(rejection);
+                }
+            }
+        }
+        None => {
+            return ::axum::response::IntoResponse::into_response(
+                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            );
+        }
+    };
+    let body: AdjustBalanceRequest =
+        match super::validation::decode_json_body::<AdjustBalanceRequest>(
+            __request,
+            super::validation::VALIDATION_TARGET_40_BODY,
+            "application/json",
+            true,
+            2097152usize,
+        )
+        .await
+        {
+            Ok(Some(body)) => body,
+            Ok(None) => {
+                return ::axum::response::IntoResponse::into_response(
+                    super::validation::generated_contract_error(),
+                );
+            }
+            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+        };
+    ::axum::response::IntoResponse::into_response(api.admin_adjust_user_balance(id, body).await)
+}
+async fn admin_list_providers_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    let __q: AdminListProvidersQuery =
+        match __decode_admin_list_providers_query(__raw_query.as_deref()) {
+            Ok(query) => query,
+            Err(_) => {
+                return ::axum::response::IntoResponse::into_response(
+                    super::validation::malformed_parameter("/query"),
+                );
+            }
+        };
+    if let Some(value) = &__q.limit {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_42_QUERY_0,
+            "/query/limit",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.offset {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_43_QUERY_1,
+            "/query/offset",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    ::axum::response::IntoResponse::into_response(
+        api.admin_list_providers(__q.limit, __q.offset).await,
+    )
+}
+async fn admin_create_provider_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    let body: CreateProviderRequest =
+        match super::validation::decode_json_body::<CreateProviderRequest>(
+            __request,
+            super::validation::VALIDATION_TARGET_44_BODY,
+            "application/json",
+            true,
+            2097152usize,
+        )
+        .await
+        {
+            Ok(Some(body)) => body,
+            Ok(None) => {
+                return ::axum::response::IntoResponse::into_response(
+                    super::validation::generated_contract_error(),
+                );
+            }
+            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+        };
+    ::axum::response::IntoResponse::into_response(api.admin_create_provider(body).await)
+}
+async fn admin_create_providers_batch_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    let body: CreateProvidersBatchRequest =
+        match super::validation::decode_json_body::<CreateProvidersBatchRequest>(
+            __request,
+            super::validation::VALIDATION_TARGET_45_BODY,
+            "application/json",
+            true,
+            2097152usize,
+        )
+        .await
+        {
+            Ok(Some(body)) => body,
+            Ok(None) => {
+                return ::axum::response::IntoResponse::into_response(
+                    super::validation::generated_contract_error(),
+                );
+            }
+            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+        };
+    ::axum::response::IntoResponse::into_response(api.admin_create_providers_batch(body).await)
+}
+async fn admin_fetch_upstream_models_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    let body: FetchModelsRequest = match super::validation::decode_json_body::<FetchModelsRequest>(
+        __request,
+        super::validation::VALIDATION_TARGET_46_BODY,
+        "application/json",
+        true,
+        2097152usize,
+    )
+    .await
+    {
+        Ok(Some(body)) => body,
+        Ok(None) => {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::generated_contract_error(),
+            );
+        }
+        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+    };
+    ::axum::response::IntoResponse::into_response(api.admin_fetch_upstream_models(body).await)
+}
+async fn admin_get_provider_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
     __path_result: ::std::result::Result<
         ::axum::extract::Path<::std::collections::HashMap<String, String>>,
@@ -1020,7 +987,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_37_PATH_0,
+                super::validation::VALIDATION_TARGET_47_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1036,365 +1003,106 @@ where
             );
         }
     };
-    ::axum::response::IntoResponse::into_response(api.admin_get_user(id).await)
+    ::axum::response::IntoResponse::into_response(api.admin_get_provider(id).await)
 }
-async fn admin_list_billing_transactions_handler<T>(
+async fn admin_update_provider_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
-    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
+    __path_result: ::std::result::Result<
+        ::axum::extract::Path<::std::collections::HashMap<String, String>>,
+        ::axum::extract::rejection::PathRejection,
+    >,
+    __request: ::axum::extract::Request,
 ) -> ::axum::response::Response
 where
     T: super::api::AdminApi + Clone + Send + Sync + 'static,
 {
-    if let Some(raw) = __raw_query.as_deref() {
-        if __validate_urlencoded(raw).is_err() {
-            return ::axum::response::IntoResponse::into_response(
-                super::validation::malformed_parameter("/query"),
-            );
-        }
-    }
-    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "user_id") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_40_QUERY_2,
-            "/query/user_id",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    let __q: AdminListBillingTransactionsQuery =
-        match __decode_admin_list_billing_transactions_query(__raw_query.as_deref()) {
-            Ok(query) => query,
-            Err(_) => {
-                return ::axum::response::IntoResponse::into_response(
-                    super::validation::malformed_parameter("/query"),
-                );
-            }
-        };
-    if let Some(value) = &__q.limit {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_38_QUERY_0,
-            "/query/limit",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.offset {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_39_QUERY_1,
-            "/query/offset",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.user_id {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_40_QUERY_2,
-            "/query/user_id",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    ::axum::response::IntoResponse::into_response(
-        api.admin_list_billing_transactions(__q.limit, __q.offset, __q.user_id)
-            .await,
-    )
-}
-async fn admin_list_channel_kinds_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    ::axum::response::IntoResponse::into_response(api.admin_list_channel_kinds().await)
-}
-async fn admin_list_model_health_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    if let Some(raw) = __raw_query.as_deref() {
-        if __validate_urlencoded(raw).is_err() {
-            return ::axum::response::IntoResponse::into_response(
-                super::validation::malformed_parameter("/query"),
-            );
-        }
-    }
-    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "provider_id") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_43_QUERY_2,
-            "/query/provider_id",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    let __q: AdminListModelHealthQuery =
-        match __decode_admin_list_model_health_query(__raw_query.as_deref()) {
-            Ok(query) => query,
-            Err(_) => {
-                return ::axum::response::IntoResponse::into_response(
-                    super::validation::malformed_parameter("/query"),
-                );
-            }
-        };
-    if let Some(value) = &__q.limit {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_41_QUERY_0,
-            "/query/limit",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.offset {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_42_QUERY_1,
-            "/query/offset",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.provider_id {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_43_QUERY_2,
-            "/query/provider_id",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    ::axum::response::IntoResponse::into_response(
-        api.admin_list_model_health(__q.limit, __q.offset, __q.provider_id)
-            .await,
-    )
-}
-async fn admin_list_prices_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    if let Some(raw) = __raw_query.as_deref() {
-        if __validate_urlencoded(raw).is_err() {
-            return ::axum::response::IntoResponse::into_response(
-                super::validation::malformed_parameter("/query"),
-            );
-        }
-    }
-    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "in_use") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_46_QUERY_2,
-            "/query/in_use",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    let __q: AdminListPricesQuery = match __decode_admin_list_prices_query(__raw_query.as_deref()) {
-        Ok(query) => query,
+    let ::axum::extract::Path(mut __path_values) = match __path_result {
+        Ok(path) => path,
         Err(_) => {
             return ::axum::response::IntoResponse::into_response(
-                super::validation::malformed_parameter("/query"),
+                ::axum::http::StatusCode::BAD_REQUEST,
             );
         }
     };
-    if let Some(value) = &__q.limit {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_44_QUERY_0,
-            "/query/limit",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.offset {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_45_QUERY_1,
-            "/query/offset",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.in_use {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_46_QUERY_2,
-            "/query/in_use",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    ::axum::response::IntoResponse::into_response(
-        api.admin_list_prices(__q.limit, __q.offset, __q.in_use)
-            .await,
-    )
-}
-async fn admin_list_providers_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    let __q: AdminListProvidersQuery =
-        match __decode_admin_list_providers_query(__raw_query.as_deref()) {
-            Ok(query) => query,
-            Err(_) => {
-                return ::axum::response::IntoResponse::into_response(
-                    super::validation::malformed_parameter("/query"),
-                );
+    let id: String = match __path_values.remove("id") {
+        Some(raw) => {
+            match super::validation::decode_parameter(
+                &raw,
+                super::validation::VALIDATION_TARGET_49_PATH_0,
+                "/path/id",
+                true,
+            ) {
+                Ok(value) => value,
+                Err(rejection) => {
+                    return ::axum::response::IntoResponse::into_response(rejection);
+                }
             }
-        };
-    if let Some(value) = &__q.limit {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_47_QUERY_0,
-            "/query/limit",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
         }
-    }
-    if let Some(value) = &__q.offset {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_48_QUERY_1,
-            "/query/offset",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    ::axum::response::IntoResponse::into_response(
-        api.admin_list_providers(__q.limit, __q.offset).await,
-    )
-}
-async fn admin_list_redemption_codes_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    if let Some(raw) = __raw_query.as_deref() {
-        if __validate_urlencoded(raw).is_err() {
+        None => {
             return ::axum::response::IntoResponse::into_response(
-                super::validation::malformed_parameter("/query"),
-            );
-        }
-    }
-    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "batch") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_51_QUERY_2,
-            "/query/batch",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "status") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_52_QUERY_3,
-            "/query/status",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    let __q: AdminListRedemptionCodesQuery =
-        match __decode_admin_list_redemption_codes_query(__raw_query.as_deref()) {
-            Ok(query) => query,
-            Err(_) => {
-                return ::axum::response::IntoResponse::into_response(
-                    super::validation::malformed_parameter("/query"),
-                );
-            }
-        };
-    if let Some(value) = &__q.limit {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_49_QUERY_0,
-            "/query/limit",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.offset {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_50_QUERY_1,
-            "/query/offset",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.batch {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_51_QUERY_2,
-            "/query/batch",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.status {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_52_QUERY_3,
-            "/query/status",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    ::axum::response::IntoResponse::into_response(
-        api.admin_list_redemption_codes(__q.limit, __q.offset, __q.batch, __q.status)
-            .await,
-    )
-}
-async fn admin_list_users_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    let __q: AdminListUsersQuery = match __decode_admin_list_users_query(__raw_query.as_deref()) {
-        Ok(query) => query,
-        Err(_) => {
-            return ::axum::response::IntoResponse::into_response(
-                super::validation::malformed_parameter("/query"),
+                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             );
         }
     };
-    if let Some(value) = &__q.limit {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_53_QUERY_0,
-            "/query/limit",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
+    let body: UpdateProviderRequest =
+        match super::validation::decode_json_body::<UpdateProviderRequest>(
+            __request,
+            super::validation::VALIDATION_TARGET_48_BODY,
+            "application/json",
+            true,
+            2097152usize,
+        )
+        .await
+        {
+            Ok(Some(body)) => body,
+            Ok(None) => {
+                return ::axum::response::IntoResponse::into_response(
+                    super::validation::generated_contract_error(),
+                );
+            }
+            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+        };
+    ::axum::response::IntoResponse::into_response(api.admin_update_provider(id, body).await)
+}
+async fn admin_delete_provider_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __path_result: ::std::result::Result<
+        ::axum::extract::Path<::std::collections::HashMap<String, String>>,
+        ::axum::extract::rejection::PathRejection,
+    >,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    let ::axum::extract::Path(mut __path_values) = match __path_result {
+        Ok(path) => path,
+        Err(_) => {
+            return ::axum::response::IntoResponse::into_response(
+                ::axum::http::StatusCode::BAD_REQUEST,
+            );
         }
-    }
-    if let Some(value) = &__q.offset {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_54_QUERY_1,
-            "/query/offset",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
+    };
+    let id: String = match __path_values.remove("id") {
+        Some(raw) => {
+            match super::validation::decode_parameter(
+                &raw,
+                super::validation::VALIDATION_TARGET_50_PATH_0,
+                "/path/id",
+                true,
+            ) {
+                Ok(value) => value,
+                Err(rejection) => {
+                    return ::axum::response::IntoResponse::into_response(rejection);
+                }
+            }
         }
-    }
-    ::axum::response::IntoResponse::into_response(api.admin_list_users(__q.limit, __q.offset).await)
+        None => {
+            return ::axum::response::IntoResponse::into_response(
+                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            );
+        }
+    };
+    ::axum::response::IntoResponse::into_response(api.admin_delete_provider(id).await)
 }
 async fn admin_test_provider_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
@@ -1418,7 +1126,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_55_PATH_0,
+                super::validation::VALIDATION_TARGET_51_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1459,7 +1167,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_57_PATH_0,
+                super::validation::VALIDATION_TARGET_53_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1477,7 +1185,7 @@ where
     };
     let body: ModelTestRequest = match super::validation::decode_json_body::<ModelTestRequest>(
         __request,
-        super::validation::VALIDATION_TARGET_56_BODY,
+        super::validation::VALIDATION_TARGET_52_BODY,
         "application/json",
         true,
         2097152usize,
@@ -1494,13 +1202,12 @@ where
     };
     ::axum::response::IntoResponse::into_response(api.admin_test_provider_model(id, body).await)
 }
-async fn admin_update_price_handler<T>(
+async fn admin_duplicate_provider_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
     __path_result: ::std::result::Result<
         ::axum::extract::Path<::std::collections::HashMap<String, String>>,
         ::axum::extract::rejection::PathRejection,
     >,
-    __request: ::axum::extract::Request,
 ) -> ::axum::response::Response
 where
     T: super::api::AdminApi + Clone + Send + Sync + 'static,
@@ -1517,7 +1224,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_59_PATH_0,
+                super::validation::VALIDATION_TARGET_54_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1533,9 +1240,155 @@ where
             );
         }
     };
+    ::axum::response::IntoResponse::into_response(api.admin_duplicate_provider(id).await)
+}
+async fn admin_list_model_health_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    if let Some(raw) = __raw_query.as_deref() {
+        if __validate_urlencoded(raw).is_err() {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    }
+    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "provider_id") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_57_QUERY_2,
+            "/query/provider_id",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    let __q: AdminListModelHealthQuery =
+        match __decode_admin_list_model_health_query(__raw_query.as_deref()) {
+            Ok(query) => query,
+            Err(_) => {
+                return ::axum::response::IntoResponse::into_response(
+                    super::validation::malformed_parameter("/query"),
+                );
+            }
+        };
+    if let Some(value) = &__q.limit {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_55_QUERY_0,
+            "/query/limit",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.offset {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_56_QUERY_1,
+            "/query/offset",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.provider_id {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_57_QUERY_2,
+            "/query/provider_id",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    ::axum::response::IntoResponse::into_response(
+        api.admin_list_model_health(__q.limit, __q.offset, __q.provider_id)
+            .await,
+    )
+}
+async fn admin_list_channel_kinds_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    ::axum::response::IntoResponse::into_response(api.admin_list_channel_kinds().await)
+}
+async fn admin_list_prices_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    if let Some(raw) = __raw_query.as_deref() {
+        if __validate_urlencoded(raw).is_err() {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    }
+    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "in_use") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_60_QUERY_2,
+            "/query/in_use",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    let __q: AdminListPricesQuery = match __decode_admin_list_prices_query(__raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(_) => {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    };
+    if let Some(value) = &__q.limit {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_58_QUERY_0,
+            "/query/limit",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.offset {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_59_QUERY_1,
+            "/query/offset",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.in_use {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_60_QUERY_2,
+            "/query/in_use",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    ::axum::response::IntoResponse::into_response(
+        api.admin_list_prices(__q.limit, __q.offset, __q.in_use)
+            .await,
+    )
+}
+async fn admin_create_price_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
     let body: UpsertPriceRequest = match super::validation::decode_json_body::<UpsertPriceRequest>(
         __request,
-        super::validation::VALIDATION_TARGET_58_BODY,
+        super::validation::VALIDATION_TARGET_61_BODY,
         "application/json",
         true,
         2097152usize,
@@ -1550,68 +1403,9 @@ where
         }
         Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
     };
-    ::axum::response::IntoResponse::into_response(api.admin_update_price(id, body).await)
+    ::axum::response::IntoResponse::into_response(api.admin_create_price(body).await)
 }
-async fn admin_update_provider_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    __path_result: ::std::result::Result<
-        ::axum::extract::Path<::std::collections::HashMap<String, String>>,
-        ::axum::extract::rejection::PathRejection,
-    >,
-    __request: ::axum::extract::Request,
-) -> ::axum::response::Response
-where
-    T: super::api::AdminApi + Clone + Send + Sync + 'static,
-{
-    let ::axum::extract::Path(mut __path_values) = match __path_result {
-        Ok(path) => path,
-        Err(_) => {
-            return ::axum::response::IntoResponse::into_response(
-                ::axum::http::StatusCode::BAD_REQUEST,
-            );
-        }
-    };
-    let id: String = match __path_values.remove("id") {
-        Some(raw) => {
-            match super::validation::decode_parameter(
-                &raw,
-                super::validation::VALIDATION_TARGET_61_PATH_0,
-                "/path/id",
-                true,
-            ) {
-                Ok(value) => value,
-                Err(rejection) => {
-                    return ::axum::response::IntoResponse::into_response(rejection);
-                }
-            }
-        }
-        None => {
-            return ::axum::response::IntoResponse::into_response(
-                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            );
-        }
-    };
-    let body: UpdateProviderRequest =
-        match super::validation::decode_json_body::<UpdateProviderRequest>(
-            __request,
-            super::validation::VALIDATION_TARGET_60_BODY,
-            "application/json",
-            true,
-            2097152usize,
-        )
-        .await
-        {
-            Ok(Some(body)) => body,
-            Ok(None) => {
-                return ::axum::response::IntoResponse::into_response(
-                    super::validation::generated_contract_error(),
-                );
-            }
-            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
-        };
-    ::axum::response::IntoResponse::into_response(api.admin_update_provider(id, body).await)
-}
-async fn admin_update_user_handler<T>(
+async fn admin_update_price_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
     __path_result: ::std::result::Result<
         ::axum::extract::Path<::std::collections::HashMap<String, String>>,
@@ -1650,7 +1444,7 @@ where
             );
         }
     };
-    let body: UpdateUserRequest = match super::validation::decode_json_body::<UpdateUserRequest>(
+    let body: UpsertPriceRequest = match super::validation::decode_json_body::<UpsertPriceRequest>(
         __request,
         super::validation::VALIDATION_TARGET_62_BODY,
         "application/json",
@@ -1667,7 +1461,213 @@ where
         }
         Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
     };
-    ::axum::response::IntoResponse::into_response(api.admin_update_user(id, body).await)
+    ::axum::response::IntoResponse::into_response(api.admin_update_price(id, body).await)
+}
+async fn admin_delete_price_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __path_result: ::std::result::Result<
+        ::axum::extract::Path<::std::collections::HashMap<String, String>>,
+        ::axum::extract::rejection::PathRejection,
+    >,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    let ::axum::extract::Path(mut __path_values) = match __path_result {
+        Ok(path) => path,
+        Err(_) => {
+            return ::axum::response::IntoResponse::into_response(
+                ::axum::http::StatusCode::BAD_REQUEST,
+            );
+        }
+    };
+    let id: String = match __path_values.remove("id") {
+        Some(raw) => {
+            match super::validation::decode_parameter(
+                &raw,
+                super::validation::VALIDATION_TARGET_64_PATH_0,
+                "/path/id",
+                true,
+            ) {
+                Ok(value) => value,
+                Err(rejection) => {
+                    return ::axum::response::IntoResponse::into_response(rejection);
+                }
+            }
+        }
+        None => {
+            return ::axum::response::IntoResponse::into_response(
+                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            );
+        }
+    };
+    ::axum::response::IntoResponse::into_response(api.admin_delete_price(id).await)
+}
+async fn admin_list_redemption_codes_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    if let Some(raw) = __raw_query.as_deref() {
+        if __validate_urlencoded(raw).is_err() {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    }
+    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "batch") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_67_QUERY_2,
+            "/query/batch",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "status") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_68_QUERY_3,
+            "/query/status",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    let __q: AdminListRedemptionCodesQuery =
+        match __decode_admin_list_redemption_codes_query(__raw_query.as_deref()) {
+            Ok(query) => query,
+            Err(_) => {
+                return ::axum::response::IntoResponse::into_response(
+                    super::validation::malformed_parameter("/query"),
+                );
+            }
+        };
+    if let Some(value) = &__q.limit {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_65_QUERY_0,
+            "/query/limit",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.offset {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_66_QUERY_1,
+            "/query/offset",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.batch {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_67_QUERY_2,
+            "/query/batch",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.status {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_68_QUERY_3,
+            "/query/status",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    ::axum::response::IntoResponse::into_response(
+        api.admin_list_redemption_codes(__q.limit, __q.offset, __q.batch, __q.status)
+            .await,
+    )
+}
+async fn admin_create_redemption_codes_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    let body: CreateRedemptionCodesRequest =
+        match super::validation::decode_json_body::<CreateRedemptionCodesRequest>(
+            __request,
+            super::validation::VALIDATION_TARGET_69_BODY,
+            "application/json",
+            true,
+            2097152usize,
+        )
+        .await
+        {
+            Ok(Some(body)) => body,
+            Ok(None) => {
+                return ::axum::response::IntoResponse::into_response(
+                    super::validation::generated_contract_error(),
+                );
+            }
+            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+        };
+    ::axum::response::IntoResponse::into_response(api.admin_create_redemption_codes(body).await)
+}
+async fn admin_disable_redemption_code_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __path_result: ::std::result::Result<
+        ::axum::extract::Path<::std::collections::HashMap<String, String>>,
+        ::axum::extract::rejection::PathRejection,
+    >,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    let ::axum::extract::Path(mut __path_values) = match __path_result {
+        Ok(path) => path,
+        Err(_) => {
+            return ::axum::response::IntoResponse::into_response(
+                ::axum::http::StatusCode::BAD_REQUEST,
+            );
+        }
+    };
+    let id: String = match __path_values.remove("id") {
+        Some(raw) => {
+            match super::validation::decode_parameter(
+                &raw,
+                super::validation::VALIDATION_TARGET_70_PATH_0,
+                "/path/id",
+                true,
+            ) {
+                Ok(value) => value,
+                Err(rejection) => {
+                    return ::axum::response::IntoResponse::into_response(rejection);
+                }
+            }
+        }
+        None => {
+            return ::axum::response::IntoResponse::into_response(
+                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            );
+        }
+    };
+    ::axum::response::IntoResponse::into_response(api.admin_disable_redemption_code(id).await)
+}
+async fn admin_get_usage_stats_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    ::axum::response::IntoResponse::into_response(api.admin_get_usage_stats().await)
+}
+async fn admin_get_global_stats_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+) -> ::axum::response::Response
+where
+    T: super::api::AdminApi + Clone + Send + Sync + 'static,
+{
+    ::axum::response::IntoResponse::into_response(api.admin_get_global_stats().await)
 }
 /// Build an axum::Router for the `AuthApi` trait.
 pub fn auth_api_router<T>(api: T) -> ::axum::Router
@@ -1675,40 +1675,14 @@ where
     T: AuthApi + Clone + Send + Sync + 'static,
 {
     ::axum::Router::new()
-        .route("/api/auth/login", ::axum::routing::post(login_handler::<T>))
         .route("/", ::axum::routing::get(serve_frontend_handler::<T>))
         .route(
             "/static/{path}",
             ::axum::routing::get(serve_static_asset_handler::<T>),
         )
+        .route("/api/auth/login", ::axum::routing::post(login_handler::<T>))
         .layer(::axum::extract::DefaultBodyLimit::max(2097152usize))
         .with_state(api)
-}
-async fn login_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    __request: ::axum::extract::Request,
-) -> ::axum::response::Response
-where
-    T: super::api::AuthApi + Clone + Send + Sync + 'static,
-{
-    let body: LoginRequest = match super::validation::decode_json_body::<LoginRequest>(
-        __request,
-        super::validation::VALIDATION_TARGET_0_BODY,
-        "application/json",
-        true,
-        2097152usize,
-    )
-    .await
-    {
-        Ok(Some(body)) => body,
-        Ok(None) => {
-            return ::axum::response::IntoResponse::into_response(
-                super::validation::generated_contract_error(),
-            );
-        }
-        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
-    };
-    ::axum::response::IntoResponse::into_response(api.login(body).await)
 }
 async fn serve_frontend_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
@@ -1740,7 +1714,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_1_PATH_0,
+                super::validation::VALIDATION_TARGET_7_PATH_0,
                 "/path/path",
                 true,
             ) {
@@ -1758,67 +1732,81 @@ where
     };
     ::axum::response::IntoResponse::into_response(api.serve_static_asset(path).await)
 }
-/// Build an axum::Router for the `UserApi` trait.
-pub fn user_api_router<T>(api: T) -> ::axum::Router
-where
-    T: UserApi + Clone + Send + Sync + 'static,
-{
-    ::axum::Router::new()
-        .route(
-            "/api/api-keys",
-            ::axum::routing::post(create_api_key_handler::<T>),
-        )
-        .route(
-            "/api/api-keys/{id}",
-            ::axum::routing::delete(delete_api_key_handler::<T>),
-        )
-        .route(
-            "/api/users/me",
-            ::axum::routing::get(get_current_user_handler::<T>),
-        )
-        .route(
-            "/api/logs/stats",
-            ::axum::routing::get(get_log_stats_handler::<T>),
-        )
-        .route(
-            "/api/system/version",
-            ::axum::routing::get(get_version_handler::<T>),
-        )
-        .route(
-            "/api/users/me/wallet",
-            ::axum::routing::get(get_wallet_stats_handler::<T>),
-        )
-        .route(
-            "/api/api-keys",
-            ::axum::routing::get(list_api_keys_handler::<T>),
-        )
-        .route("/api/logs", ::axum::routing::get(list_logs_handler::<T>))
-        .route(
-            "/api/models/prices",
-            ::axum::routing::get(list_public_prices_handler::<T>),
-        )
-        .route(
-            "/api/users/me/redemptions",
-            ::axum::routing::post(redeem_code_handler::<T>),
-        )
-        .route(
-            "/api/api-keys/{id}",
-            ::axum::routing::patch(update_api_key_handler::<T>),
-        )
-        .layer(::axum::extract::DefaultBodyLimit::max(2097152usize))
-        .with_state(api)
-}
-async fn create_api_key_handler<T>(
+async fn login_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
     __request: ::axum::extract::Request,
 ) -> ::axum::response::Response
 where
-    T: super::api::UserApi + Clone + Send + Sync + 'static,
+    T: super::api::AuthApi + Clone + Send + Sync + 'static,
 {
-    let body: CreateApiKeyRequest =
-        match super::validation::decode_json_body::<CreateApiKeyRequest>(
+    let body: LoginRequest = match super::validation::decode_json_body::<LoginRequest>(
+        __request,
+        super::validation::VALIDATION_TARGET_8_BODY,
+        "application/json",
+        true,
+        2097152usize,
+    )
+    .await
+    {
+        Ok(Some(body)) => body,
+        Ok(None) => {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::generated_contract_error(),
+            );
+        }
+        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+    };
+    ::axum::response::IntoResponse::into_response(api.login(body).await)
+}
+/// Build an axum::Router for the `ProxyApi` trait.
+pub fn proxy_api_router<T>(api: T) -> ::axum::Router
+where
+    T: ProxyApi + Clone + Send + Sync + 'static,
+{
+    ::axum::Router::new()
+        .route(
+            "/v1/chat/completions",
+            ::axum::routing::post(create_chat_completion_handler::<T>),
+        )
+        .route(
+            "/v1/messages",
+            ::axum::routing::post(create_message_handler::<T>),
+        )
+        .route(
+            "/v1/responses",
+            ::axum::routing::post(create_response_handler::<T>),
+        )
+        .route("/v1/models", ::axum::routing::get(list_models_handler::<T>))
+        .route(
+            "/v1/embeddings",
+            ::axum::routing::post(create_embedding_handler::<T>),
+        )
+        .route(
+            "/v1/moderations",
+            ::axum::routing::post(create_moderation_handler::<T>),
+        )
+        .route(
+            "/v1/images/generations",
+            ::axum::routing::post(create_image_handler::<T>),
+        )
+        .route(
+            "/v1/rerank",
+            ::axum::routing::post(create_rerank_handler::<T>),
+        )
+        .layer(::axum::extract::DefaultBodyLimit::max(2097152usize))
+        .with_state(api)
+}
+async fn create_chat_completion_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::ProxyApi + Clone + Send + Sync + 'static,
+{
+    let body: ChatCompletionRequest =
+        match super::validation::decode_json_body::<ChatCompletionRequest>(
             __request,
-            super::validation::VALIDATION_TARGET_2_BODY,
+            super::validation::VALIDATION_TARGET_0_BODY,
             "application/json",
             true,
             2097152usize,
@@ -1833,47 +1821,221 @@ where
             }
             Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
         };
-    ::axum::response::IntoResponse::into_response(api.create_api_key(body).await)
+    ::axum::response::IntoResponse::into_response(api.create_chat_completion(body).await)
 }
-async fn delete_api_key_handler<T>(
+async fn create_message_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
-    __path_result: ::std::result::Result<
-        ::axum::extract::Path<::std::collections::HashMap<String, String>>,
-        ::axum::extract::rejection::PathRejection,
-    >,
+    __request: ::axum::extract::Request,
 ) -> ::axum::response::Response
 where
-    T: super::api::UserApi + Clone + Send + Sync + 'static,
+    T: super::api::ProxyApi + Clone + Send + Sync + 'static,
 {
-    let ::axum::extract::Path(mut __path_values) = match __path_result {
-        Ok(path) => path,
-        Err(_) => {
+    let body: MessagesRequest = match super::validation::decode_json_body::<MessagesRequest>(
+        __request,
+        super::validation::VALIDATION_TARGET_1_BODY,
+        "application/json",
+        true,
+        2097152usize,
+    )
+    .await
+    {
+        Ok(Some(body)) => body,
+        Ok(None) => {
             return ::axum::response::IntoResponse::into_response(
-                ::axum::http::StatusCode::BAD_REQUEST,
+                super::validation::generated_contract_error(),
             );
         }
+        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
     };
-    let id: String = match __path_values.remove("id") {
-        Some(raw) => {
-            match super::validation::decode_parameter(
-                &raw,
-                super::validation::VALIDATION_TARGET_3_PATH_0,
-                "/path/id",
-                true,
-            ) {
-                Ok(value) => value,
-                Err(rejection) => {
-                    return ::axum::response::IntoResponse::into_response(rejection);
-                }
-            }
-        }
-        None => {
+    ::axum::response::IntoResponse::into_response(api.create_message(body).await)
+}
+async fn create_response_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::ProxyApi + Clone + Send + Sync + 'static,
+{
+    let body: ResponsesRequest = match super::validation::decode_json_body::<ResponsesRequest>(
+        __request,
+        super::validation::VALIDATION_TARGET_2_BODY,
+        "application/json",
+        true,
+        2097152usize,
+    )
+    .await
+    {
+        Ok(Some(body)) => body,
+        Ok(None) => {
             return ::axum::response::IntoResponse::into_response(
-                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                super::validation::generated_contract_error(),
             );
         }
+        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
     };
-    ::axum::response::IntoResponse::into_response(api.delete_api_key(id).await)
+    ::axum::response::IntoResponse::into_response(api.create_response(body).await)
+}
+async fn list_models_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+) -> ::axum::response::Response
+where
+    T: super::api::ProxyApi + Clone + Send + Sync + 'static,
+{
+    ::axum::response::IntoResponse::into_response(api.list_models().await)
+}
+async fn create_embedding_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::ProxyApi + Clone + Send + Sync + 'static,
+{
+    let body: EmbeddingsRequest = match super::validation::decode_json_body::<EmbeddingsRequest>(
+        __request,
+        super::validation::VALIDATION_TARGET_3_BODY,
+        "application/json",
+        true,
+        2097152usize,
+    )
+    .await
+    {
+        Ok(Some(body)) => body,
+        Ok(None) => {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::generated_contract_error(),
+            );
+        }
+        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+    };
+    ::axum::response::IntoResponse::into_response(api.create_embedding(body).await)
+}
+async fn create_moderation_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::ProxyApi + Clone + Send + Sync + 'static,
+{
+    let body: ModerationsRequest = match super::validation::decode_json_body::<ModerationsRequest>(
+        __request,
+        super::validation::VALIDATION_TARGET_4_BODY,
+        "application/json",
+        true,
+        2097152usize,
+    )
+    .await
+    {
+        Ok(Some(body)) => body,
+        Ok(None) => {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::generated_contract_error(),
+            );
+        }
+        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+    };
+    ::axum::response::IntoResponse::into_response(api.create_moderation(body).await)
+}
+async fn create_image_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::ProxyApi + Clone + Send + Sync + 'static,
+{
+    let body: ImagesRequest = match super::validation::decode_json_body::<ImagesRequest>(
+        __request,
+        super::validation::VALIDATION_TARGET_5_BODY,
+        "application/json",
+        true,
+        2097152usize,
+    )
+    .await
+    {
+        Ok(Some(body)) => body,
+        Ok(None) => {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::generated_contract_error(),
+            );
+        }
+        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+    };
+    ::axum::response::IntoResponse::into_response(api.create_image(body).await)
+}
+async fn create_rerank_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::ProxyApi + Clone + Send + Sync + 'static,
+{
+    let body: RerankRequest = match super::validation::decode_json_body::<RerankRequest>(
+        __request,
+        super::validation::VALIDATION_TARGET_6_BODY,
+        "application/json",
+        true,
+        2097152usize,
+    )
+    .await
+    {
+        Ok(Some(body)) => body,
+        Ok(None) => {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::generated_contract_error(),
+            );
+        }
+        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+    };
+    ::axum::response::IntoResponse::into_response(api.create_rerank(body).await)
+}
+/// Build an axum::Router for the `UserApi` trait.
+pub fn user_api_router<T>(api: T) -> ::axum::Router
+where
+    T: UserApi + Clone + Send + Sync + 'static,
+{
+    ::axum::Router::new()
+        .route(
+            "/api/users/me",
+            ::axum::routing::get(get_current_user_handler::<T>),
+        )
+        .route(
+            "/api/system/version",
+            ::axum::routing::get(get_version_handler::<T>),
+        )
+        .route(
+            "/api/api-keys",
+            ::axum::routing::get(list_api_keys_handler::<T>),
+        )
+        .route(
+            "/api/api-keys",
+            ::axum::routing::post(create_api_key_handler::<T>),
+        )
+        .route(
+            "/api/api-keys/{id}",
+            ::axum::routing::patch(update_api_key_handler::<T>),
+        )
+        .route(
+            "/api/api-keys/{id}",
+            ::axum::routing::delete(delete_api_key_handler::<T>),
+        )
+        .route("/api/logs", ::axum::routing::get(list_logs_handler::<T>))
+        .route(
+            "/api/logs/stats",
+            ::axum::routing::get(get_log_stats_handler::<T>),
+        )
+        .route(
+            "/api/users/me/wallet",
+            ::axum::routing::get(get_wallet_stats_handler::<T>),
+        )
+        .route(
+            "/api/users/me/redemptions",
+            ::axum::routing::post(redeem_code_handler::<T>),
+        )
+        .route(
+            "/api/models/prices",
+            ::axum::routing::get(list_public_prices_handler::<T>),
+        )
+        .layer(::axum::extract::DefaultBodyLimit::max(2097152usize))
+        .with_state(api)
 }
 async fn get_current_user_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
@@ -1883,106 +2045,6 @@ where
 {
     ::axum::response::IntoResponse::into_response(api.get_current_user().await)
 }
-async fn get_log_stats_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
-) -> ::axum::response::Response
-where
-    T: super::api::UserApi + Clone + Send + Sync + 'static,
-{
-    if let Some(raw) = __raw_query.as_deref() {
-        if __validate_urlencoded(raw).is_err() {
-            return ::axum::response::IntoResponse::into_response(
-                super::validation::malformed_parameter("/query"),
-            );
-        }
-    }
-    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "model") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_4_QUERY_0,
-            "/query/model",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "success") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_5_QUERY_1,
-            "/query/success",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "user_id") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_6_QUERY_2,
-            "/query/user_id",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "since") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_7_QUERY_3,
-            "/query/since",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    let __q: GetLogStatsQuery = match __decode_get_log_stats_query(__raw_query.as_deref()) {
-        Ok(query) => query,
-        Err(_) => {
-            return ::axum::response::IntoResponse::into_response(
-                super::validation::malformed_parameter("/query"),
-            );
-        }
-    };
-    if let Some(value) = &__q.model {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_4_QUERY_0,
-            "/query/model",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.success {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_5_QUERY_1,
-            "/query/success",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.user_id {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_6_QUERY_2,
-            "/query/user_id",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.since {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_7_QUERY_3,
-            "/query/since",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    ::axum::response::IntoResponse::into_response(
-        api.get_log_stats(__q.model, __q.success, __q.user_id, __q.since)
-            .await,
-    )
-}
 async fn get_version_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
 ) -> ::axum::response::Response
@@ -1990,14 +2052,6 @@ where
     T: super::api::UserApi + Clone + Send + Sync + 'static,
 {
     ::axum::response::IntoResponse::into_response(api.get_version().await)
-}
-async fn get_wallet_stats_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-) -> ::axum::response::Response
-where
-    T: super::api::UserApi + Clone + Send + Sync + 'static,
-{
-    ::axum::response::IntoResponse::into_response(api.get_wallet_stats().await)
 }
 async fn list_api_keys_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
@@ -2016,7 +2070,7 @@ where
     let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
     if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "user_id") {
         if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_10_QUERY_2,
+            super::validation::VALIDATION_TARGET_11_QUERY_2,
             "/query/user_id",
             &raw,
         ) {
@@ -2033,7 +2087,7 @@ where
     };
     if let Some(value) = &__q.limit {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_8_QUERY_0,
+            super::validation::VALIDATION_TARGET_9_QUERY_0,
             "/query/limit",
             value,
         ) {
@@ -2042,7 +2096,7 @@ where
     }
     if let Some(value) = &__q.offset {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_9_QUERY_1,
+            super::validation::VALIDATION_TARGET_10_QUERY_1,
             "/query/offset",
             value,
         ) {
@@ -2051,7 +2105,7 @@ where
     }
     if let Some(value) = &__q.user_id {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_10_QUERY_2,
+            super::validation::VALIDATION_TARGET_11_QUERY_2,
             "/query/user_id",
             value,
         ) {
@@ -2062,194 +2116,32 @@ where
         api.list_api_keys(__q.limit, __q.offset, __q.user_id).await,
     )
 }
-async fn list_logs_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
-) -> ::axum::response::Response
-where
-    T: super::api::UserApi + Clone + Send + Sync + 'static,
-{
-    if let Some(raw) = __raw_query.as_deref() {
-        if __validate_urlencoded(raw).is_err() {
-            return ::axum::response::IntoResponse::into_response(
-                super::validation::malformed_parameter("/query"),
-            );
-        }
-    }
-    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "model") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_13_QUERY_2,
-            "/query/model",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "success") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_14_QUERY_3,
-            "/query/success",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "user_id") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_15_QUERY_4,
-            "/query/user_id",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "since") {
-        if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_16_QUERY_5,
-            "/query/since",
-            &raw,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    let __q: ListLogsQuery = match __decode_list_logs_query(__raw_query.as_deref()) {
-        Ok(query) => query,
-        Err(_) => {
-            return ::axum::response::IntoResponse::into_response(
-                super::validation::malformed_parameter("/query"),
-            );
-        }
-    };
-    if let Some(value) = &__q.limit {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_11_QUERY_0,
-            "/query/limit",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.offset {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_12_QUERY_1,
-            "/query/offset",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.model {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_13_QUERY_2,
-            "/query/model",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.success {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_14_QUERY_3,
-            "/query/success",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.user_id {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_15_QUERY_4,
-            "/query/user_id",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.since {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_16_QUERY_5,
-            "/query/since",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    ::axum::response::IntoResponse::into_response(
-        api.list_logs(
-            __q.limit,
-            __q.offset,
-            __q.model,
-            __q.success,
-            __q.user_id,
-            __q.since,
-        )
-        .await,
-    )
-}
-async fn list_public_prices_handler<T>(
-    ::axum::extract::State(api): ::axum::extract::State<T>,
-    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
-) -> ::axum::response::Response
-where
-    T: super::api::UserApi + Clone + Send + Sync + 'static,
-{
-    let __q: ListPublicPricesQuery = match __decode_list_public_prices_query(__raw_query.as_deref())
-    {
-        Ok(query) => query,
-        Err(_) => {
-            return ::axum::response::IntoResponse::into_response(
-                super::validation::malformed_parameter("/query"),
-            );
-        }
-    };
-    if let Some(value) = &__q.limit {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_17_QUERY_0,
-            "/query/limit",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    if let Some(value) = &__q.offset {
-        if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_18_QUERY_1,
-            "/query/offset",
-            value,
-        ) {
-            return ::axum::response::IntoResponse::into_response(rejection);
-        }
-    }
-    ::axum::response::IntoResponse::into_response(
-        api.list_public_prices(__q.limit, __q.offset).await,
-    )
-}
-async fn redeem_code_handler<T>(
+async fn create_api_key_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
     __request: ::axum::extract::Request,
 ) -> ::axum::response::Response
 where
     T: super::api::UserApi + Clone + Send + Sync + 'static,
 {
-    let body: RedeemRequest = match super::validation::decode_json_body::<RedeemRequest>(
-        __request,
-        super::validation::VALIDATION_TARGET_19_BODY,
-        "application/json",
-        true,
-        2097152usize,
-    )
-    .await
-    {
-        Ok(Some(body)) => body,
-        Ok(None) => {
-            return ::axum::response::IntoResponse::into_response(
-                super::validation::generated_contract_error(),
-            );
-        }
-        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
-    };
-    ::axum::response::IntoResponse::into_response(api.redeem_code(body).await)
+    let body: CreateApiKeyRequest =
+        match super::validation::decode_json_body::<CreateApiKeyRequest>(
+            __request,
+            super::validation::VALIDATION_TARGET_12_BODY,
+            "application/json",
+            true,
+            2097152usize,
+        )
+        .await
+        {
+            Ok(Some(body)) => body,
+            Ok(None) => {
+                return ::axum::response::IntoResponse::into_response(
+                    super::validation::generated_contract_error(),
+                );
+            }
+            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+        };
+    ::axum::response::IntoResponse::into_response(api.create_api_key(body).await)
 }
 async fn update_api_key_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
@@ -2274,7 +2166,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_21_PATH_0,
+                super::validation::VALIDATION_TARGET_14_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -2293,7 +2185,7 @@ where
     let body: UpdateApiKeyRequest =
         match super::validation::decode_json_body::<UpdateApiKeyRequest>(
             __request,
-            super::validation::VALIDATION_TARGET_20_BODY,
+            super::validation::VALIDATION_TARGET_13_BODY,
             "application/json",
             true,
             2097152usize,
@@ -2310,14 +2202,358 @@ where
         };
     ::axum::response::IntoResponse::into_response(api.update_api_key(id, body).await)
 }
-/// Combined router spanning 3 traits: AdminApi, AuthApi, UserApi.
-pub fn build_router<T1, T2, T3>(admin_api: T1, auth_api: T2, user_api: T3) -> ::axum::Router
+async fn delete_api_key_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __path_result: ::std::result::Result<
+        ::axum::extract::Path<::std::collections::HashMap<String, String>>,
+        ::axum::extract::rejection::PathRejection,
+    >,
+) -> ::axum::response::Response
+where
+    T: super::api::UserApi + Clone + Send + Sync + 'static,
+{
+    let ::axum::extract::Path(mut __path_values) = match __path_result {
+        Ok(path) => path,
+        Err(_) => {
+            return ::axum::response::IntoResponse::into_response(
+                ::axum::http::StatusCode::BAD_REQUEST,
+            );
+        }
+    };
+    let id: String = match __path_values.remove("id") {
+        Some(raw) => {
+            match super::validation::decode_parameter(
+                &raw,
+                super::validation::VALIDATION_TARGET_15_PATH_0,
+                "/path/id",
+                true,
+            ) {
+                Ok(value) => value,
+                Err(rejection) => {
+                    return ::axum::response::IntoResponse::into_response(rejection);
+                }
+            }
+        }
+        None => {
+            return ::axum::response::IntoResponse::into_response(
+                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            );
+        }
+    };
+    ::axum::response::IntoResponse::into_response(api.delete_api_key(id).await)
+}
+async fn list_logs_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
+) -> ::axum::response::Response
+where
+    T: super::api::UserApi + Clone + Send + Sync + 'static,
+{
+    if let Some(raw) = __raw_query.as_deref() {
+        if __validate_urlencoded(raw).is_err() {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    }
+    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "model") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_18_QUERY_2,
+            "/query/model",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "success") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_19_QUERY_3,
+            "/query/success",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "user_id") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_20_QUERY_4,
+            "/query/user_id",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "since") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_21_QUERY_5,
+            "/query/since",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    let __q: ListLogsQuery = match __decode_list_logs_query(__raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(_) => {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    };
+    if let Some(value) = &__q.limit {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_16_QUERY_0,
+            "/query/limit",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.offset {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_17_QUERY_1,
+            "/query/offset",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.model {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_18_QUERY_2,
+            "/query/model",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.success {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_19_QUERY_3,
+            "/query/success",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.user_id {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_20_QUERY_4,
+            "/query/user_id",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.since {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_21_QUERY_5,
+            "/query/since",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    ::axum::response::IntoResponse::into_response(
+        api.list_logs(
+            __q.limit,
+            __q.offset,
+            __q.model,
+            __q.success,
+            __q.user_id,
+            __q.since,
+        )
+        .await,
+    )
+}
+async fn get_log_stats_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
+) -> ::axum::response::Response
+where
+    T: super::api::UserApi + Clone + Send + Sync + 'static,
+{
+    if let Some(raw) = __raw_query.as_deref() {
+        if __validate_urlencoded(raw).is_err() {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    }
+    let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "model") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_22_QUERY_0,
+            "/query/model",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "success") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_23_QUERY_1,
+            "/query/success",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "user_id") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_24_QUERY_2,
+            "/query/user_id",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "since") {
+        if let Err(rejection) = super::validation::validate_string_parameter(
+            super::validation::VALIDATION_TARGET_25_QUERY_3,
+            "/query/since",
+            &raw,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    let __q: GetLogStatsQuery = match __decode_get_log_stats_query(__raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(_) => {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    };
+    if let Some(value) = &__q.model {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_22_QUERY_0,
+            "/query/model",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.success {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_23_QUERY_1,
+            "/query/success",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.user_id {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_24_QUERY_2,
+            "/query/user_id",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.since {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_25_QUERY_3,
+            "/query/since",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    ::axum::response::IntoResponse::into_response(
+        api.get_log_stats(__q.model, __q.success, __q.user_id, __q.since)
+            .await,
+    )
+}
+async fn get_wallet_stats_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+) -> ::axum::response::Response
+where
+    T: super::api::UserApi + Clone + Send + Sync + 'static,
+{
+    ::axum::response::IntoResponse::into_response(api.get_wallet_stats().await)
+}
+async fn redeem_code_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
+) -> ::axum::response::Response
+where
+    T: super::api::UserApi + Clone + Send + Sync + 'static,
+{
+    let body: RedeemRequest = match super::validation::decode_json_body::<RedeemRequest>(
+        __request,
+        super::validation::VALIDATION_TARGET_26_BODY,
+        "application/json",
+        true,
+        2097152usize,
+    )
+    .await
+    {
+        Ok(Some(body)) => body,
+        Ok(None) => {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::generated_contract_error(),
+            );
+        }
+        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+    };
+    ::axum::response::IntoResponse::into_response(api.redeem_code(body).await)
+}
+async fn list_public_prices_handler<T>(
+    ::axum::extract::State(api): ::axum::extract::State<T>,
+    ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery,
+) -> ::axum::response::Response
+where
+    T: super::api::UserApi + Clone + Send + Sync + 'static,
+{
+    let __q: ListPublicPricesQuery = match __decode_list_public_prices_query(__raw_query.as_deref())
+    {
+        Ok(query) => query,
+        Err(_) => {
+            return ::axum::response::IntoResponse::into_response(
+                super::validation::malformed_parameter("/query"),
+            );
+        }
+    };
+    if let Some(value) = &__q.limit {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_27_QUERY_0,
+            "/query/limit",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    if let Some(value) = &__q.offset {
+        if let Err(rejection) = super::validation::validate_parameter(
+            super::validation::VALIDATION_TARGET_28_QUERY_1,
+            "/query/offset",
+            value,
+        ) {
+            return ::axum::response::IntoResponse::into_response(rejection);
+        }
+    }
+    ::axum::response::IntoResponse::into_response(
+        api.list_public_prices(__q.limit, __q.offset).await,
+    )
+}
+/// Combined router spanning 4 traits: AdminApi, AuthApi, ProxyApi, UserApi.
+pub fn build_router<T1, T2, T3, T4>(
+    admin_api: T1,
+    auth_api: T2,
+    proxy_api: T3,
+    user_api: T4,
+) -> ::axum::Router
 where
     T1: AdminApi + Clone + Send + Sync + 'static,
     T2: AuthApi + Clone + Send + Sync + 'static,
-    T3: UserApi + Clone + Send + Sync + 'static,
+    T3: ProxyApi + Clone + Send + Sync + 'static,
+    T4: UserApi + Clone + Send + Sync + 'static,
 {
     admin_api_router(admin_api)
         .merge(auth_api_router(auth_api))
+        .merge(proxy_api_router(proxy_api))
         .merge(user_api_router(user_api))
 }
