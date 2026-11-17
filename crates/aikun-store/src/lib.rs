@@ -36,6 +36,10 @@ pub mod pool;
 pub mod pricing;
 pub mod provider_row;
 pub mod schema;
+/// SurrealDB 第二实现(阶段 S):连接管理/schema 为共享底座(mod.rs),
+/// 三域实现桩(identity / channels_store / billing_store)由并行工人
+/// 分头填充——分工与纪律见 docs/surreal-migration.md §七。
+pub mod surreal;
 
 use aikun_channels::Provider;
 

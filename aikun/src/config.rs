@@ -8,7 +8,15 @@ pub struct AppConfig {
     /// 渠道 key 静态加密密钥;缺省时派生自 jwt_secret(见 crypto.rs)。
     pub encryption_key: Option<String>,
     pub jwt_expires_in: i64, // seconds
+    /// SQLite 数据库 URL(**已废弃**,阶段 S 起让位 surreal_url;SQLite
+    /// 后端与迁移工具在读,见 docs/surreal-migration.md §二)。
     pub database_url: String,
+    /// SurrealDB 连接端点(阶段 S):嵌入式 `surrealkv://<目录>` /
+    /// 远程 `ws://`/`wss://`/`http://`/`https://`,可带
+    /// `?ns=&db=&user=&pass=`。未设置 = 嵌入式 SurrealKV 默认
+    /// `surrealkv://./aikun.surreal`。解析与校验见
+    /// `aikun_store::surreal::Endpoint::parse`(非法即拒绝启动)。
+    pub surreal_url: String,
     pub health_check_interval: u64, // seconds
     pub max_retries: u32,
     pub auto_disable_threshold: u32, // consecutive failures before auto-disable
@@ -57,6 +65,7 @@ impl Default for AppConfig {
             encryption_key: None,
             jwt_expires_in: 86400 * 7, // 7 days
             database_url: "sqlite://aikun.db?mode=rwc".to_string(),
+            surreal_url: "surrealkv://./aikun.surreal".to_string(),
             health_check_interval: 30,
             max_retries: 3,
             auto_disable_threshold: 5,
@@ -92,7 +101,12 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     (
         "database-url",
         "AIKUN_DATABASE_URL",
-        "数据库 URL(如 sqlite://aikun.db?mode=rwc)",
+        "已废弃(SQLite 后端与迁移工具在读):sqlite://aikun.db?mode=rwc",
+    ),
+    (
+        "surreal-url",
+        "AIKUN_SURREAL_URL",
+        "SurrealDB 端点(未设默认嵌入式 surrealkv://./aikun.surreal;远程如 ws://host:8000,可带 ?ns=&db=&user=&pass=)",
     ),
     (
         "health-check-interval",
@@ -195,7 +209,29 @@ impl AppConfig {
             );
         }
         if let Some(val) = get("database-url", "AIKUN_DATABASE_URL") {
+            // 废弃告警(阶段 S,SurrealDB 迁移):显式设置才告警——默认值
+            // 不告警,避免每个既有部署升级即刷日志。该值仍被 SQLite 后端
+            // (切换完成前)与迁移工具(读源库)消费,解析行为不变。
+            tracing::warn!(
+                "AIKUN_DATABASE_URL/--database-url 已废弃:阶段 S 起存储转向 SurrealDB \
+                 (AIKUN_SURREAL_URL);该值在 SQLite 后端移除前仍生效,迁移工具以它为源库"
+            );
             config.database_url = val;
+        }
+        if let Some(val) = get("surreal-url", "AIKUN_SURREAL_URL") {
+            config.surreal_url = val;
+        } else if get("database-url", "AIKUN_DATABASE_URL").is_some() {
+            // 位置语义沿用:AIKUN_SURREAL_URL 未显式指定、而旧库指向
+            // 非默认位置(如 docker 卷挂载)时,嵌入式 SurrealKV 目录取
+            // 旧库同目录,数据位置随迁、不落回工作目录。
+            if let Some(dir) = sqlite_dir_of(&config.database_url) {
+                config.surreal_url = format!("surrealkv://{dir}/aikun.surreal");
+            }
+        }
+        // 启动校验:非法端点直接拒绝启动(与 host 解析同口径,不静默回退
+        // ——存错引擎/错库比拒启更难排查)。默认值同样过校验。
+        if let Err(e) = aikun_store::surreal::Endpoint::parse(&config.surreal_url) {
+            panic!("surreal-url {:?} 非法:{}", config.surreal_url, e);
         }
         if let Some(val) = get("health-check-interval", "AIKUN_HEALTH_CHECK_INTERVAL") {
             config.health_check_interval = parse_min(
@@ -284,6 +320,24 @@ impl AppConfig {
         }
         config
     }
+}
+
+/// 从 SQLite URL 揨取数据文件所在目录(:memory: / 无目录 / 空路径返回
+/// None,表示沿用默认工作目录)。用于 SurrealKV 目录的位置语义沿用
+/// (config.load 的 database_url 推导)。
+fn sqlite_dir_of(database_url: &str) -> Option<String> {
+    let without_scheme = database_url
+        .strip_prefix("sqlite://")
+        .unwrap_or(database_url);
+    let path = without_scheme.split('?').next()?;
+    if path.is_empty() || path.contains(":memory:") {
+        return None;
+    }
+    let dir = std::path::Path::new(path).parent()?;
+    if dir.as_os_str().is_empty() {
+        return Some(".".to_string());
+    }
+    Some(dir.to_string_lossy().into_owned())
 }
 
 /// 解析 --key value / --key=value 形式的命令行参数。
@@ -395,5 +449,27 @@ mod tests {
         );
         assert_eq!(map.get("host").map(String::as_str), Some("0.0.0.0:3001"));
         assert_eq!(map.get("max-retries").map(String::as_str), Some("5"));
+    }
+
+    /// SurrealKV 目录的位置语义沿用:旧库显式指向非默认位置时,嵌入式
+    /// 目录随迁到同目录;:memory: 无文件位置可继承(回退默认);
+    /// 裸文件名 / 相对路径的同目录是工作目录(派生结果与默认值相同)。
+    #[test]
+    fn surreal_dir_follows_database_url_location() {
+        assert_eq!(
+            sqlite_dir_of("sqlite://aikun.db?mode=rwc"),
+            Some(".".to_string())
+        );
+        assert_eq!(
+            sqlite_dir_of("sqlite:///data/aikun.db?mode=rwc"),
+            Some("/data".to_string())
+        );
+        assert_eq!(
+            sqlite_dir_of("/var/lib/aikun/app.db"),
+            Some("/var/lib/aikun".to_string())
+        );
+        assert_eq!(sqlite_dir_of(":memory:"), None);
+        // 裸文件名的同目录 = "."(工作目录),派生出与默认一致的端点
+        assert_eq!(sqlite_dir_of("aikun.db"), Some(".".to_string()));
     }
 }

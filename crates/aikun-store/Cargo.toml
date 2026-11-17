@@ -27,3 +27,21 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 # 日志门面
 tracing = "0.1"
+
+# ---- SurrealDB 第二实现(阶段 S,docs/surreal-migration.md)----
+# 选型钉版:4.0.1 = crates.io 2026-11 实查最新稳定线(max_stable_version,
+# 2026-11-09 发布)。features:默认面(protocol-ws + rustls)保留远程 WS;
+# kv-surrealkv = 嵌入式 SurrealKV(4.0 起取代 kv-rocksdb/kv-indxdb,
+# docs.rs 4.0.1 features 页实证);protocol-http = 远程 HTTP 备用通道。
+# Any 引擎按地址字符串运行期选引擎:surrealkv://<dir> 嵌入式、ws*/http*
+# 远程(docs.rs 4.0.1 源码 engine/any/mod.rs 的 IntoEndpoint 实证)。
+surrealdb = { version = "4.0.1", features = ["kv-surrealkv", "kv-mem", "protocol-http"] }
+# async trait:桩文件的能力 trait 用 async_trait(与 aikun-openapi /
+# aikun-admin 生成面同款,Send + dyn 兼容)
+async-trait = "0.1"
+# 新记录的 record id key(可排序不透明 ID,docs/surreal-migration.md §ID)
+ulid = "1"
+
+[dev-dependencies]
+# surreal/mod.rs 连通性测试(mem:// + ensure_schema + 版本闸门)
+tokio = { version = "1", features = ["rt", "macros"] }
