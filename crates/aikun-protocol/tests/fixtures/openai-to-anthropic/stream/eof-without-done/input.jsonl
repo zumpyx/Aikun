@@ -1,0 +1,8 @@
+// 构造依据:手写样本(非抓包),按 OpenAI chat-completions 流式线协议形状撰写。
+// 输入 = 上游 SSE 事件序列(每行一个 {event, data})。
+// 本用例覆盖:上游 EOF 且未发 [DONE]——由 StreamConverter::finish() 补齐
+// content_block_stop / message_delta / message_stop;同时覆盖
+// finish_reason=length → stop_reason=max_tokens 映射与无 usage 回填
+// (input/output 均为 0)。首帧带非空 content,message_start 与文本块同拍开启。
+{"event": null, "data": {"id": "chatcmpl-oa3", "object": "chat.completion.chunk", "created": 1731860002, "model": "gpt-4o-2024-11-20", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "被截断的回答"}, "finish_reason": null}]}}
+{"event": null, "data": {"id": "chatcmpl-oa3", "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]}}

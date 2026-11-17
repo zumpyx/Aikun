@@ -1,0 +1,15 @@
+// 构造依据:手写样本(非抓包),按 Anthropic Messages 流式线协议形状撰写。
+// 输入 = 上游 SSE 事件序列,每行一个 {event, data} 对应 SseEvent:
+// event 为 SSE 事件名,data 为事件 JSON。
+// 本用例覆盖:message_start 用量拆分(input_tokens 不含缓存、
+// cache_read_input_tokens 单列、cache_creation 并入未缓存输入)、
+// 文本增量(text_delta)、stop_reason=end_turn → finish_reason=stop 映射、
+// 结尾 usage 回填(prompt_tokens 含缓存并带 prompt_tokens_details)、
+// finish() 补 [DONE]。
+{"event": "message_start", "data": {"type": "message_start", "message": {"id": "msg_an1", "type": "message", "role": "assistant", "model": "claude-3-5-sonnet-20241022", "content": [], "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 400, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 800}}}}
+{"event": "content_block_start", "data": {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}}
+{"event": "content_block_delta", "data": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hel"}}}
+{"event": "content_block_delta", "data": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "lo!"}}}
+{"event": "content_block_stop", "data": {"type": "content_block_stop", "index": 0}}
+{"event": "message_delta", "data": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": null}, "usage": {"output_tokens": 30}}}
+{"event": "message_stop", "data": {"type": "message_stop"}}

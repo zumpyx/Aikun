@@ -1,0 +1,16 @@
+// 构造依据:手写样本(非抓包),按 OpenAI chat-completions 流式线协议形状撰写。
+// 输入 = 上游 SSE 事件序列(每行一个 {event, data},data 为对象即 chunk,
+// 为字符串即裸 data 帧)。
+// 本用例覆盖:tool_calls 分片——首个 delta 带 id/name 而 arguments 为空,
+// 随后两个 delta 只带 arguments 片段("{\"city\":" 与 "\"北京\"}"),
+// 第二个工具一次到位;文本块→工具块的 content_block_stop/start 顺序,
+// finish_reason=tool_calls 映射,无缓存 usage,[DONE] 收尾。
+{"event": null, "data": {"id": "chatcmpl-oa2", "object": "chat.completion.chunk", "created": 1731860001, "model": "gpt-4o-2024-11-20", "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}}
+{"event": null, "data": {"id": "chatcmpl-oa2", "choices": [{"index": 0, "delta": {"content": "先查一下天气。"}, "finish_reason": null}]}}
+{"event": null, "data": {"id": "chatcmpl-oa2", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_A", "type": "function", "function": {"name": "get_weather", "arguments": ""}}]}, "finish_reason": null}]}}
+{"event": null, "data": {"id": "chatcmpl-oa2", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"city\":"}}]}}]}}
+{"event": null, "data": {"id": "chatcmpl-oa2", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\"北京\"}"}}]}}]}}
+{"event": null, "data": {"id": "chatcmpl-oa2", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "id": "call_B", "type": "function", "function": {"name": "get_time", "arguments": "{}"}}]}}]}}
+{"event": null, "data": {"id": "chatcmpl-oa2", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}}
+{"event": null, "data": {"id": "chatcmpl-oa2", "choices": [], "usage": {"prompt_tokens": 50, "completion_tokens": 10, "total_tokens": 60}}}
+{"event": null, "data": "[DONE]"}

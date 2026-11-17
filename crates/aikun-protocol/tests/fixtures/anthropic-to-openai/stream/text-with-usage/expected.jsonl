@@ -1,0 +1,6 @@
+// 黄金样本(由实现生成,勿手改):message_start 缓存拆分 + 文本增量 + end_turn→stop + usage 回填 + [DONE]
+{"data":{"choices":[{"delta":{"content":"","role":"assistant"},"finish_reason":null,"index":0}],"created":1794917606,"id":"msg_an1","model":"claude-3-5-sonnet","object":"chat.completion.chunk"},"event":null}
+{"data":{"choices":[{"delta":{"content":"Hel"},"finish_reason":null,"index":0}],"created":1794917606,"id":"msg_an1","model":"claude-3-5-sonnet","object":"chat.completion.chunk"},"event":null}
+{"data":{"choices":[{"delta":{"content":"lo!"},"finish_reason":null,"index":0}],"created":1794917606,"id":"msg_an1","model":"claude-3-5-sonnet","object":"chat.completion.chunk"},"event":null}
+{"data":{"choices":[{"delta":{},"finish_reason":"stop","index":0}],"created":1794917606,"id":"msg_an1","model":"claude-3-5-sonnet","object":"chat.completion.chunk","usage":{"completion_tokens":30,"prompt_tokens":1200,"prompt_tokens_details":{"cached_tokens":800},"total_tokens":1230}},"event":null}
+{"data":"[DONE]","event":null}

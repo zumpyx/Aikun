@@ -1,0 +1,4 @@
+// 黄金样本(由实现生成,勿手改):thinking→reasoning_content,signature/ping 丢弃,EOF 无终态事件仅补 [DONE]
+{"data":{"choices":[{"delta":{"content":"","role":"assistant"},"finish_reason":null,"index":0}],"created":1794917607,"id":"msg_an3","model":"claude-3-5-sonnet","object":"chat.completion.chunk"},"event":null}
+{"data":{"choices":[{"delta":{"reasoning_content":"hmm"},"finish_reason":null,"index":0}],"created":1794917607,"id":"msg_an3","model":"claude-3-5-sonnet","object":"chat.completion.chunk"},"event":null}
+{"data":"[DONE]","event":null}

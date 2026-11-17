@@ -1,0 +1,12 @@
+// 构造依据:手写样本(非抓包),按 OpenAI chat-completions 流式线协议形状撰写。
+// 输入 = 上游 SSE 事件序列,每行一个 {event, data} 对应 SseEvent:
+// data 为对象时即 chunk JSON,为字符串时是裸 data 帧(如 [DONE])。
+// 本用例覆盖:首帧 role + 空 content 增量(只触发 message_start)、
+// 文本增量分片、结尾 usage-only chunk(prompt_tokens_details.cached_tokens
+// 缓存拆分)、finish_reason=stop 映射、[DONE] 收尾。
+{"event": null, "data": {"id": "chatcmpl-oa1", "object": "chat.completion.chunk", "created": 1731860000, "model": "gpt-4o-2024-11-20", "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}}
+{"event": null, "data": {"id": "chatcmpl-oa1", "choices": [{"index": 0, "delta": {"content": "Hel"}, "finish_reason": null}]}}
+{"event": null, "data": {"id": "chatcmpl-oa1", "choices": [{"index": 0, "delta": {"content": "lo!"}, "finish_reason": null}]}}
+{"event": null, "data": {"id": "chatcmpl-oa1", "choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 7, "total_tokens": 107, "prompt_tokens_details": {"cached_tokens": 60}}}}
+{"event": null, "data": {"id": "chatcmpl-oa1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}}
+{"event": null, "data": "[DONE]"}

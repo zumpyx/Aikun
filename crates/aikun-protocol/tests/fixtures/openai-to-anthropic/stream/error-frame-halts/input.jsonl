@@ -1,0 +1,10 @@
+// 构造依据:手写样本(非抓包),按部分中转上游的行为(HTTP 200 + SSE 流内
+// {"error": ...} 帧)撰写。输入 = 上游 SSE 事件序列(每行一个 {event, data})。
+// 本用例覆盖:流内 error 帧停机——已 message_start 后收到错误帧,转成
+// Anthropic error 事件(server_error 非白名单类型,映射为 api_error)并
+// 终止;其后正常帧与 [DONE] 均不再产出事件,EOF 收尾(finish)亦为空,
+// 不得出现"错误后又 message_delta/message_stop 成功收尾"。
+{"event": null, "data": {"id": "chatcmpl-oa4", "object": "chat.completion.chunk", "created": 1731860003, "model": "gpt-4o-2024-11-20", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hel"}, "finish_reason": null}]}}
+{"event": null, "data": {"error": {"message": "upstream exploded", "type": "server_error", "param": null, "code": null}}}
+{"event": null, "data": {"id": "chatcmpl-oa4", "choices": [{"index": 0, "delta": {"content": "lo"}, "finish_reason": null}]}}
+{"event": null, "data": "[DONE]"}

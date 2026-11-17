@@ -1,0 +1,14 @@
+// 黄金样本(由实现生成,勿手改):tool_calls 分片拼装 input_json_delta + 块开合顺序 + tool_calls→tool_use
+{"data":{"message":{"content":[],"id":"chatcmpl-oa2","model":"gpt-4o","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":0,"output_tokens":0}},"type":"message_start"},"event":"message_start"}
+{"data":{"content_block":{"text":"","type":"text"},"index":0,"type":"content_block_start"},"event":"content_block_start"}
+{"data":{"delta":{"text":"先查一下天气。","type":"text_delta"},"index":0,"type":"content_block_delta"},"event":"content_block_delta"}
+{"data":{"index":0,"type":"content_block_stop"},"event":"content_block_stop"}
+{"data":{"content_block":{"id":"call_A","input":{},"name":"get_weather","type":"tool_use"},"index":1,"type":"content_block_start"},"event":"content_block_start"}
+{"data":{"delta":{"partial_json":"{\"city\":","type":"input_json_delta"},"index":1,"type":"content_block_delta"},"event":"content_block_delta"}
+{"data":{"delta":{"partial_json":"\"北京\"}","type":"input_json_delta"},"index":1,"type":"content_block_delta"},"event":"content_block_delta"}
+{"data":{"index":1,"type":"content_block_stop"},"event":"content_block_stop"}
+{"data":{"content_block":{"id":"call_B","input":{},"name":"get_time","type":"tool_use"},"index":2,"type":"content_block_start"},"event":"content_block_start"}
+{"data":{"delta":{"partial_json":"{}","type":"input_json_delta"},"index":2,"type":"content_block_delta"},"event":"content_block_delta"}
+{"data":{"index":2,"type":"content_block_stop"},"event":"content_block_stop"}
+{"data":{"delta":{"stop_reason":"tool_use","stop_sequence":null},"type":"message_delta","usage":{"input_tokens":50,"output_tokens":10}},"event":"message_delta"}
+{"data":{"type":"message_stop"},"event":"message_stop"}

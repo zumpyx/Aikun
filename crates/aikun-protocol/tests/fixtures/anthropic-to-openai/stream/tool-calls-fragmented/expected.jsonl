@@ -1,0 +1,9 @@
+// 黄金样本(由实现生成,勿手改):tool_use 块与 input_json_delta 分片 → tool_calls 增量 + tool_use→tool_calls
+{"data":{"choices":[{"delta":{"content":"","role":"assistant"},"finish_reason":null,"index":0}],"created":1794917607,"id":"msg_an2","model":"claude-3-5-sonnet","object":"chat.completion.chunk"},"event":null}
+{"data":{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"","name":"get_weather"},"id":"toolu_01A","index":0,"type":"function"}]},"finish_reason":null,"index":0}],"created":1794917607,"id":"msg_an2","model":"claude-3-5-sonnet","object":"chat.completion.chunk"},"event":null}
+{"data":{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\"city\":"},"index":0}]},"finish_reason":null,"index":0}],"created":1794917607,"id":"msg_an2","model":"claude-3-5-sonnet","object":"chat.completion.chunk"},"event":null}
+{"data":{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"北京\"}"},"index":0}]},"finish_reason":null,"index":0}],"created":1794917607,"id":"msg_an2","model":"claude-3-5-sonnet","object":"chat.completion.chunk"},"event":null}
+{"data":{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"","name":"get_time"},"id":"toolu_02B","index":1,"type":"function"}]},"finish_reason":null,"index":0}],"created":1794917607,"id":"msg_an2","model":"claude-3-5-sonnet","object":"chat.completion.chunk"},"event":null}
+{"data":{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{}"},"index":1}]},"finish_reason":null,"index":0}],"created":1794917607,"id":"msg_an2","model":"claude-3-5-sonnet","object":"chat.completion.chunk"},"event":null}
+{"data":{"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}],"created":1794917607,"id":"msg_an2","model":"claude-3-5-sonnet","object":"chat.completion.chunk","usage":{"completion_tokens":12,"prompt_tokens":50,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":62}},"event":null}
+{"data":"[DONE]","event":null}
