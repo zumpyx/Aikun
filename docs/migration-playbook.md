@@ -89,9 +89,9 @@ LoginServerResponse::Unauthorized(problem(401, "invalid_credentials", "Invalid u
 ## 三、e2e 独立文件的写法(参照 `aikun/tests/e2e_auth.rs`)
 
 ```
-aikun/tests/e2e_auth.rs      ← Auth 批(试点,已交付)
-aikun/tests/e2e_user.rs      ← User 批
-aikun/tests/e2e_providers.rs ← Providers 批
+aikun/tests/e2e_auth.rs           ← Auth 批(试点,已交付)
+aikun/tests/e2e_user.rs           ← User 批
+aikun/tests/e2e_admin_providers.rs ← Providers 批
 …
 ```
 

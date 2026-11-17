@@ -197,8 +197,8 @@ pub trait ChannelAdapter: Send + Sync + 'static {
 - 适配器只描述"这个上游和标准协议有什么不同"。网络 I/O、超时、代理、故障转移、协议转换、计费都留在公共层,所以一个新适配器通常只要十几行。
 - 钩子都是同步的,不引入 async-trait;钩子吃 `Protocol` 枚举。
 - 数据模型:`providers.channel_kind TEXT NOT NULL DEFAULT ''`,空串表示 generic。不加 CHECK,由 API 层校验,不合法时返回 400 `invalid_channel_kind`;库里出现未注册的值时回退 generic 并打 warn。只加列,不升 `SCHEMA_VERSION`。
-- `GET /api/admin/channel-kinds` 给前端下拉使用。
-- **新增渠道三步**:① 新建 `src/channel/adapter/xxx.rs`,`impl ChannelAdapter`;② 在 `adapter/mod.rs` 加 `pub mod xxx;`,并在 `ChannelRegistry::builtin()` 里注册一行;③ 在管理端选择该渠道类型。
+- `GET /api/channel-kinds` 给前端下拉使用(0.5 管理面迁移去 `/admin` 段)。
+- **新增渠道三步**:① 新建 `crates/aikun-channels/src/adapters/xxx.rs`,`impl ChannelAdapter`;② 在 `adapters/mod.rs` 加 `pub mod xxx;`,并在 `ChannelRegistry::builtin()` 里注册一行;③ 在管理端选择该渠道类型。
 - **WorkBuddy / Qoder**:目前是占位实现(行为等同 generic,带 experimental 标记),要等拿到真实接口文档后才能接入。
 
 ## 6. 响应缓存【用户需求】→ 落地方式【本次新增】

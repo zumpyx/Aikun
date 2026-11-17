@@ -10,9 +10,10 @@
 //!
 //! ## 新增一个渠道类型(三步)
 //!
-//! 1. 在 `src/channel/adapter/` 下新建 `xxx.rs`,实现 [`ChannelAdapter`]
+//! 1. 在 `src/adapters/` 下新建 `xxx.rs`,实现 [`ChannelAdapter`]
 //!    (通常只需覆写 `kind` / `label` 和少数几个钩子,其余用默认实现);
-//! 2. 在本文件加一行 `pub mod xxx;`,并在 [`registry::ChannelRegistry::builtin`]
+//! 2. 在 `src/adapters/mod.rs` 加一行 `pub mod xxx;`,并在
+//!    [`registry::ChannelRegistry::builtin`]
 //!    里加一行 `reg.register(Arc::new(xxx::XxxAdapter))`;
 //! 3. 管理端添加渠道时在「渠道类型」下拉中选择它(值写入 providers.channel_kind)。
 //!
