@@ -124,7 +124,7 @@ export AIKUN_JWT_SECRET=$(openssl rand -hex 32)
 | `--encryption-key` | `AIKUN_ENCRYPTION_KEY` | (空,派生自 JWT secret) | 渠道 key 静态加密密钥 |
 | `--jwt-expires-in` | `AIKUN_JWT_EXPIRES_IN` | `604800` | JWT 有效期(秒) |
 | `--surreal-url` | `AIKUN_SURREAL_URL` | `surrealkv://./aikun.surreal` | SurrealDB 端点:嵌入式 `surrealkv://<目录>` / 远程 `ws://` `wss://` `http://` `https://`(可带 `?ns=&db=&user=&pass=`) |
-| `--database-url` | `AIKUN_DATABASE_URL` | (已废弃) | 旧 SQLite 库位置,**仅迁移工具 `aikun-migrate` 读取**(见「数据与升级」) |
+| `--database-url` | `AIKUN_DATABASE_URL` | (过渡期) | 旧 SQLite 库位置:迁移工具 `aikun-migrate` 读取;且 `AIKUN_SURREAL_URL` 未显式设置时,主程序据此推导嵌入式数据目录(旧库同目录)。**显式配置 `AIKUN_SURREAL_URL` 后方可删除本变量**(见「数据与升级」) |
 | `--health-check-interval` | `AIKUN_HEALTH_CHECK_INTERVAL` | `30` | 健康检查间隔(秒) |
 | `--max-retries` | `AIKUN_MAX_RETRIES` | `3` | 单请求最大渠道尝试次数 |
 | `--auto-disable-threshold` | `AIKUN_AUTO_DISABLE_THRESHOLD` | `5` | 连续失败自动禁用阈值 |
