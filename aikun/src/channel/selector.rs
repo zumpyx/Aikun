@@ -5,6 +5,7 @@ use rand::Rng;
 
 use aikun_store::surreal::channels_store::{ChannelStore, ProviderMetrics};
 
+use crate::channel::breaker;
 use crate::channel::registry::{self, ChannelEntry};
 use crate::crypto::KeyCipher;
 use crate::models::Provider;
@@ -122,12 +123,14 @@ pub async fn select_provider(
     let cipher = &store.cipher;
 
     // 钉住渠道必须仍支持该模型(旧语义:亲和查找发生在模型过滤后的
-    // 候选集内),且健康可钉、未被本请求排除、密钥解得开。
+    // 候选集内),且健康可钉、未被本请求排除、未被熔断(9.5:熔断中的
+    // 亲和渠道降级走正常选路)、密钥解得开。
     if let Some(pinned_id) = pinned_id
         && let Some(e) = entries.iter().find(|e| {
             e.provider.id == pinned_id
                 && e.supports_model(model)
                 && pinned_usable(&e.provider, exclude, cipher)
+                && !breaker::is_skipped(&e.provider.id)
         })
     {
         return Some(decrypt_provider(&e.provider, cipher));
@@ -145,6 +148,18 @@ pub async fn select_provider(
     }
     if candidates.is_empty() {
         return None;
+    }
+
+    // 熔断过滤(9.5):冷却中的渠道优先跳过;全部被熔断时回退为忽略
+    // 熔断(加权照常)——熔断是短周期"优先跳过",不是硬墙,不能因它
+    // 把请求打成 503。回退选中并成功会立即清零(record_success)。
+    let cooled: Vec<&ChannelEntry> = candidates
+        .iter()
+        .copied()
+        .filter(|e| !breaker::is_skipped(&e.provider.id))
+        .collect();
+    if !cooled.is_empty() {
+        candidates = cooled;
     }
 
     // Filter to only healthy providers(快照只含 is_active=1 的渠道)。
@@ -258,6 +273,8 @@ pub async fn record_request_result(
     registry::shared()
         .cached()
         .mirror_request_result(provider_id, latency_ms, success);
+    // 熔断清零(9.5):成功即恢复(含冷却中被回退选中并成功的半开路径)。
+    breaker::record_success(provider_id);
 }
 
 // ---- 失败分类守卫(单测锁定,语义自旧 SQLite selector 迁移)----
@@ -309,6 +326,11 @@ pub async fn record_failure(
     registry::shared()
         .cached()
         .mirror_failure(provider_id, latency_ms, upstream_failure);
+    // 熔断计数(9.5):与 consecutive_failures 同口径(429/客户端 4xx 不进;
+    // 同请求重试的后续尝试 count_consecutive=false 不重复累加)。
+    if counts_as_failure {
+        breaker::record_failure(provider_id);
+    }
 
     let reason = if status == 401 || status == 403 {
         Some(format!("上游返回 {} 认证失败,自动禁用", status))

@@ -1827,3 +1827,99 @@ async fn dashboard_stats_aggregations_new_paths() {
     assert_eq!(s["providers"], 1);
     assert_eq!(s["requests_today"], 5);
 }
+
+/// 渠道熔断(9.5,阶段 3 尾巴):连续计入健康的失败达到阈值后,冷却期内
+/// 选路跳过该渠道;冷却到期恢复可选(半开试探)。确定性构造:
+/// - 坏渠道 A 权重碾压(weight 1000 vs 1),无熔断时请求必先打 A;
+/// - 亲和按 (api_key, model) 钉住——用不同 key / 不同模型打破钉,
+///   保证第 2、4 步仍走加权选路;
+/// - auto_disable_threshold 默认 5 > 熔断阈值 2,A 只熔断不禁用。
+#[tokio::test]
+async fn circuit_breaker_skips_channel_within_cooldown_then_recovers() {
+    let bad = MockUpstream::start().await;
+    let good = MockUpstream::start().await;
+    let app = TestApp::spawn_with_env(&[
+        ("AIKUN_BREAKER_FAILURE_THRESHOLD", "2"),
+        ("AIKUN_BREAKER_COOLDOWN_SECS", "1"),
+    ])
+    .await;
+    // 三个独立用户(各自的 API key;create_user_with_key 用户名可自定义,
+    // seed_user_funded 固定用户名会撞唯一约束)。建号后各自充值 1 元。
+    let mk = |name: &'static str| async {
+        let u = app
+            .create_user_with_key(name, "user", KeyLimits::default())
+            .await;
+        assert_eq!(app.adjust_balance(&u.id, 1.0).await, 1.0);
+        u
+    };
+    let u1 = mk("cb-user-1").await;
+    let u2 = mk("cb-user-2").await;
+    let u3 = mk("cb-user-3").await;
+    app.seed_provider(&ProviderSeed {
+        name: "bad",
+        base_url: &bad.base,
+        models: &["gpt-4", "gpt-4o"],
+        weight: 1000.0,
+        ..ProviderSeed::default()
+    })
+    .await;
+    app.seed_provider(&ProviderSeed {
+        name: "good",
+        base_url: &good.base,
+        models: &["gpt-4", "gpt-4o"],
+        ..ProviderSeed::default()
+    })
+    .await;
+    // 坏渠道脚本:足量 500(实际被消耗 ≤ 3 次)。
+    for _ in 0..8 {
+        bad.push_json(500, json!({"error": {"message": "boom"}}));
+    }
+
+    // r1/r2(u1/u2,gpt-4):加权必先打 A(500)→ failover B(200)。
+    // 两次 A 失败 → 熔断 open(cooldown 1s)。
+    for u in [&u1, &u2] {
+        let resp = app
+            .client()
+            .post(format!("{}/v1/chat/completions", app.base))
+            .json(&json!({"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}))
+            .bearer_auth(&u.api_key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+    let a_hits = || {
+        bad.requests()
+            .iter()
+            .filter(|r| r.path == "/v1/chat/completions")
+            .count()
+    };
+    assert_eq!(a_hits(), 2, "两次失败已计入熔断");
+
+    // r3(u1,gpt-4o):亲和钉在 (u1key, gpt-4) 不覆盖此模型 → 加权选路;
+    // 熔断窗口内 A 被跳过(无熔断时 weight 1000 必打 A)→ 直接 B。
+    let resp = app
+        .client()
+        .post(format!("{}/v1/chat/completions", app.base))
+        .json(&json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}))
+        .bearer_auth(&u1.api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(a_hits(), 2, "冷却窗口内坏渠道不再被选中");
+
+    // 冷却到期(半开):A 恢复可选 → 加权再次命中 → 500 → failover B。
+    // (单测已锁定窗口语义;此处验证端到端恢复路径。)
+    tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+    let resp = app
+        .client()
+        .post(format!("{}/v1/chat/completions", app.base))
+        .json(&json!({"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}))
+        .bearer_auth(&u3.api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(a_hits(), 3, "冷却到期后半开试探一次(失败后再冷却)");
+}

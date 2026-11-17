@@ -20,6 +20,11 @@ pub struct AppConfig {
     pub health_check_interval: u64, // seconds
     pub max_retries: u32,
     pub auto_disable_threshold: u32, // consecutive failures before auto-disable
+    /// 渠道熔断阈值(9.5):连续计入健康的失败达到该次数 → 冷却期内
+    /// 选路优先跳过(进程内,不取代自动禁用;429/客户端 4xx 不计入)。
+    pub breaker_failure_threshold: u32,
+    /// 渠道熔断冷却时长(秒,9.5);到期恢复可选(半开)。
+    pub breaker_cooldown_secs: u64,
     pub request_timeout_secs: u64,
     /// TCP/TLS 连接超时(9.2 三类超时之一;原 15s 硬编码改为可配)。
     pub connect_timeout_secs: u64,
@@ -76,6 +81,8 @@ impl Default for AppConfig {
             health_check_interval: 30,
             max_retries: 3,
             auto_disable_threshold: 5,
+            breaker_failure_threshold: 3,
+            breaker_cooldown_secs: 30,
             request_timeout_secs: 120,
             connect_timeout_secs: 15,
             ttfb_timeout_secs: 60,
@@ -132,6 +139,16 @@ const SETTINGS: &[(&str, &str, &str)] = &[
         "auto-disable-threshold",
         "AIKUN_AUTO_DISABLE_THRESHOLD",
         "连续失败多少次后自动禁用渠道(≥1)",
+    ),
+    (
+        "breaker-failure-threshold",
+        "AIKUN_BREAKER_FAILURE_THRESHOLD",
+        "渠道熔断阈值(≥1,默认 3):连续失败达此次数后冷却期内选路优先跳过",
+    ),
+    (
+        "breaker-cooldown-secs",
+        "AIKUN_BREAKER_COOLDOWN_SECS",
+        "渠道熔断冷却时长(秒,≥1,默认 30);到期恢复可选(半开)",
     ),
     (
         "request-timeout-secs",
@@ -275,6 +292,25 @@ impl AppConfig {
                 "auto-disable-threshold",
                 1,
                 config.auto_disable_threshold,
+            );
+        }
+        if let Some(val) = get(
+            "breaker-failure-threshold",
+            "AIKUN_BREAKER_FAILURE_THRESHOLD",
+        ) {
+            config.breaker_failure_threshold = parse_min(
+                &val,
+                "breaker-failure-threshold",
+                1,
+                config.breaker_failure_threshold,
+            );
+        }
+        if let Some(val) = get("breaker-cooldown-secs", "AIKUN_BREAKER_COOLDOWN_SECS") {
+            config.breaker_cooldown_secs = parse_min(
+                &val,
+                "breaker-cooldown-secs",
+                1,
+                config.breaker_cooldown_secs,
             );
         }
         if let Some(val) = get("request-timeout-secs", "AIKUN_REQUEST_TIMEOUT_SECS") {
