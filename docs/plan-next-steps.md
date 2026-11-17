@@ -263,10 +263,16 @@ roadmap 阶段 2(pipeline 显式化)与步骤 3–5 无冲突,可并行推进
 实施结果与设计偏差记录见 `docs/surreal-migration.md` §十;对外行为变化
 逐条见 `CHANGELOG.md` [0.6.0]。
 
-### 阶段 S 遗留(2026-11-17 独立复审)
+### 阶段 S 遗留(2026-11-17 独立复审)——已全部关闭(同日)
 
-- **selector 失败分类守卫的单元测试缺口**(low):客户端 4xx 不伤渠道健康、
-  429 永不计失败、同请求重试不重复计失败——旧单测随 SQLite selector 删除,
-  新分类逻辑(`aikun/src/channel/selector.rs:295-302`)语义经人工比对与旧实现
-  一致(0/408/429/5xx 分类、0.9/0.1 与 0.95/0.05 衰减常数),但当前无任何
-  测试锁定。补一组分类单测后关闭本条。
+- ✅ **selector 失败分类守卫单测**:提取 `is_upstream_failure`/`counts_toward_disable`
+  纯函数 + 真值表锁定(3e3b570)。
+- ✅ **迁移演练**(合成旧库 12 表:真实 enc:v1 密文、混合时间戳):行数对照全过、
+  微元/密文逐字节原样、时间归一、幂等 ×3、迁移库启动 + 迁移哈希 key 过 /v1 鉴权;
+  发现并修复 v3 早期库缺表中断 bug(9672be8)。
+- ✅ **远程模式实机验证**(surreal 服务端 v4.0.1,darwin-arm64):
+  `AIKUN_SURREAL_URL=ws://127.0.0.1:8000?user=root&pass=root` 启动 → schema 播种
+  211 条 → /api/health → 登录签发 JWT → 带 token 的 /api/users/me 全部走通。
+- ✅ **roadmap 阶段 2(pipeline 显式化)**:RequestCtx/分类/单次 attempt/流式三单元/
+  GatewayError/passthrough 并入(27 行薄壳)/request_id 贯穿/三类超时/脱敏/缓存收紧,
+  全量 270 测试绿(7bbd2a6);**9.1 流式黄金样本**双向 7 用例(6a9ef68)。

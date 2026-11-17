@@ -5,7 +5,12 @@
 
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
-## [Unreleased] - roadmap v0.5 阶段 2(管线显式化)
+## [Unreleased]
+### 修复
+- `aikun-migrate`:v3 早期库缺 `api_key_usage_daily` 表时中断且留半成品库——改为缺表按
+  0 行迁移并 WARN(计数器可由明细重建,服务端启动本就重建当日值);其余表缺失仍报错。
+  迁移演练:12 表行数对照全过、密文逐字节原样、幂等可重跑。
+ - roadmap v0.5 阶段 2(管线显式化)
 
 阶段 2 落地:`pipeline` 拆为 context / admission / dispatch(候选迭代)/
 attempt(单次尝试)/ classify(失败分类)/ stream(流转发 / 记账收尾 /
