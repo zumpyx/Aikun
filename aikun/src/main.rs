@@ -7,6 +7,7 @@ mod config;
 mod crypto;
 mod models;
 mod pipeline;
+mod relay;
 mod store;
 
 use std::collections::HashMap;
@@ -222,21 +223,28 @@ async fn async_main() {
     let public_routes = Router::new().route("/api/health", get(health_check));
 
     // --- Relay routes /v1/**(JWT 或 API key;OpenAI 兼容面,契约冻结) ---
-    let relay_routes = Router::new()
-        .route(
-            "/v1/chat/completions",
-            post(api::proxy::chat::chat_completion),
-        )
-        .route("/v1/messages", post(api::proxy::messages::messages))
-        .route("/v1/responses", post(api::proxy::responses::responses))
-        .route("/v1/models", get(api::proxy::chat::list_models))
-        // 其余 OpenAI 兼容端点的字节级透传(白名单见 passthrough.rs);
-        // 通配路由排在显式路由之后,chat/messages/responses/models 不受影响。
-        .route("/v1/{*path}", post(api::proxy::passthrough::passthrough))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth_middleware,
-        ));
+    // Proxy tag 8 个显式端点由 openapi-to-rust 生成(2026-11-18 纳入,
+    // 装配层 relay::RelayService 实现生成 trait;/v1/{*path} 通配兜底是
+    // OpenAPI 表达不了的形态,保留手写)。中间件链(外→内):
+    // auth_middleware 验证并塞 extensions → relay_scope 取出连同请求头
+    // 放 task_local → problem_to_vendor_error 把生成校验链的 problem+json
+    // 错误体改写为厂商格式(管线自产错误本就是厂商格式,原样放行)。
+    let relay_routes = aikun_openapi::openapi::server::router::proxy_api_router(
+        relay::RelayService(state.clone()),
+    )
+    // 白名单外路径 404(白名单见 passthrough.rs;显式路由优先于通配)。
+    // 通配 handler 吃 State<AppState>,独立建 Router 后供给 state 再 merge。
+    .merge(
+        Router::new()
+            .route("/v1/{*path}", post(api::proxy::passthrough::passthrough))
+            .with_state(state.clone()),
+    )
+    .layer(middleware::from_fn(relay::problem_to_vendor_error))
+    .layer(middleware::from_fn(relay::relay_scope))
+    .layer(middleware::from_fn_with_state(
+        state.clone(),
+        auth_middleware,
+    ));
 
     // Spawn the health check background task under a supervisor: if the loop
     // ever panics or exits, log it and restart after a short backoff so
@@ -305,7 +313,7 @@ async fn async_main() {
             async move { svc.static_fallback(req).await }
         })
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(());
 
     // CORS:默认不加层(仅同源);仅当 CORS_ALLOWED_ORIGINS 设置了白名单时放行。
     if !config.cors_allowed_origins.is_empty() {

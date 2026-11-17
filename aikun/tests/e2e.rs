@@ -322,6 +322,71 @@ async fn v1_requires_api_key() {
     assert_eq!(resp.unwrap().status(), 401);
 }
 
+/// /v1 生成化(2026-11-18)后的新行为锁定:非法 JSON 经生成校验链产生
+/// problem+json,装配层中间件改写为 OpenAI 厂商错误形状(手写时代是
+/// axum 默认 text/plain 400,见 CHANGELOG)。
+#[tokio::test]
+async fn malformed_json_returns_vendor_error_shape() {
+    let app = TestApp::spawn().await;
+    let user = app.seed_user_funded().await;
+    let resp = app
+        .client()
+        .post(format!("{}/v1/chat/completions", app.base))
+        .header("content-type", "application/json")
+        .body("{not valid json")
+        .bearer_auth(&user.api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "invalid_request_error", "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| !m.is_empty()),
+        "{body}"
+    );
+}
+
+/// /v1 生成化(2026-11-18)后的透传回归:混合宽松 schema 的核心字段之外,
+/// 顶层扩展字段(OpenAI 兼容生态的典型形态)必须经生成层的
+/// #[serde(flatten)] 原样到达上游——漏写 additionalProperties 的层会静默
+/// 丢字段,此用例是防回归锚点。
+#[tokio::test]
+async fn openai_top_level_extension_fields_survive_generated_layer() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    let user = app.seed_user_funded().await;
+    seed_openai_provider(&app, &mock, "p1").await;
+
+    let resp = app
+        .client()
+        .post(format!("{}/v1/chat/completions", app.base))
+        .json(&json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high",
+            "enable_thinking": {"type": "enabled"}
+        }))
+        .bearer_auth(&user.api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let sent = mock
+        .requests()
+        .iter()
+        .find(|r| r.path == "/v1/chat/completions")
+        .map(|r| serde_json::from_str::<Value>(&r.body).unwrap())
+        .expect("upstream request recorded");
+    assert_eq!(sent["reasoning_effort"], "high", "{sent}");
+    assert_eq!(sent["enable_thinking"]["type"], "enabled", "{sent}");
+    assert_eq!(sent["model"], "gpt-4", "{sent}");
+    assert_eq!(sent["messages"][0]["content"], "hi", "{sent}");
+}
+
 #[tokio::test]
 async fn upstream_401_auto_disables_channel() {
     let mock = MockUpstream::start().await;
