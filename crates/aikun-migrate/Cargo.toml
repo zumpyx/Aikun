@@ -1,0 +1,24 @@
+[package]
+name = "aikun-migrate"
+version = "0.5.0"
+edition = "2024"
+description = "SQLite → SurrealDB 存量数据迁移工具(阶段 S):读旧 aikun.db 全表,按 docs/surreal-migration.md §五 的字段映射写入 SurrealDB;幂等可重跑,完成后打印各表行数对照。SQLite 读能力随默认切换收口到本 crate(主二进制已去 rusqlite 依赖)。"
+publish = false
+
+[[bin]]
+name = "aikun-migrate"
+path = "src/main.rs"
+
+[dependencies]
+# 连接/schema/域实现与 SurrealQL 类型(RecordId / SurrealValue)
+aikun-store = { path = "../aikun-store" }
+surrealdb = { version = "4.0.1", features = ["kv-surrealkv", "kv-mem", "protocol-http"] }
+
+# 旧库读取(只读连接;schema 迁移逻辑不随迁——源库必须已在最终版本)
+rusqlite = { version = "0.34", features = ["bundled"] }
+
+serde_json = "1"
+chrono = "0.4"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

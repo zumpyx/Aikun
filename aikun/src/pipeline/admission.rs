@@ -45,25 +45,22 @@ impl Drop for ConcurrencyGuard {
 /// Per-API-key 限流/日额度/并发检查。返回 Err(message) 表示应以 429 拒绝;
 /// Ok(guard) 携带并发槽位(未配置并发上限时为 None),调用方须把 guard
 /// 持有到请求完全结束。
-/// 限额配置与当日已用 token 在 blocking 线程一次取回(仓储层
-/// `KeyUsage` 能力:日用量读 api_key_usage_daily 计数器点查,与记账同
-/// 事务维护——roadmap 阶段 3,替代 request_logs SUM 子查询);RPM 用内存
-/// 滑动窗口(key 为 api_keys.id)。查询失败时放行——key 刚通过认证,
-/// 行必然存在,瞬时的锁/IO 失败不应打断流量。
+/// 限额配置与当日已用 token 经 Surreal 计费域一次取回(日用量读
+/// api_key_usage_daily 计数器点查,与记账同事务维护——roadmap 阶段 3,
+/// 替代 request_logs SUM 子查询);RPM 用内存滑动窗口(key 为 api_keys.id)。
+/// 查询失败时放行——key 刚通过认证,行必然存在,瞬时的存储失败不应
+/// 打断流量。阶段 S:async 化翻转后直接 await(docs/surreal-migration.md
+/// §六),不再经 blocking 线程中转。
 pub(crate) async fn enforce_key_limits(
     state: &AppState,
     key_id: &str,
 ) -> Result<Option<ConcurrencyGuard>, String> {
-    let pool = state.pool.clone();
-    let key = key_id.to_string();
-    let limits = tokio::task::spawn_blocking(move || {
-        use aikun_store::KeyUsage as _;
-        pool.key_limits_and_usage(&key, chrono::Utc::now().date_naive())
-            .ok()
-    })
-    .await
-    .ok()
-    .flatten();
+    let limits = state
+        .store
+        .billing
+        .key_limits_and_usage(key_id, chrono::Utc::now().date_naive())
+        .await
+        .ok();
 
     let Some(snapshot) = limits else {
         // fail-open 必须留信号:DB 故障(锁竞争/IO)会持续走这个分支,
@@ -132,32 +129,21 @@ pub(crate) async fn enforce_key_limits(
 }
 
 /// 余额预检:balance > 0 才放行。查询失败按放行处理(与 enforce_key_limits
-/// 同为 fail-open):瞬时的锁/IO 失败不应打断流量,余额口径以扣费落库为准。
+/// 同为 fail-open):瞬时的存储失败不应打断流量,余额口径以扣费落库为准。
 pub(crate) async fn has_positive_balance(state: &AppState, user_id: &str) -> bool {
-    let pool = state.pool.clone();
-    let uid = user_id.to_string();
-    let uid_log = uid.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        pool.read().lock().ok().and_then(|conn| {
-            conn.query_row(
-                "SELECT balance > 0 FROM users WHERE id = ?1",
-                rusqlite::params![uid],
-                |row| row.get::<_, bool>(0),
-            )
-            .ok()
-        })
-    })
-    .await
-    .ok()
-    .flatten();
+    let result = state
+        .store
+        .identity
+        .find_user(user_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|u| u.balance_micro > 0);
     match result {
         Some(positive) => positive,
         None => {
-            // fail-open 同样要留信号:DB 故障期间余额拦截形同虚设。
-            warn!(
-                "Balance precheck failed for user {}, allowing request (fail-open)",
-                uid_log
-            );
+            // fail-open 同样要留信号:存储故障期间余额拦截形同虚设。
+            warn!("Balance precheck failed for user {user_id}, allowing request (fail-open)");
             true
         }
     }

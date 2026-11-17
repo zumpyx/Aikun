@@ -140,19 +140,25 @@ pub struct LoginUserRecord {
 /// 过渡期登录端口(装配层实现,复用二进制 crate 的 db/auth 模块)。
 /// unit Err 是刻意的:错误细节不进登录路径(防泄漏),可观测性走
 /// `tracing::error!`。
+///
+/// 阶段 S async 化(docs/surreal-migration.md §六):端口随装配适配器
+/// 翻转为 `#[async_trait]`(SurrealDB SDK 全 async;sync 端口内部
+/// block_on 在 async 上下文 panic/死锁,否)。`dummy_password_hash`
+/// 是纯静态值,保持 sync。
 #[allow(clippy::result_unit_err)]
+#[async_trait::async_trait]
 pub trait AuthStore: Send + Sync + 'static {
-    /// Err(()) = 存储不可用(如连接锁中毒)——旧实现此处回 500,但生成
+    /// Err(()) = 存储不可用(如连接失败)——旧实现此处回 500,但生成
     /// 响应枚举无 5xx 变体,登录路径按 fail-closed 401 处理并打 error 日志
     /// (spec 缺口已记 api-mapping/playbook,待人工裁决)。
     /// 查询错误与"用户不存在"一律 Ok(None)(旧实现 `.ok()` 语义,统一 401)。
-    fn find_login_user(&self, username: &str) -> Result<Option<LoginUserRecord>, ()>;
+    async fn find_login_user(&self, username: &str) -> Result<Option<LoginUserRecord>, ()>;
     /// Argon2 校验(CPU 密集;由 impl 侧派发到 blocking 线程池)。
-    fn verify_password(&self, password: &str, hash: &str) -> bool;
+    async fn verify_password(&self, password: &str, hash: &str) -> bool;
     /// 账号枚举防护:未知用户名也跑一次的 dummy PHC hash。
     fn dummy_password_hash(&self) -> &'static str;
     /// 签发 JWT(sub/username/role/token_version);Err → fail-closed 401。
-    fn create_token(&self, user: &LoginUserRecord) -> Result<String, ()>;
+    async fn create_token(&self, user: &LoginUserRecord) -> Result<String, ()>;
 }
 
 // ---------- 服务 ----------
@@ -276,29 +282,24 @@ impl<S: AuthStore> AuthService<S> {
             return self.too_many_requests(&user_key);
         }
 
-        let found = self.store.find_login_user(&body.username);
+        let found = self.store.find_login_user(&body.username).await;
 
         // Verify the password regardless of whether the user exists, so unknown
-        // usernames cost the same Argon2 run (no timing oracle). Argon2 is
-        // CPU-bound, so it runs on the blocking thread pool.
+        // usernames cost the same Argon2 run (no timing oracle)。Argon2 的
+        // blocking 派发在端口 impl 侧(async 化翻转后服务层直接 await)。
         let (user, password_ok) = match found {
             Ok(Some(rec)) => {
-                let store = Arc::clone(&self.store);
                 let password = body.password.clone();
                 let hash = rec.password_hash.clone();
-                let ok =
-                    tokio::task::spawn_blocking(move || store.verify_password(&password, &hash))
-                        .await
-                        .unwrap_or(false);
+                let ok = self.store.verify_password(&password, &hash).await;
                 (Some(rec), ok)
             }
             Ok(None) => {
-                let store = Arc::clone(&self.store);
                 let password = body.password.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    let _ = store.verify_password(&password, store.dummy_password_hash());
-                })
-                .await;
+                let _ = self
+                    .store
+                    .verify_password(&password, self.store.dummy_password_hash())
+                    .await;
                 (None, false)
             }
             // 存储不可用:旧实现回 500,但 LoginServerResponse 无 5xx 变体
@@ -342,7 +343,7 @@ impl<S: AuthStore> AuthService<S> {
             ));
         }
 
-        match self.store.create_token(&rec) {
+        match self.store.create_token(&rec).await {
             Ok(token) => {
                 // 只清该用户的失败记录;ip: 键保留,防止借成功登录重置 IP 限额。
                 self.clear_failures(&[user_key]);

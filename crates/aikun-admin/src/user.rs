@@ -257,21 +257,25 @@ pub type PriceTriple = (f64, f64, Option<f64>);
 
 /// 过渡期 User tag 存储端口(装配层实现,复用二进制 db 模块;适配器写
 /// main.rs,由集成工人装配)。`Err(())` = 存储不可用(如连接锁中毒)。
+/// 阶段 S async 化(docs/surreal-migration.md §六):端口随装配适配器
+/// 翻转 `#[async_trait]`;纯计算方法(generate_api_key_material /
+/// hash_code)保持 sync。
 #[allow(clippy::result_unit_err)]
+#[async_trait::async_trait]
 pub trait UserStore: Send + Sync + 'static {
     /// 按 id 查用户行(含余额)。Ok(None) = 不存在。
-    fn find_user_with_balance(&self, user_id: &str) -> Result<Option<UserBalanceRecord>, ()>;
+    async fn find_user_with_balance(&self, user_id: &str) -> Result<Option<UserBalanceRecord>, ()>;
 
     /// 生成 key 材料(id、明文 sk-…、sha256 哈希、明文后 4 位)。
     /// uuid/sha2 依赖在装配层(aikun-admin 不引入)。
     fn generate_api_key_material(&self) -> (String, String, String, String);
 
     /// 插入新 key 并回读(含 DB 默认 created_at)。Err(()) = 插入失败。
-    fn insert_api_key(&self, row: &NewApiKey) -> Result<ApiKeyRecord, ()>;
+    async fn insert_api_key(&self, row: &NewApiKey) -> Result<ApiKeyRecord, ()>;
 
     /// 列指定用户的 key(admin 跨用户时 target 为他人)。
     /// 返回 (total, 页);ORDER BY created_at DESC。
-    fn list_api_keys(
+    async fn list_api_keys(
         &self,
         target_user_id: &str,
         limit: i64,
@@ -281,7 +285,7 @@ pub trait UserStore: Send + Sync + 'static {
     /// 部分更新 + 回读。`owner` = Some(uid) 时 SQL 附加属主过滤
     /// (非 admin 改他人 key 影响行数为 0 → 404,不暴露存在性)。
     /// Ok(None) = 未命中;Err(()) = 存储不可用/更新失败。
-    fn update_api_key(
+    async fn update_api_key(
         &self,
         key_id: &str,
         owner: Option<&str>,
@@ -289,11 +293,11 @@ pub trait UserStore: Send + Sync + 'static {
     ) -> Result<Option<ApiKeyRecord>, ()>;
 
     /// 删除(带属主过滤);返回受影响行数。
-    fn delete_api_key(&self, key_id: &str, owner: Option<&str>) -> Result<i64, ()>;
+    async fn delete_api_key(&self, key_id: &str, owner: Option<&str>) -> Result<i64, ()>;
 
     /// 日志列表(LEFT JOIN users/providers;ORDER BY created_at DESC
     /// LIMIT ? OFFSET ?)。返回 (total, 页)。
-    fn query_logs(
+    async fn query_logs(
         &self,
         filters: &LogFilters,
         limit: i64,
@@ -301,14 +305,14 @@ pub trait UserStore: Send + Sync + 'static {
     ) -> Result<(i64, Vec<LogRecord>), ()>;
 
     /// 日志统计(与列表共用 filters)。
-    fn query_log_stats(&self, filters: &LogFilters) -> Result<LogStatsRaw, ()>;
+    async fn query_log_stats(&self, filters: &LogFilters) -> Result<LogStatsRaw, ()>;
 
     /// 钱包快照:`since_date`(含)起的每日序列 + 模型分布 + 当前余额。
-    fn wallet_snapshot(&self, user_id: &str, since_date: &str) -> Result<WalletSnapshot, ()>;
+    async fn wallet_snapshot(&self, user_id: &str, since_date: &str) -> Result<WalletSnapshot, ()>;
 
     /// 在售价目:健康渠道提供的全部模型(已排序)逐个经 find_price 展开。
     /// None = 未定价(三价出 null)。
-    fn available_prices(&self) -> Result<Vec<(String, Option<PriceTriple>)>, ()>;
+    async fn available_prices(&self) -> Result<Vec<(String, Option<PriceTriple>)>, ()>;
 
     /// sha256(code)(十六进制);依赖在装配层。
     fn hash_code(&self, code: &str) -> String;
@@ -318,7 +322,7 @@ pub trait UserStore: Send + Sync + 'static {
     /// 判竞争:并发兑换同一码只有一方生效。
     /// Ok(None) = 无效/已用/已禁用/已过期(不细分,防枚举)。
     /// Ok(Some((amount_micro, balance_after_micro))) = 成功。
-    fn redeem(&self, user_id: &str, code_hash: &str) -> Result<Option<(i64, i64)>, ()>;
+    async fn redeem(&self, user_id: &str, code_hash: &str) -> Result<Option<(i64, i64)>, ()>;
 }
 
 // ---------- 服务 ----------
@@ -471,17 +475,6 @@ impl<S: UserStore> UserService<S> {
         }
     }
 
-    /// 端口调用统一派发 blocking 线程池(持锁/扫描不占 async executor;
-    /// join 失败(适配器 panic)按存储不可用处理)。
-    async fn blocking<T, F>(&self, f: F) -> Option<T>
-    where
-        F: FnOnce(&S) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        let store = Arc::clone(&self.store);
-        tokio::task::spawn_blocking(move || f(&store)).await.ok()
-    }
-
     // ---- 兑换限流(内存滑动窗口;与登录限流同构) ----
 
     fn redeem_limited(&self, user_id: &str) -> bool {
@@ -569,9 +562,11 @@ impl<S: UserStore> UserApi for UserService<S> {
         };
         // 旧行为:任何查询错误(含锁中毒)→ 404;保持(见文件头)。
         let found = self
-            .blocking(move |s| s.find_user_with_balance(&auth.user_id))
+            .store
+            .find_user_with_balance(&auth.user_id)
             .await
-            .and_then(|r| r.ok().flatten());
+            .ok()
+            .flatten();
         match found {
             Some(rec) => GetCurrentUserResponse::Ok(UserWithBalance {
                 balance: micro_to_yuan(rec.balance_micro),
@@ -624,11 +619,7 @@ impl<S: UserStore> UserApi for UserService<S> {
             auth.user_id.clone()
         };
         let (limit, offset) = clamp_page(limit, offset);
-        match self
-            .blocking(move |s| s.list_api_keys(&target, limit, offset))
-            .await
-            .and_then(|r| r.ok())
-        {
+        match self.store.list_api_keys(&target, limit, offset).await.ok() {
             Some((total, records)) => ListApiKeysResponse::Ok(ApiKeyPage {
                 items: records.iter().map(to_api_key).collect(),
                 total,
@@ -676,11 +667,7 @@ impl<S: UserStore> UserApi for UserService<S> {
             quota_daily_tokens: body.quota_daily_tokens.unwrap_or(0).max(0),
             max_concurrent: body.max_concurrent.unwrap_or(0).max(0),
         };
-        match self
-            .blocking(move |s| s.insert_api_key(&row))
-            .await
-            .and_then(|r| r.ok())
-        {
+        match self.store.insert_api_key(&row).await.ok() {
             Some(rec) => CreateApiKeyResponse::Created(ApiKeyCreated {
                 created_at: crate::sqlite_utc(&rec.created_at),
                 expires_at: opt_sqlite_time(&rec.expires_at),
@@ -765,9 +752,10 @@ impl<S: UserStore> UserApi for UserService<S> {
         };
         let key_id = id.clone();
         match self
-            .blocking(move |s| s.update_api_key(&key_id, owner.as_deref(), &updates))
+            .store
+            .update_api_key(&key_id, owner.as_deref(), &updates)
             .await
-            .and_then(|r| r.ok())
+            .ok()
         {
             Some(Some(rec)) => UpdateApiKeyResponse::Ok(to_api_key(&rec)),
             Some(None) => UpdateApiKeyResponse::NotFound(problem(404, "not_found", "资源不存在")),
@@ -793,9 +781,10 @@ impl<S: UserStore> UserApi for UserService<S> {
         };
         let key_id = id.clone();
         let deleted = self
-            .blocking(move |s| s.delete_api_key(&key_id, owner.as_deref()))
+            .store
+            .delete_api_key(&key_id, owner.as_deref())
             .await
-            .and_then(|r| r.ok());
+            .ok();
         match deleted {
             Some(n) if n > 0 => {
                 // 清内存 RPM 滑动窗口死条目(窗口只在 key 自身有请求时才
@@ -842,11 +831,7 @@ impl<S: UserStore> UserApi for UserService<S> {
             user_id,
             since,
         );
-        match self
-            .blocking(move |s| s.query_logs(&filters, limit, offset))
-            .await
-            .and_then(|r| r.ok())
-        {
+        match self.store.query_logs(&filters, limit, offset).await.ok() {
             Some((total, records)) => ListLogsResponse::Ok(LogPage {
                 items: records.into_iter().map(to_api_log).collect(),
                 total,
@@ -882,11 +867,7 @@ impl<S: UserStore> UserApi for UserService<S> {
             user_id,
             since,
         );
-        match self
-            .blocking(move |s| s.query_log_stats(&filters))
-            .await
-            .and_then(|r| r.ok())
-        {
+        match self.store.query_log_stats(&filters).await.ok() {
             Some(raw) => GetLogStatsResponse::Ok(LogStats {
                 total_requests: raw.total_requests,
                 total_tokens: raw.total_tokens,
@@ -918,10 +899,7 @@ impl<S: UserStore> UserApi for UserService<S> {
         let month_s = fmt(today - chrono::Duration::days(29));
 
         let uid = auth.user_id.clone();
-        let snapshot = self
-            .blocking(move |s| s.wallet_snapshot(&uid, &month_s))
-            .await
-            .and_then(|r| r.ok());
+        let snapshot = self.store.wallet_snapshot(&uid, &month_s).await.ok();
         let Some(snap) = snapshot else {
             tracing::error!("get_wallet_stats: store unavailable (db lock poisoned?)");
             // 枚举只有 Unauthorized 变体(文件头):退 401 + internal_error。
@@ -1017,11 +995,7 @@ impl<S: UserStore> UserApi for UserService<S> {
             return invalid();
         }
         let code_hash = self.store.hash_code(&code);
-        let uid_for_db = uid.clone();
-        let redeemed = self
-            .blocking(move |s| s.redeem(&uid_for_db, &code_hash))
-            .await
-            .and_then(|r| r.ok());
+        let redeemed = self.store.redeem(&uid, &code_hash).await.ok();
         match redeemed {
             Some(Some((amount_micro, balance_micro))) => {
                 self.clear_redeem_failures(&uid);
@@ -1054,10 +1028,7 @@ impl<S: UserStore> UserApi for UserService<S> {
             return ListPublicPricesResponse::Unauthorized(invalid_token());
         }
         let (limit, offset) = clamp_page(limit, offset);
-        let prices = self
-            .blocking(|s| s.available_prices())
-            .await
-            .and_then(|r| r.ok());
+        let prices = self.store.available_prices().await.ok();
         match prices {
             Some(rows) => {
                 let total = rows.len() as i64;

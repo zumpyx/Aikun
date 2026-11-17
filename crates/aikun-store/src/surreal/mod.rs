@@ -251,7 +251,8 @@ impl SurrealHandle {
             return Err(newer_schema_error(v));
         }
 
-        // DDL 全量幂等执行(重复定义同名字段/索引为 no-op)。
+        // DDL 全量幂等执行(IF NOT EXISTS:嵌入式引擎的 DEFINE 对已存在
+        // 对象报错——集成批实测二次启动"table already exists"后落的修)。
         // 语句级错误经 check() 带出。
         self.db
             .query(SCHEMA_SURQL)
@@ -313,163 +314,166 @@ impl SurrealHandle {
 /// `docs/surreal-migration.md` §五——迁移工具按映射搬运,不逐表复制。
 pub const SCHEMA_SURQL: &str = r#"
     // ---- 元数据(版本闸门) ----
-    DEFINE TABLE store_meta SCHEMAFULL;
-    DEFINE FIELD version ON TABLE store_meta TYPE int;
-    DEFINE FIELD applied_at ON TABLE store_meta TYPE option<datetime>;
+    DEFINE TABLE IF NOT EXISTS store_meta SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS version ON TABLE store_meta TYPE int;
+    DEFINE FIELD IF NOT EXISTS applied_at ON TABLE store_meta TYPE option<datetime>;
 
     // ---- 用户(余额:整数微元,红线) ----
-    DEFINE TABLE user SCHEMAFULL;
-    DEFINE FIELD username ON TABLE user TYPE string;
-    DEFINE FIELD password_hash ON TABLE user TYPE string;
-    DEFINE FIELD display_name ON TABLE user TYPE string DEFAULT '';
-    DEFINE FIELD role ON TABLE user TYPE string DEFAULT 'user';
-    DEFINE FIELD is_active ON TABLE user TYPE bool DEFAULT true;
-    DEFINE FIELD token_version ON TABLE user TYPE int DEFAULT 0;
-    DEFINE FIELD balance ON TABLE user TYPE int DEFAULT 0;
-    DEFINE FIELD created_at ON TABLE user TYPE datetime DEFAULT time::now();
-    DEFINE FIELD updated_at ON TABLE user TYPE datetime DEFAULT time::now();
-    DEFINE INDEX unique_user_username ON TABLE user FIELDS username UNIQUE;
+    DEFINE TABLE IF NOT EXISTS user SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS username ON TABLE user TYPE string;
+    DEFINE FIELD IF NOT EXISTS password_hash ON TABLE user TYPE string;
+    DEFINE FIELD IF NOT EXISTS display_name ON TABLE user TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS role ON TABLE user TYPE string DEFAULT 'user';
+    DEFINE FIELD IF NOT EXISTS is_active ON TABLE user TYPE bool DEFAULT true;
+    DEFINE FIELD IF NOT EXISTS token_version ON TABLE user TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS balance ON TABLE user TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS created_at ON TABLE user TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS updated_at ON TABLE user TYPE datetime DEFAULT time::now();
+    DEFINE INDEX IF NOT EXISTS unique_user_username ON TABLE user FIELDS username UNIQUE;
 
     // ---- API key(key = sha256 十六进制;明文仅创建时返回一次) ----
-    DEFINE TABLE api_key SCHEMAFULL;
-    DEFINE FIELD user ON TABLE api_key TYPE record<user>;
-    DEFINE FIELD key ON TABLE api_key TYPE string;
-    DEFINE FIELD key_suffix ON TABLE api_key TYPE string DEFAULT '';
-    DEFINE FIELD name ON TABLE api_key TYPE string DEFAULT '';
-    DEFINE FIELD is_active ON TABLE api_key TYPE bool DEFAULT true;
-    DEFINE FIELD last_used_at ON TABLE api_key TYPE option<datetime>;
-    DEFINE FIELD expires_at ON TABLE api_key TYPE option<datetime>;
-    DEFINE FIELD models ON TABLE api_key TYPE array<string> DEFAULT [];
-    DEFINE FIELD rate_limit_rpm ON TABLE api_key TYPE int DEFAULT 0;
-    DEFINE FIELD quota_daily_tokens ON TABLE api_key TYPE int DEFAULT 0;
-    DEFINE FIELD max_concurrent ON TABLE api_key TYPE int DEFAULT 0;
-    DEFINE FIELD created_at ON TABLE api_key TYPE datetime DEFAULT time::now();
-    DEFINE INDEX unique_api_key_key ON TABLE api_key FIELDS key UNIQUE;
-    DEFINE INDEX idx_api_key_user ON TABLE api_key FIELDS user;
+    DEFINE TABLE IF NOT EXISTS api_key SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS user ON TABLE api_key TYPE record<user>;
+    DEFINE FIELD IF NOT EXISTS key ON TABLE api_key TYPE string;
+    DEFINE FIELD IF NOT EXISTS key_suffix ON TABLE api_key TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS name ON TABLE api_key TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS is_active ON TABLE api_key TYPE bool DEFAULT true;
+    DEFINE FIELD IF NOT EXISTS last_used_at ON TABLE api_key TYPE option<datetime>;
+    DEFINE FIELD IF NOT EXISTS expires_at ON TABLE api_key TYPE option<datetime>;
+    DEFINE FIELD IF NOT EXISTS models ON TABLE api_key TYPE array<string> DEFAULT [];
+    DEFINE FIELD IF NOT EXISTS rate_limit_rpm ON TABLE api_key TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS quota_daily_tokens ON TABLE api_key TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS max_concurrent ON TABLE api_key TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS created_at ON TABLE api_key TYPE datetime DEFAULT time::now();
+    DEFINE INDEX IF NOT EXISTS unique_api_key_key ON TABLE api_key FIELDS key UNIQUE;
+    DEFINE INDEX IF NOT EXISTS idx_api_key_user ON TABLE api_key FIELDS user;
 
     // ---- 渠道(provider_type 保留:openapi.yaml 冻结契约的必填字段,
     //      openapi.yaml Provider schema required 列表含 provider_type;
     //      api_key 为 enc:v1: 密文,key_hash 为明文 key 的 sha256,
     //      供跨批次重复检测——密文随机 nonce 无法直接比对) ----
-    DEFINE TABLE provider SCHEMAFULL;
-    DEFINE FIELD name ON TABLE provider TYPE string;
-    DEFINE FIELD provider_type ON TABLE provider TYPE string DEFAULT 'openai';
-    DEFINE FIELD channel_kind ON TABLE provider TYPE string DEFAULT '';
-    DEFINE FIELD openai_base_url ON TABLE provider TYPE string;
-    DEFINE FIELD anthropic_base_url ON TABLE provider TYPE string DEFAULT '';
-    DEFINE FIELD api_key ON TABLE provider TYPE string DEFAULT '';
-    DEFINE FIELD key_hash ON TABLE provider TYPE string DEFAULT '';
-    DEFINE FIELD models ON TABLE provider TYPE array<string> DEFAULT [];
-    DEFINE FIELD model_mapping ON TABLE provider TYPE object DEFAULT {};
-    DEFINE FIELD protocols ON TABLE provider TYPE array<string> DEFAULT [];
-    DEFINE FIELD default_protocol ON TABLE provider TYPE string DEFAULT '';
-    DEFINE FIELD priority ON TABLE provider TYPE int DEFAULT 0;
-    DEFINE FIELD weight ON TABLE provider TYPE float DEFAULT 1.0;
-    DEFINE FIELD is_active ON TABLE provider TYPE bool DEFAULT true;
-    DEFINE FIELD health_status ON TABLE provider TYPE string DEFAULT 'unknown';
-    DEFINE FIELD latency_ms ON TABLE provider TYPE float DEFAULT 0.0;
-    DEFINE FIELD error_rate ON TABLE provider TYPE float DEFAULT 0.0;
-    DEFINE FIELD last_health_check ON TABLE provider TYPE option<datetime>;
-    DEFINE FIELD consecutive_failures ON TABLE provider TYPE int DEFAULT 0;
-    DEFINE FIELD disabled_reason ON TABLE provider TYPE string DEFAULT '';
-    DEFINE FIELD max_retries ON TABLE provider TYPE int DEFAULT 3;
-    DEFINE FIELD timeout_secs ON TABLE provider TYPE int DEFAULT 120;
-    DEFINE FIELD proxy_url ON TABLE provider TYPE string DEFAULT '';
-    DEFINE FIELD note ON TABLE provider TYPE string DEFAULT '';
-    DEFINE FIELD website_url ON TABLE provider TYPE string DEFAULT '';
-    DEFINE FIELD created_at ON TABLE provider TYPE datetime DEFAULT time::now();
-    DEFINE FIELD updated_at ON TABLE provider TYPE datetime DEFAULT time::now();
-    DEFINE INDEX idx_provider_key_hash ON TABLE provider FIELDS key_hash;
-    DEFINE INDEX idx_provider_health ON TABLE provider FIELDS health_status;
+    DEFINE TABLE IF NOT EXISTS provider SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS name ON TABLE provider TYPE string;
+    DEFINE FIELD IF NOT EXISTS provider_type ON TABLE provider TYPE string DEFAULT 'openai';
+    DEFINE FIELD IF NOT EXISTS channel_kind ON TABLE provider TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS openai_base_url ON TABLE provider TYPE string;
+    DEFINE FIELD IF NOT EXISTS anthropic_base_url ON TABLE provider TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS api_key ON TABLE provider TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS key_hash ON TABLE provider TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS models ON TABLE provider TYPE array<string> DEFAULT [];
+    // FLEXIBLE(集成批落定,原桩 TODO):schemafull 非灵活 object 拒绝一切
+    // 未定义子键,而映射 key 是任意模型名无法枚举成 DDL;FLEXIBLE 置于
+    // 类型之后(4.0.1 实测 `TYPE FLEXIBLE object` 语法错)。
+    DEFINE FIELD IF NOT EXISTS model_mapping ON TABLE provider TYPE object FLEXIBLE DEFAULT {};
+    DEFINE FIELD IF NOT EXISTS protocols ON TABLE provider TYPE array<string> DEFAULT [];
+    DEFINE FIELD IF NOT EXISTS default_protocol ON TABLE provider TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS priority ON TABLE provider TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS weight ON TABLE provider TYPE float DEFAULT 1.0;
+    DEFINE FIELD IF NOT EXISTS is_active ON TABLE provider TYPE bool DEFAULT true;
+    DEFINE FIELD IF NOT EXISTS health_status ON TABLE provider TYPE string DEFAULT 'unknown';
+    DEFINE FIELD IF NOT EXISTS latency_ms ON TABLE provider TYPE float DEFAULT 0.0;
+    DEFINE FIELD IF NOT EXISTS error_rate ON TABLE provider TYPE float DEFAULT 0.0;
+    DEFINE FIELD IF NOT EXISTS last_health_check ON TABLE provider TYPE option<datetime>;
+    DEFINE FIELD IF NOT EXISTS consecutive_failures ON TABLE provider TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS disabled_reason ON TABLE provider TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS max_retries ON TABLE provider TYPE int DEFAULT 3;
+    DEFINE FIELD IF NOT EXISTS timeout_secs ON TABLE provider TYPE int DEFAULT 120;
+    DEFINE FIELD IF NOT EXISTS proxy_url ON TABLE provider TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS note ON TABLE provider TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS website_url ON TABLE provider TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS created_at ON TABLE provider TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS updated_at ON TABLE provider TYPE datetime DEFAULT time::now();
+    DEFINE INDEX IF NOT EXISTS idx_provider_key_hash ON TABLE provider FIELDS key_hash;
+    DEFINE INDEX IF NOT EXISTS idx_provider_health ON TABLE provider FIELDS health_status;
 
     // ---- 请求日志(高频追加;关联为 record 链接,软外键语义见文件头) ----
-    DEFINE TABLE request_log SCHEMAFULL;
-    DEFINE FIELD user ON TABLE request_log TYPE option<record<user>>;
-    DEFINE FIELD api_key ON TABLE request_log TYPE option<record<api_key>>;
-    DEFINE FIELD provider ON TABLE request_log TYPE option<record<provider>>;
-    DEFINE FIELD model ON TABLE request_log TYPE string;
-    DEFINE FIELD request_type ON TABLE request_log TYPE string DEFAULT 'chat';
-    DEFINE FIELD prompt_tokens ON TABLE request_log TYPE int DEFAULT 0;
-    DEFINE FIELD completion_tokens ON TABLE request_log TYPE int DEFAULT 0;
-    DEFINE FIELD total_tokens ON TABLE request_log TYPE int DEFAULT 0;
-    DEFINE FIELD cached_tokens ON TABLE request_log TYPE int DEFAULT 0;
-    DEFINE FIELD latency_ms ON TABLE request_log TYPE int DEFAULT 0;
-    DEFINE FIELD status_code ON TABLE request_log TYPE int DEFAULT 0;
-    DEFINE FIELD success ON TABLE request_log TYPE bool DEFAULT true;
-    DEFINE FIELD error_message ON TABLE request_log TYPE option<string>;
-    DEFINE FIELD cost ON TABLE request_log TYPE int DEFAULT 0;
-    DEFINE FIELD created_at ON TABLE request_log TYPE datetime DEFAULT time::now();
-    DEFINE INDEX idx_request_log_user ON TABLE request_log FIELDS user;
-    DEFINE INDEX idx_request_log_provider ON TABLE request_log FIELDS provider;
-    DEFINE INDEX idx_request_log_created ON TABLE request_log FIELDS created_at;
-    DEFINE INDEX idx_request_log_key_created ON TABLE request_log FIELDS api_key, created_at;
+    DEFINE TABLE IF NOT EXISTS request_log SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS user ON TABLE request_log TYPE option<record<user>>;
+    DEFINE FIELD IF NOT EXISTS api_key ON TABLE request_log TYPE option<record<api_key>>;
+    DEFINE FIELD IF NOT EXISTS provider ON TABLE request_log TYPE option<record<provider>>;
+    DEFINE FIELD IF NOT EXISTS model ON TABLE request_log TYPE string;
+    DEFINE FIELD IF NOT EXISTS request_type ON TABLE request_log TYPE string DEFAULT 'chat';
+    DEFINE FIELD IF NOT EXISTS prompt_tokens ON TABLE request_log TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS completion_tokens ON TABLE request_log TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS total_tokens ON TABLE request_log TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS cached_tokens ON TABLE request_log TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS latency_ms ON TABLE request_log TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS status_code ON TABLE request_log TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS success ON TABLE request_log TYPE bool DEFAULT true;
+    DEFINE FIELD IF NOT EXISTS error_message ON TABLE request_log TYPE option<string>;
+    DEFINE FIELD IF NOT EXISTS cost ON TABLE request_log TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS created_at ON TABLE request_log TYPE datetime DEFAULT time::now();
+    DEFINE INDEX IF NOT EXISTS idx_request_log_user ON TABLE request_log FIELDS user;
+    DEFINE INDEX IF NOT EXISTS idx_request_log_provider ON TABLE request_log FIELDS provider;
+    DEFINE INDEX IF NOT EXISTS idx_request_log_created ON TABLE request_log FIELDS created_at;
+    DEFINE INDEX IF NOT EXISTS idx_request_log_key_created ON TABLE request_log FIELDS api_key, created_at;
 
     // ---- 模型价格(每 1M tokens 的价格,元;cached 为空 = 按输入价计) ----
-    DEFINE TABLE model_price SCHEMAFULL;
-    DEFINE FIELD model ON TABLE model_price TYPE string;
-    DEFINE FIELD prompt_price ON TABLE model_price TYPE float DEFAULT 0.0;
-    DEFINE FIELD completion_price ON TABLE model_price TYPE float DEFAULT 0.0;
-    DEFINE FIELD cached_price ON TABLE model_price TYPE option<float>;
-    DEFINE FIELD created_at ON TABLE model_price TYPE datetime DEFAULT time::now();
-    DEFINE FIELD updated_at ON TABLE model_price TYPE datetime DEFAULT time::now();
-    DEFINE INDEX unique_model_price_model ON TABLE model_price FIELDS model UNIQUE;
+    DEFINE TABLE IF NOT EXISTS model_price SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS model ON TABLE model_price TYPE string;
+    DEFINE FIELD IF NOT EXISTS prompt_price ON TABLE model_price TYPE float DEFAULT 0.0;
+    DEFINE FIELD IF NOT EXISTS completion_price ON TABLE model_price TYPE float DEFAULT 0.0;
+    DEFINE FIELD IF NOT EXISTS cached_price ON TABLE model_price TYPE option<float>;
+    DEFINE FIELD IF NOT EXISTS created_at ON TABLE model_price TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS updated_at ON TABLE model_price TYPE datetime DEFAULT time::now();
+    DEFINE INDEX IF NOT EXISTS unique_model_price_model ON TABLE model_price FIELDS model UNIQUE;
 
     // ---- 按键字计数器(id = [api_key, date];明细是唯一真相,可重建) ----
-    DEFINE TABLE api_key_usage_daily SCHEMAFULL;
-    DEFINE FIELD api_key ON TABLE api_key_usage_daily TYPE record<api_key>;
-    DEFINE FIELD date ON TABLE api_key_usage_daily TYPE string;
-    DEFINE FIELD tokens_spent ON TABLE api_key_usage_daily TYPE int DEFAULT 0;
-    DEFINE INDEX idx_api_key_usage_daily_date ON TABLE api_key_usage_daily FIELDS date;
+    DEFINE TABLE IF NOT EXISTS api_key_usage_daily SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS api_key ON TABLE api_key_usage_daily TYPE record<api_key>;
+    DEFINE FIELD IF NOT EXISTS date ON TABLE api_key_usage_daily TYPE string;
+    DEFINE FIELD IF NOT EXISTS tokens_spent ON TABLE api_key_usage_daily TYPE int DEFAULT 0;
+    DEFINE INDEX IF NOT EXISTS idx_api_key_usage_daily_date ON TABLE api_key_usage_daily FIELDS date;
 
     // ---- 按用户日汇总(purge 前聚合,余额对账的永久依据) ----
-    DEFINE TABLE usage_daily SCHEMAFULL;
-    DEFINE FIELD user ON TABLE usage_daily TYPE record<user>;
-    DEFINE FIELD date ON TABLE usage_daily TYPE string;
-    DEFINE FIELD requests ON TABLE usage_daily TYPE int DEFAULT 0;
-    DEFINE FIELD tokens ON TABLE usage_daily TYPE int DEFAULT 0;
-    DEFINE FIELD cost ON TABLE usage_daily TYPE int DEFAULT 0;
-    DEFINE INDEX idx_usage_daily_user_date ON TABLE usage_daily FIELDS user, date;
-    DEFINE INDEX idx_usage_daily_date ON TABLE usage_daily FIELDS date;
+    DEFINE TABLE IF NOT EXISTS usage_daily SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS user ON TABLE usage_daily TYPE record<user>;
+    DEFINE FIELD IF NOT EXISTS date ON TABLE usage_daily TYPE string;
+    DEFINE FIELD IF NOT EXISTS requests ON TABLE usage_daily TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS tokens ON TABLE usage_daily TYPE int DEFAULT 0;
+    DEFINE FIELD IF NOT EXISTS cost ON TABLE usage_daily TYPE int DEFAULT 0;
+    DEFINE INDEX IF NOT EXISTS idx_usage_daily_user_date ON TABLE usage_daily FIELDS user, date;
+    DEFINE INDEX IF NOT EXISTS idx_usage_daily_date ON TABLE usage_daily FIELDS date;
 
     // ---- 渠道亲和(id = [api_key, model];渠道删除后残留行选路时自然失效) ----
-    DEFINE TABLE channel_affinity SCHEMAFULL;
-    DEFINE FIELD provider ON TABLE channel_affinity TYPE record<provider>;
-    DEFINE FIELD updated_at ON TABLE channel_affinity TYPE datetime DEFAULT time::now();
+    DEFINE TABLE IF NOT EXISTS channel_affinity SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS provider ON TABLE channel_affinity TYPE record<provider>;
+    DEFINE FIELD IF NOT EXISTS updated_at ON TABLE channel_affinity TYPE datetime DEFAULT time::now();
 
     // ---- 管理员调账流水(amount/balance_after:整数微元,红线) ----
-    DEFINE TABLE billing_transaction SCHEMAFULL;
-    DEFINE FIELD user ON TABLE billing_transaction TYPE record<user>;
-    DEFINE FIELD amount ON TABLE billing_transaction TYPE int;
-    DEFINE FIELD balance_after ON TABLE billing_transaction TYPE int;
-    DEFINE FIELD kind ON TABLE billing_transaction TYPE string;
-    DEFINE FIELD note ON TABLE billing_transaction TYPE string DEFAULT '';
-    DEFINE FIELD created_at ON TABLE billing_transaction TYPE datetime DEFAULT time::now();
-    DEFINE INDEX idx_billing_transaction_user ON TABLE billing_transaction FIELDS user, created_at;
+    DEFINE TABLE IF NOT EXISTS billing_transaction SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS user ON TABLE billing_transaction TYPE record<user>;
+    DEFINE FIELD IF NOT EXISTS amount ON TABLE billing_transaction TYPE int;
+    DEFINE FIELD IF NOT EXISTS balance_after ON TABLE billing_transaction TYPE int;
+    DEFINE FIELD IF NOT EXISTS kind ON TABLE billing_transaction TYPE string;
+    DEFINE FIELD IF NOT EXISTS note ON TABLE billing_transaction TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS created_at ON TABLE billing_transaction TYPE datetime DEFAULT time::now();
+    DEFINE INDEX IF NOT EXISTS idx_billing_transaction_user ON TABLE billing_transaction FIELDS user, created_at;
 
     // ---- 兑换码(库存 sha256(code) 与掩码后缀;amount 面值:微元,红线;
     //      核销事务原子性是红线,见 billing_store.rs) ----
-    DEFINE TABLE redemption_code SCHEMAFULL;
-    DEFINE FIELD code_hash ON TABLE redemption_code TYPE string;
-    DEFINE FIELD code_suffix ON TABLE redemption_code TYPE string DEFAULT '';
-    DEFINE FIELD amount ON TABLE redemption_code TYPE int;
-    DEFINE FIELD batch ON TABLE redemption_code TYPE string DEFAULT '';
-    DEFINE FIELD status ON TABLE redemption_code TYPE string DEFAULT 'unused';
-    DEFINE FIELD used_by ON TABLE redemption_code TYPE option<record<user>>;
-    DEFINE FIELD used_at ON TABLE redemption_code TYPE option<datetime>;
-    DEFINE FIELD expires_at ON TABLE redemption_code TYPE option<datetime>;
-    DEFINE FIELD note ON TABLE redemption_code TYPE string DEFAULT '';
-    DEFINE FIELD created_at ON TABLE redemption_code TYPE datetime DEFAULT time::now();
-    DEFINE INDEX unique_redemption_code_hash ON TABLE redemption_code FIELDS code_hash UNIQUE;
-    DEFINE INDEX idx_redemption_code_batch ON TABLE redemption_code FIELDS batch;
+    DEFINE TABLE IF NOT EXISTS redemption_code SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS code_hash ON TABLE redemption_code TYPE string;
+    DEFINE FIELD IF NOT EXISTS code_suffix ON TABLE redemption_code TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS amount ON TABLE redemption_code TYPE int;
+    DEFINE FIELD IF NOT EXISTS batch ON TABLE redemption_code TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS status ON TABLE redemption_code TYPE string DEFAULT 'unused';
+    DEFINE FIELD IF NOT EXISTS used_by ON TABLE redemption_code TYPE option<record<user>>;
+    DEFINE FIELD IF NOT EXISTS used_at ON TABLE redemption_code TYPE option<datetime>;
+    DEFINE FIELD IF NOT EXISTS expires_at ON TABLE redemption_code TYPE option<datetime>;
+    DEFINE FIELD IF NOT EXISTS note ON TABLE redemption_code TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS created_at ON TABLE redemption_code TYPE datetime DEFAULT time::now();
+    DEFINE INDEX IF NOT EXISTS unique_redemption_code_hash ON TABLE redemption_code FIELDS code_hash UNIQUE;
+    DEFINE INDEX IF NOT EXISTS idx_redemption_code_batch ON TABLE redemption_code FIELDS batch;
 
     // ---- 模型级健康(id = [provider, model]) ----
-    DEFINE TABLE model_health SCHEMAFULL;
-    DEFINE FIELD provider ON TABLE model_health TYPE record<provider>;
-    DEFINE FIELD status ON TABLE model_health TYPE string DEFAULT 'unknown';
-    DEFINE FIELD latency_ms ON TABLE model_health TYPE float DEFAULT 0.0;
-    DEFINE FIELD error ON TABLE model_health TYPE string DEFAULT '';
-    DEFINE FIELD checked_at ON TABLE model_health TYPE option<datetime>;
-    DEFINE INDEX idx_model_health_provider ON TABLE model_health FIELDS provider;
+    DEFINE TABLE IF NOT EXISTS model_health SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS provider ON TABLE model_health TYPE record<provider>;
+    DEFINE FIELD IF NOT EXISTS status ON TABLE model_health TYPE string DEFAULT 'unknown';
+    DEFINE FIELD IF NOT EXISTS latency_ms ON TABLE model_health TYPE float DEFAULT 0.0;
+    DEFINE FIELD IF NOT EXISTS error ON TABLE model_health TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS checked_at ON TABLE model_health TYPE option<datetime>;
+    DEFINE INDEX IF NOT EXISTS idx_model_health_provider ON TABLE model_health FIELDS provider;
 "#;
 
 #[cfg(test)]

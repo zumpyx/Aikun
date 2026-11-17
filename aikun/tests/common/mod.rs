@@ -1,6 +1,10 @@
 //! E2E 测试基建:axum mock 上游 + 拉起真实 aikun 二进制 + DB 夹具。
-//! 不改生产代码结构:测试通过 CARGO_BIN_EXE 启动完整应用(含迁移),
-//! 用 rusqlite 直连临时 SQLite 做夹具注入和异步记账断言。
+//! 不改生产代码结构:测试通过 CARGO_BIN_EXE 启动完整应用。
+//!
+//! 阶段 S 切换过渡:被测二进制已改用 SurrealDB(见 spawn_child 的
+//! AIKUN_SURREAL_URL 注入与 E2E_ADMIN_PASSWORD 检查通道预留);旧的
+//! rusqlite 直连夹具(下方 db())已与服务实际存储脱钩——seed/断言改造
+//! 为管理面 API 通道由下一批统一完成(docs/surreal-migration.md §七)。
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
@@ -211,6 +215,13 @@ pub struct TestApp {
     extra_env: Vec<(String, String)>,
 }
 
+/// e2e 检查通道(阶段 S 预留,docs/surreal-migration.md §七):嵌入式
+/// SurrealKV 数据文件被服务进程独占,测试进程不能像 rusqlite 那样直连
+/// seed/断言——改经管理面 API:spawn 时注入已知 admin 密码
+/// (AIKUN_RESET_ADMIN_PASSWORD,启动即重置)→ 登录拿 JWT → seed 与断言
+/// 全走管理面端点。本批只预留通道;测试改造由下一批统一完成。
+pub const E2E_ADMIN_PASSWORD: &str = "e2e-admin-password-2026";
+
 fn spawn_child(
     dir: &std::path::Path,
     db_path: &std::path::Path,
@@ -222,10 +233,17 @@ fn spawn_child(
         .current_dir(dir)
         .env("AIKUN_HOST", format!("127.0.0.1:{}", port))
         .env("AIKUN_JWT_SECRET", "e2e-test-secret-not-for-production")
+        // 阶段 S 默认切换:被测二进制读 SurrealDB(嵌入式 SurrealKV,
+        // 临时目录);db_path 仅供旧 rusqlite 夹具继续编译,下一批移除。
         .env(
-            "AIKUN_DATABASE_URL",
-            format!("sqlite://{}?mode=rwc", db_path.display()),
+            "AIKUN_SURREAL_URL",
+            format!(
+                "surrealkv://{}/test.surreal",
+                db_path.parent().unwrap().display()
+            ),
         )
+        // 管理面检查通道:已知密码重置 admin,登录 /api/auth/login 拿 JWT
+        .env("AIKUN_RESET_ADMIN_PASSWORD", E2E_ADMIN_PASSWORD)
         .env("AIKUN_HEALTH_CHECK_INTERVAL", "3600")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

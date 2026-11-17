@@ -125,17 +125,14 @@ dependencies = [
 name = "aikun"
 version = "0.5.0"
 dependencies = [
- "aes-gcm 0.10.3",
  "aikun-admin",
  "aikun-channels",
  "aikun-openapi",
  "aikun-protocol",
  "aikun-store",
- "argon2",
  "async-stream",
  "async-trait",
  "axum",
- "base64 0.22.1",
  "chrono",
  "dotenvy",
  "futures-util",
@@ -152,6 +149,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "ulid",
  "uuid",
 ]
 
@@ -179,6 +177,20 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "aikun-migrate"
+version = "0.5.0"
+dependencies = [
+ "aikun-store",
+ "chrono",
+ "rusqlite",
+ "serde_json",
+ "surrealdb",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -219,14 +231,12 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "rand 0.9.5",
- "rusqlite",
  "serde_json",
  "sha2 0.10.9",
  "surrealdb",
  "tokio",
  "tracing",
  "ulid",
- "uuid",
 ]
 
 [[package]]

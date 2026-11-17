@@ -64,17 +64,19 @@ pub struct GlobalCounts {
 /// stats 方法组端口(过渡期由 main.rs 适配器实现,aikun-store 就位后收编)。
 /// 方法是同步的:纯查询 + 进程内互斥锁,单条开销极小(与 AdminUsersStore
 /// 同口径);`Err(())` = 存储不可用(连接锁中毒 / SQL 失败)。
+/// 阶段 S async 化(docs/surreal-migration.md §六):端口随装配适配器
+/// 翻转 `#[async_trait]`。
+#[allow(clippy::result_unit_err)] // 与 crate 内其他端口 trait 同约定
+#[async_trait::async_trait]
 pub trait StatsStore: Send + Sync + 'static {
     /// 近 30 天用量聚合(单查询拆出 today/week/month 三组 + 日序列 +
     /// top 模型;日期口径 `substr(created_at, 1, 10)`,UTC)。
     /// `Err(())` 与 AuthStore/UserStore 同口径:存储不可用,细节只进日志。
-    #[allow(clippy::result_unit_err)] // 与 crate 内其他端口 trait 同约定
-    fn usage_snapshot(&self) -> Result<UsageSnapshot, ()>;
+    async fn usage_snapshot(&self) -> Result<UsageSnapshot, ()>;
 
     /// 全局计数快照:`(SELECT COUNT(*) FROM api_keys) / users / providers
     /// + request_logs 中今日行数(substr 前缀 = date('now'))`。
-    #[allow(clippy::result_unit_err)] // 与 crate 内其他端口 trait 同约定
-    fn global_counts(&self) -> Result<GlobalCounts, ()>;
+    async fn global_counts(&self) -> Result<GlobalCounts, ()>;
 }
 
 // ---------- 服务 ----------
@@ -95,11 +97,10 @@ impl AdminStatsService {
     ///
     /// `GET /api/usage-stats`(旧 GET /api/admin/usage-stats;响应形状不变)
     pub async fn admin_get_usage_stats(&self) -> AdminGetUsageStatsResponse {
-        let store = Arc::clone(&self.store);
-        let snap = match tokio::task::spawn_blocking(move || store.usage_snapshot()).await {
-            Ok(Ok(s)) => s,
-            _ => {
-                tracing::error!("admin_get_usage_stats: store unavailable (db lock poisoned?)");
+        let snap = match self.store.usage_snapshot().await {
+            Ok(s) => s,
+            Err(()) => {
+                tracing::error!("admin_get_usage_stats: store unavailable");
                 return AdminGetUsageStatsResponse::Forbidden(problem(
                     403,
                     "query_failed",
@@ -161,11 +162,10 @@ impl AdminStatsService {
     ///
     /// `GET /api/system/stats`(旧 GET /api/admin/stats;响应形状不变)
     pub async fn admin_get_global_stats(&self) -> AdminGetGlobalStatsResponse {
-        let store = Arc::clone(&self.store);
-        let counts = match tokio::task::spawn_blocking(move || store.global_counts()).await {
-            Ok(Ok(c)) => c,
-            _ => {
-                tracing::error!("admin_get_global_stats: store unavailable (db lock poisoned?)");
+        let counts = match self.store.global_counts().await {
+            Ok(c) => c,
+            Err(()) => {
+                tracing::error!("admin_get_global_stats: store unavailable");
                 return AdminGetGlobalStatsResponse::Forbidden(problem(
                     403,
                     "query_failed",

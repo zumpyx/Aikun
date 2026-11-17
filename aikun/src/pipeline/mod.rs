@@ -51,7 +51,7 @@ pub async fn proxy_completion(
     if model == "unknown" {
         // 缺 model 的 400 也写一条失败日志，保证审计完整
         spawn_request_log(
-            &state.pool,
+            &state,
             claims.sub.clone(),
             auth_ctx.api_key_id.clone(),
             None,
@@ -81,7 +81,7 @@ pub async fn proxy_completion(
     // match when the entry ends with '*' (e.g. "claude-*" allows claude-*).
     if auth_ctx.allowed_models.is_some() && !model_allowed(&auth_ctx.allowed_models, &model) {
         spawn_request_log(
-            &state.pool,
+            &state,
             claims.sub.clone(),
             auth_ctx.api_key_id.clone(),
             None,
@@ -115,7 +115,7 @@ pub async fn proxy_completion(
     if !has_positive_balance(&state, &claims.sub).await {
         let msg = "Insufficient balance: please top up before making more requests".to_string();
         spawn_request_log(
-            &state.pool,
+            &state,
             claims.sub.clone(),
             auth_ctx.api_key_id.clone(),
             None,
@@ -144,7 +144,7 @@ pub async fn proxy_completion(
         match enforce_key_limits(&state, key_id).await {
             Err(msg) => {
                 spawn_request_log(
-                    &state.pool,
+                    &state,
                     claims.sub.clone(),
                     auth_ctx.api_key_id.clone(),
                     None,
@@ -199,7 +199,7 @@ pub async fn proxy_completion(
             client_protocol, model, claims.username
         );
         crate::billing::ledger::record_cache_hit(
-            &state.pool,
+            &state,
             claims.sub.clone(),
             auth_ctx.api_key_id.clone(),
             model.clone(),
@@ -216,16 +216,10 @@ pub async fn proxy_completion(
     // 600s,整体 deadline 若只按全局值算会把它静默截断。取值改走渠道拓扑
     // 快照(roadmap 阶段 3;与旧 SELECT MAX(timeout_secs) WHERE is_active=1
     // 同值),探测/取值仍在 blocking 线程。
-    let max_channel_timeout = {
-        let pool = state.pool.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::channel::registry::shared()
-                .current(&pool)
-                .max_timeout_secs()
-        })
+    let max_channel_timeout = crate::channel::registry::shared()
+        .current(&state.store)
         .await
-        .unwrap_or(0)
-    };
+        .max_timeout_secs();
     let per_attempt_secs = state
         .config
         .request_timeout_secs
@@ -271,7 +265,7 @@ pub async fn proxy_completion(
             let last_provider = tried_order.lock().ok().and_then(|t| t.last().cloned());
             if let Some(pid) = last_provider.clone() {
                 spawn_record_failure(
-                    state.pool.clone(),
+                    state.store.clone(),
                     pid,
                     req_start.elapsed().as_millis() as f64,
                     0,
@@ -280,7 +274,7 @@ pub async fn proxy_completion(
                 );
             }
             spawn_request_log(
-                &state.pool,
+                &state,
                 claims.sub.clone(),
                 auth_ctx.api_key_id.clone(),
                 last_provider,

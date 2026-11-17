@@ -153,18 +153,21 @@ pub enum DisableOutcome {
 }
 
 /// billing 方法组过渡期端口(装配层实现,复用二进制的 DbPool/rand/sha2)。
+/// 阶段 S async 化(docs/surreal-migration.md §六):端口随装配适配器
+/// 翻转 `#[async_trait]`;纯计算方法(generate_code / hash_code)保持 sync。
+#[async_trait::async_trait]
 pub trait BillingStore: Send + Sync + 'static {
     /// 全量价格条目,ORDER BY model(旧 list_prices 的 SQL 序)。
-    fn all_prices(&self) -> Result<Vec<PriceRecord>, BillingStoreError>;
+    async fn all_prices(&self) -> Result<Vec<PriceRecord>, BillingStoreError>;
 
     /// 全部渠道(含禁用,只看"已添加")的模型名集合。查询失败按旧行为
     /// **静默吞掉、返回空集**(旧 channel_models 的 `if let Ok` 语义:
     /// in_use=1 在 providers 表读不出时给出空结果,而不是 5xx)。
-    fn all_channel_models(&self) -> HashSet<String>;
+    async fn all_channel_models(&self) -> HashSet<String>;
 
     /// 插入价格行(id 生成、created_at/updated_at 缺省、写后回读整行;
     /// model 撞唯一键 → `Constraint`)。
-    fn insert_price(
+    async fn insert_price(
         &self,
         model: &str,
         prompt_price: f64,
@@ -174,7 +177,7 @@ pub trait BillingStore: Send + Sync + 'static {
 
     /// 部分更新价格(None = 不改该列;cached_price 双层同请求体三态语义,
     /// 并置 updated_at)。返回更新后整行;行不存在 → `Ok(None)`。
-    fn update_price(
+    async fn update_price(
         &self,
         id: &str,
         model: Option<&str>,
@@ -184,12 +187,12 @@ pub trait BillingStore: Send + Sync + 'static {
     ) -> Result<Option<PriceRecord>, BillingStoreError>;
 
     /// 删除价格;false = 行不存在(→ 404)。
-    fn delete_price(&self, id: &str) -> Result<bool, BillingStoreError>;
+    async fn delete_price(&self, id: &str) -> Result<bool, BillingStoreError>;
 
     /// 同事务 UPDATE users.balance + INSERT billing_transactions
     /// (余额变动与流水要么都成、要么都不成)。返回调后余额(微元);
     /// `Ok(None)` = 用户不存在(→ 404)。流水 id 装配层生成。
-    fn adjust_balance(
+    async fn adjust_balance(
         &self,
         user_id: &str,
         amount_micro: i64,
@@ -199,7 +202,7 @@ pub trait BillingStore: Send + Sync + 'static {
 
     /// 流水分页:user_id 为 None/空 = 全部;ORDER BY created_at DESC,
     /// rowid DESC(旧序);返回 (total, 当前页)。
-    fn list_transactions(
+    async fn list_transactions(
         &self,
         user_id: Option<&str>,
         limit: i64,
@@ -211,7 +214,7 @@ pub trait BillingStore: Send + Sync + 'static {
     /// 翻译成 `status='unused' AND expires_at <= datetime('now')`);
     /// ORDER BY created_at DESC, rowid DESC。返回 (total, 当前页)。
     /// 永不返回明文/哈希。
-    fn list_redemption_codes(
+    async fn list_redemption_codes(
         &self,
         batch: Option<&str>,
         status: Option<&str>,
@@ -221,11 +224,14 @@ pub trait BillingStore: Send + Sync + 'static {
 
     /// 整批一个事务插入兑换码行(id 装配层生成):中途失败整体回滚,
     /// 避免哈希落库而明文从未送达;code_hash 碰撞 → `Constraint`。
-    fn insert_redemption_codes(&self, rows: &[NewRedemptionCode]) -> Result<(), BillingStoreError>;
+    async fn insert_redemption_codes(
+        &self,
+        rows: &[NewRedemptionCode],
+    ) -> Result<(), BillingStoreError>;
 
     /// `UPDATE ... SET status='disabled' WHERE id=? AND status='unused'`
     /// 的三态结果(影响行数 0 时回查存在性区分 NotUnused/NotFound)。
-    fn disable_redemption_code(&self, id: &str) -> Result<DisableOutcome, BillingStoreError>;
+    async fn disable_redemption_code(&self, id: &str) -> Result<DisableOutcome, BillingStoreError>;
 
     /// 生成一张明文兑换码:`AK-XXXX-XXXX-XXXX-XXXX`(32 字符集
     /// ABCDEFGHJKLMNPQRSTUVWXYZ23456789,去易混淆 0/O/1/I,2^80 组合)。
@@ -470,7 +476,11 @@ impl AdminBillingService {
             "adjust"
         };
         let note = body.note.unwrap_or_default().trim().to_string();
-        match self.store.adjust_balance(&id, amount_micro, kind, &note) {
+        match self
+            .store
+            .adjust_balance(&id, amount_micro, kind, &note)
+            .await
+        {
             Ok(Some(balance_micro)) => {
                 AdminAdjustUserBalanceResponse::Created(AdjustBalanceResult {
                     balance: Self::micro_to_yuan(balance_micro),
@@ -509,12 +519,16 @@ impl AdminBillingService {
             return AdminCreatePriceResponse::BadRequest(problem(status, code, detail));
         }
         let model = body.model.clone().unwrap_or_default().trim().to_string();
-        match self.store.insert_price(
-            &model,
-            body.prompt_price.unwrap_or(0.0),
-            body.completion_price.unwrap_or(0.0),
-            body.cached_price.flatten(),
-        ) {
+        match self
+            .store
+            .insert_price(
+                &model,
+                body.prompt_price.unwrap_or(0.0),
+                body.completion_price.unwrap_or(0.0),
+                body.cached_price.flatten(),
+            )
+            .await
+        {
             Ok(rec) => {
                 bump_price_table_epoch();
                 AdminCreatePriceResponse::Created(Self::to_api_price(&rec))
@@ -540,7 +554,7 @@ impl AdminBillingService {
     ///
     /// `DELETE /api/prices/{id}`(旧 200 {message:'deleted'} → **204**)。
     pub async fn admin_delete_price(&self, id: String) -> AdminDeletePriceResponse {
-        match self.store.delete_price(&id) {
+        match self.store.delete_price(&id).await {
             Ok(true) => {
                 bump_price_table_epoch();
                 AdminDeletePriceResponse::NoContent
@@ -568,7 +582,7 @@ impl AdminBillingService {
         &self,
         id: String,
     ) -> AdminDisableRedemptionCodeResponse {
-        match self.store.disable_redemption_code(&id) {
+        match self.store.disable_redemption_code(&id).await {
             Ok(DisableOutcome::Disabled) => AdminDisableRedemptionCodeResponse::NoContent,
             Ok(DisableOutcome::NotUnused) => AdminDisableRedemptionCodeResponse::Conflict(problem(
                 409,
@@ -607,7 +621,7 @@ impl AdminBillingService {
         let offset = Self::page_offset(offset);
         let uid = user_id.as_deref().map(str::trim).unwrap_or("");
         let filter = (!uid.is_empty()).then_some(uid);
-        match self.store.list_transactions(filter, limit, offset) {
+        match self.store.list_transactions(filter, limit, offset).await {
             Ok((total, rows)) => AdminListBillingTransactionsResponse::Ok(BalanceTransactionPage {
                 total,
                 items: rows.iter().map(Self::to_api_tx).collect(),
@@ -637,7 +651,7 @@ impl AdminBillingService {
     ) -> AdminListPricesResponse {
         let limit = Self::page_limit(limit);
         let offset = Self::page_offset(offset);
-        let records = match self.store.all_prices() {
+        let records = match self.store.all_prices().await {
             Ok(r) => r,
             Err(e) => {
                 let code = match &e {
@@ -650,7 +664,7 @@ impl AdminBillingService {
         };
         let mut filtered: Vec<&PriceRecord> = records.iter().collect();
         if in_use.as_deref() == Some("1") {
-            let models = self.store.all_channel_models();
+            let models = self.store.all_channel_models().await;
             filtered.retain(|p| Self::price_in_use(&p.model, &models));
         }
         let total = filtered.len() as i64;
@@ -690,6 +704,7 @@ impl AdminBillingService {
         match self
             .store
             .list_redemption_codes(batch_filter, status_filter, limit, offset)
+            .await
         {
             Ok((total, rows)) => AdminListRedemptionCodesResponse::Ok(RedemptionCodePage {
                 total,
@@ -783,7 +798,7 @@ impl AdminBillingService {
                 note: note.clone(),
             })
             .collect();
-        match self.store.insert_redemption_codes(&rows) {
+        match self.store.insert_redemption_codes(&rows).await {
             Ok(()) => AdminCreateRedemptionCodesResponse::Created(CreatedRedemptionCodes {
                 batch,
                 amount: Self::micro_to_yuan(amount_micro),
@@ -851,13 +866,17 @@ impl AdminBillingService {
                 "no fields to update",
             ));
         }
-        match self.store.update_price(
-            &id,
-            model.as_deref(),
-            body.prompt_price,
-            body.completion_price,
-            body.cached_price,
-        ) {
+        match self
+            .store
+            .update_price(
+                &id,
+                model.as_deref(),
+                body.prompt_price,
+                body.completion_price,
+                body.cached_price,
+            )
+            .await
+        {
             Ok(Some(rec)) => {
                 bump_price_table_epoch();
                 AdminUpdatePriceResponse::Ok(Self::to_api_price(&rec))

@@ -33,7 +33,7 @@ pub async fn list_models(
     _claims: Claims,
     auth_ctx: AuthContext,
 ) -> impl IntoResponse {
-    let models = list_available_models_async(state.pool.clone()).await;
+    let models = list_available_models_async(state.store.clone()).await;
 
     let data: Vec<Value> = models
         .into_iter()

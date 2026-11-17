@@ -22,7 +22,7 @@
 - **健康观测**:渠道健康检查(默认每 30 秒 ping 一次)+ 模型级测试矩阵(每 30 分钟自动探测,绿/红/灰小方格一目了然),也可手动单点测试或一键全测
 - **渠道适配器**:每种上游是一个渠道适配器(`ChannelAdapter`),URL、鉴权、请求/响应修补都在适配器里;兼容 OpenAI/Anthropic 的上游直接用「通用」类型,特殊上游(如 WorkBuddy、Qoder,目前为占位实现)新增一个文件即可接入,详见 [docs/refactor-plan.md](docs/refactor-plan.md)
 - **响应缓存(可选)**:非流式请求的网关侧响应缓存,默认关闭;进程内内存后端(零外部依赖),按用户隔离、命中照常计费
-- **轻量稳定**:Rust 编写,单二进制内嵌管理前端与 SQLite,无外部服务依赖;musl 静态编译,解压即跑
+- **轻量稳定**:Rust 编写,单二进制内嵌管理前端与数据库(嵌入式 SurrealDB/SurrealKV),无外部服务依赖;musl 静态编译,解压即跑
 - **安全默认**:API Key 哈希存储(明文仅在创建时展示一次)、JWT 改密即失效、登录限流、CSP / CORS 白名单、渠道凭证脱敏回显
 
 ## 预设渠道
@@ -84,7 +84,7 @@ docker run -d --name aikun --restart unless-stopped \
   ghcr.io/zumpyx/aikun:latest
 ```
 
-容器内配置通过 `AIKUN_*` 环境变量注入(见下方配置表),SQLite 数据库直接落在 `./data/aikun.db`(bind 挂载,备份即复制该文件),容器默认监听 `0.0.0.0:3000`,宿主机端口改 `docker-compose.yml` 端口映射左侧即可。`--user`/compose 的 `user:` 用于让容器以宿主机用户身份写入 `./data`,uid 非 1000 时请对应修改。本地构建镜像:`docker compose build`。
+容器内配置通过 `AIKUN_*` 环境变量注入(见下方配置表),嵌入式 SurrealDB 数据目录直接落在 `./data/aikun.surreal/`(bind 挂载;备份=停机后整目录拷贝,详见「数据与升级」),容器默认监听 `0.0.0.0:3000`,宿主机端口改 `docker-compose.yml` 端口映射左侧即可。`--user`/compose 的 `user:` 用于让容器以宿主机用户身份写入 `./data`,uid 非 1000 时请对应修改。本地构建镜像:`docker compose build`(镜像同时内置 `aikun-migrate` 存量迁移工具)。
 
 配置加载口径:**裸机启动自动加载工作目录的 `.env`;Docker 部署经 compose 的 `env_file: .env` 注入容器**(也可直接写在 compose 的 `environment` 里,同名项 `environment` 优先)。
 
@@ -123,7 +123,8 @@ export AIKUN_JWT_SECRET=$(openssl rand -hex 32)
 | `--jwt-secret` | `AIKUN_JWT_SECRET` | (公开默认值,**必须修改**) | JWT 签名密钥 |
 | `--encryption-key` | `AIKUN_ENCRYPTION_KEY` | (空,派生自 JWT secret) | 渠道 key 静态加密密钥 |
 | `--jwt-expires-in` | `AIKUN_JWT_EXPIRES_IN` | `604800` | JWT 有效期(秒) |
-| `--database-url` | `AIKUN_DATABASE_URL` | `sqlite://aikun.db?mode=rwc` | 数据库 URL |
+| `--surreal-url` | `AIKUN_SURREAL_URL` | `surrealkv://./aikun.surreal` | SurrealDB 端点:嵌入式 `surrealkv://<目录>` / 远程 `ws://` `wss://` `http://` `https://`(可带 `?ns=&db=&user=&pass=`) |
+| `--database-url` | `AIKUN_DATABASE_URL` | (已废弃) | 旧 SQLite 库位置,**仅迁移工具 `aikun-migrate` 读取**(见「数据与升级」) |
 | `--health-check-interval` | `AIKUN_HEALTH_CHECK_INTERVAL` | `30` | 健康检查间隔(秒) |
 | `--max-retries` | `AIKUN_MAX_RETRIES` | `3` | 单请求最大渠道尝试次数 |
 | `--auto-disable-threshold` | `AIKUN_AUTO_DISABLE_THRESHOLD` | `5` | 连续失败自动禁用阈值 |
@@ -226,13 +227,22 @@ crates/
 
 ## 性能与容量
 
-单机 SQLite 完全够用,瓶颈在上游渠道而不在网关。本机实测(10 核 i9-12900H,release 二进制,mock 上游零延迟,非流式请求,含完整计费链路):并发 50 时 **≈2,400 QPS**(P50 19ms),并发 200 时约 **700 QPS**——高并发下的吞吐拐点来自 SQLite 单写者计费事务串行(有意取舍:计费随响应落库,不异步丢账)。按真实上游秒级延迟折算,约可支撑 7,000 名重度同时活跃用户(每 10 秒一次请求)或 4 万+ 典型在线用户。复现方法:`cargo build --release` 后 `node scripts/bench.js`(需 sqlite3 CLI);详细测试方法与容量估算见管理端「文档」页。
+单机嵌入式存储完全够用,瓶颈在上游渠道而不在网关。历史基线(SQLite 后端,10 核 i9-12900H,release 二进制,mock 上游零延迟,非流式请求,含完整计费链路):并发 50 时 **≈2,400 QPS**(P50 19ms)——计费事务随响应落库、不异步丢账的取舍不变。阶段 S(SurrealDB)切换后的 bench 对比见 roadmap 验收项;复现方法:`cargo build --release` 后 `node scripts/bench.js`;详细测试方法与容量估算见管理端「文档」页。
 
 ## 数据与升级
 
-- 所有数据存放在单个 SQLite 文件中(默认 `./aikun.db`),备份只需复制该文件
-- 数据库迁移在启动时自动完成;**升级前建议先备份数据库文件**
-- 降级保护:库的 schema 版本(`PRAGMA user_version`)比二进制新时拒绝启动,防止旧代码读错新格式数据;但 v0.3.4 及更早的旧二进制不带此检查,降级到它们无法被拦截,务必先备份
+- v0.6 起存储为 **SurrealDB**(默认嵌入式 SurrealKV,数据目录默认 `./aikun.surreal/`;容器内 `/data/aikun.surreal`)。schema 在启动时自动初始化(幂等);**升级前建议先备份数据目录**
+- 备份:嵌入式部署停机后整目录拷贝,或 `surreal export`(远程部署用 `surreal export` / `surreal import`)
+- 降级保护:库的 schema 版本(元数据表 `store_meta:schema.version`,替代旧 `PRAGMA user_version`)比二进制新时拒绝启动,防止旧代码读错新格式数据
+- **从 0.5.x(SQLite)升级**:停旧服务后执行一次迁移工具(幂等可重跑,完成后打印各表行数对照):
+
+  ```bash
+  AIKUN_DATABASE_URL=sqlite:///data/aikun.db \
+  AIKUN_SURREAL_URL=surrealkv:///data/aikun.surreal \
+  aikun-migrate
+  ```
+
+  微元余额、密文渠道 key、日志明细等全量搬运;旧 uuid 等 ID 不变(管理面展示与软引用零翻译)。
 
 ## 发布
 

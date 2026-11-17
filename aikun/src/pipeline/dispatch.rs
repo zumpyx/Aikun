@@ -58,7 +58,7 @@ pub(super) async fn attempt_loop(
 
     for _ in 0..max_attempts {
         let provider = match select_provider_async(
-            state.pool.clone(),
+            state.store.clone(),
             model.clone(),
             tried.clone(),
             api_key_id.clone(),
@@ -95,7 +95,7 @@ pub(super) async fn attempt_loop(
                 provider.name
             );
             spawn_record_failure(
-                state.pool.clone(),
+                state.store.clone(),
                 provider.id.clone(),
                 0.0,
                 0,
@@ -139,7 +139,7 @@ pub(super) async fn attempt_loop(
                     provider.name, status
                 );
                 spawn_record_failure(
-                    state.pool.clone(),
+                    state.store.clone(),
                     provider.id.clone(),
                     latency,
                     0,
@@ -147,7 +147,7 @@ pub(super) async fn attempt_loop(
                     failure_counted.insert(provider.id.clone()),
                 );
                 spawn_request_log(
-                    &state.pool,
+                    &state,
                     user_id.clone(),
                     api_key_id.clone(),
                     Some(provider.id.clone()),
@@ -179,9 +179,14 @@ pub(super) async fn attempt_loop(
                 });
                 match read {
                     Ok(resp_body) if valid_response_shape(&resp_body, provider_protocol) => {
-                        spawn_record_result(state.pool.clone(), provider.id.clone(), latency, true);
+                        spawn_record_result(
+                            state.store.clone(),
+                            provider.id.clone(),
+                            latency,
+                            true,
+                        );
                         spawn_pin_channel(
-                            state.pool.clone(),
+                            state.store.clone(),
                             api_key_id.clone(),
                             model.clone(),
                             provider.id.clone(),
@@ -189,7 +194,7 @@ pub(super) async fn attempt_loop(
                         let (p, c, t, k) = extract_usage_any(&resp_body);
                         // 计费级:响应返回前日志与扣费已落库(await)。
                         request_log_sync(
-                            &state.pool,
+                            &state,
                             user_id.clone(),
                             api_key_id.clone(),
                             Some(provider.id.clone()),
@@ -247,7 +252,7 @@ pub(super) async fn attempt_loop(
                             provider.name, detail
                         );
                         spawn_record_failure(
-                            state.pool.clone(),
+                            state.store.clone(),
                             provider.id.clone(),
                             latency,
                             0,
@@ -255,7 +260,7 @@ pub(super) async fn attempt_loop(
                             failure_counted.insert(provider.id.clone()),
                         );
                         spawn_request_log(
-                            &state.pool,
+                            &state,
                             user_id.clone(),
                             api_key_id.clone(),
                             Some(provider.id.clone()),
@@ -304,7 +309,7 @@ pub(super) async fn attempt_loop(
                     provider.name, detail
                 );
                 spawn_record_failure(
-                    state.pool.clone(),
+                    state.store.clone(),
                     provider.id.clone(),
                     latency,
                     0,
@@ -312,7 +317,7 @@ pub(super) async fn attempt_loop(
                     failure_counted.insert(provider.id.clone()),
                 );
                 spawn_request_log(
-                    &state.pool,
+                    &state,
                     user_id.clone(),
                     api_key_id.clone(),
                     Some(provider.id.clone()),
@@ -343,7 +348,7 @@ pub(super) async fn attempt_loop(
                 .as_bool()
                 .unwrap_or(false);
             spawn_pin_channel(
-                state.pool.clone(),
+                state.store.clone(),
                 api_key_id.clone(),
                 model.clone(),
                 provider.id.clone(),
@@ -377,7 +382,7 @@ pub(super) async fn attempt_loop(
             model, provider.name, status, msg
         );
         spawn_record_failure(
-            state.pool.clone(),
+            state.store.clone(),
             provider.id.clone(),
             latency,
             status,
@@ -393,7 +398,7 @@ pub(super) async fn attempt_loop(
             msg.clone()
         };
         spawn_request_log(
-            &state.pool,
+            &state,
             user_id.clone(),
             api_key_id.clone(),
             Some(provider.id.clone()),
@@ -447,7 +452,7 @@ pub(super) async fn attempt_loop(
             // the audit log reflects every failed request, not just upstream
             // ones.
             spawn_request_log(
-                &state.pool,
+                &state,
                 user_id.clone(),
                 api_key_id.clone(),
                 None,

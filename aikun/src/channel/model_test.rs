@@ -10,14 +10,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::future::join_all;
-use rusqlite::params;
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::channel::transport::{MAX_RESP_BODY, read_json_limited, send_request};
-use crate::db::DbPool;
 use crate::models::Provider;
+use crate::store::AppStore;
 use aikun_protocol::{Protocol, parse_sse_events};
+use aikun_store::surreal::channels_store::ModelHealthRow;
 
 /// How often the background loop re-tests every (channel, model) pair.
 pub const MODEL_TEST_INTERVAL_SECS: u64 = 1800;
@@ -291,55 +291,30 @@ pub async fn probe_model(
 /// Persist a probe outcome for one (channel, model) pair.
 /// 模型测试是真实推理请求,延迟有代表性:顺带按代理转发路径同款口径
 /// 更新渠道的 latency_ms / error_rate EMA(失败不会触发自动禁用)。
-pub fn record_model_health(
-    pool: &DbPool,
+/// 阶段 S:model_health UPSERT 与 EMA 写都是 async Surreal 查询。
+pub async fn record_model_health(
+    store: &AppStore,
     provider_id: &str,
     model: &str,
     ok: bool,
     latency_ms: f64,
     error: Option<&str>,
 ) {
-    if let Ok(conn) = pool.conn.lock() {
-        let _ = conn.execute(
-            "INSERT INTO model_health (provider_id, model, status, latency_ms, error, checked_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
-             ON CONFLICT(provider_id, model) DO UPDATE SET
-                status = excluded.status, latency_ms = excluded.latency_ms,
-                error = excluded.error, checked_at = excluded.checked_at",
-            params![
-                provider_id,
-                model,
-                if ok { "healthy" } else { "unhealthy" },
-                latency_ms,
-                error.unwrap_or(""),
-            ],
-        );
-    }
-    crate::channel::selector::record_request_result(pool, provider_id, latency_ms, ok);
-}
-
-/// record_model_health 的异步包装:持 DB 锁的写派发到 blocking 线程池,
-/// 不在 async executor 上同步持锁(与 selector.rs 的 M35 注释同一规则)。
-#[allow(clippy::too_many_arguments)]
-pub async fn record_model_health_async(
-    pool: Arc<DbPool>,
-    provider_id: String,
-    model: String,
-    ok: bool,
-    latency_ms: f64,
-    error: Option<String>,
-) {
-    let _ = tokio::task::spawn_blocking(move || {
-        record_model_health(
-            &pool,
-            &provider_id,
-            &model,
-            ok,
+    if let Err(e) = store
+        .channels
+        .upsert_model_health(ModelHealthRow {
+            provider_id: provider_id.to_string(),
+            model: model.to_string(),
+            status: if ok { "healthy" } else { "unhealthy" }.to_string(),
             latency_ms,
-            error.as_deref(),
-        )
-    })
-    .await;
+            error: error.unwrap_or("").to_string(),
+            checked_at: Some(chrono::Utc::now()),
+        })
+        .await
+    {
+        tracing::warn!("record_model_health upsert failed: {e}");
+    }
+    crate::channel::selector::record_request_result(store, provider_id, latency_ms, ok).await;
 }
 
 /// Background loop: every MODEL_TEST_INTERVAL_SECS, probe every active
@@ -348,14 +323,14 @@ pub async fn record_model_health_async(
 /// ROUND_BUDGET_SECS budget so combinations are covered breadth-first
 /// instead of starving the tail sequentially.
 pub async fn run_model_test_loop(
-    pool: Arc<DbPool>,
+    store: Arc<AppStore>,
     clients: Arc<Mutex<std::collections::HashMap<String, reqwest::Client>>>,
 ) {
     // Wait one interval before the first round — the health ping loop already
     // covers startup, and upstreams may still be warming up.
     tokio::time::sleep(Duration::from_secs(MODEL_TEST_INTERVAL_SECS)).await;
     loop {
-        run_model_test_round(&pool, &clients).await;
+        run_model_test_round(&store, &clients).await;
         tokio::time::sleep(Duration::from_secs(MODEL_TEST_INTERVAL_SECS)).await;
     }
 }
@@ -364,42 +339,23 @@ pub async fn run_model_test_loop(
 /// with ROUND_WORKERS concurrent workers. If the ROUND_BUDGET_SECS budget
 /// is exceeded the round is cancelled and the untested pairs are logged.
 async fn run_model_test_round(
-    pool: &Arc<DbPool>,
+    store: &Arc<AppStore>,
     clients: &Arc<Mutex<std::collections::HashMap<String, reqwest::Client>>>,
 ) {
-    let providers: Vec<Provider> = {
-        let conn = match pool.read().lock() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Model test loop failed to lock DB: {}", e);
-                return;
-            }
-        };
-        let mut stmt = match conn.prepare(&format!(
-            "SELECT {} FROM providers WHERE is_active = 1",
-            crate::models::PROVIDER_SELECT_COLUMNS
-        )) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("Model test loop failed to query providers: {}", e);
-                return;
-            }
-        };
-        match stmt.query_map([], crate::models::row_to_provider) {
-            Ok(rows) => rows
-                .filter_map(|r| r.ok())
-                .map(|mut p: Provider| {
-                    // api_key 出库解密(enc:v1: 前缀密文,明文兼容)
-                    p.api_key = crate::crypto::decrypt_or_plain(&pool.cipher, &p.api_key);
-                    p
-                })
-                .collect(),
-            Err(e) => {
-                tracing::error!("Model test loop failed to read providers: {}", e);
-                return;
-            }
+    let providers: Vec<Provider> = match store.channels.active_channels().await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|mut p: Provider| {
+                // api_key 出库解密(enc:v1: 前缀密文,明文兼容)
+                p.api_key = crate::crypto::decrypt_or_plain(&store.cipher, &p.api_key);
+                p
+            })
+            .collect(),
+        Err(e) => {
+            tracing::error!("Model test loop failed to read providers: {e}");
+            return;
         }
-    }; // lock released
+    };
 
     let providers = Arc::new(providers);
     // 展开 (渠道, 模型) 组合为任务队列，worker 弹出即测
@@ -420,7 +376,7 @@ async fn run_model_test_round(
 
     let workers = join_all((0..ROUND_WORKERS).map(|_| {
         model_test_worker(
-            pool.clone(),
+            store.clone(),
             clients.clone(),
             providers.clone(),
             queue.clone(),
@@ -457,7 +413,7 @@ async fn run_model_test_round(
 /// Pop (channel, model) pairs from the shared queue and probe them until
 /// the queue is empty. The queue lock is never held across an await.
 async fn model_test_worker(
-    pool: Arc<DbPool>,
+    store: Arc<AppStore>,
     clients: Arc<Mutex<std::collections::HashMap<String, reqwest::Client>>>,
     providers: Arc<Vec<Provider>>,
     queue: Arc<Mutex<VecDeque<(usize, String)>>>,
@@ -492,13 +448,13 @@ async fn model_test_worker(
                 probe.error.as_deref().unwrap_or("unknown")
             );
         }
-        record_model_health_async(
-            pool.clone(),
-            provider.id.clone(),
-            model,
+        record_model_health(
+            &store,
+            &provider.id,
+            &model,
             probe.ok,
             probe.latency_ms,
-            probe.error,
+            probe.error.as_deref(),
         )
         .await;
     }

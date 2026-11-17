@@ -27,8 +27,7 @@ use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use aikun_channels::Provider;
 use tracing::warn;
 
-use crate::db::DbPool;
-use aikun_store::{CacheToken, CacheTokens, ChannelTopology};
+use aikun_store::CacheToken;
 
 /// 快照内的一条渠道:Provider 原始行(api_key 为库内形态)+ 预解析的
 /// 模型清单与映射 key(解析口径与 `provider_supports_model` 一致:
@@ -222,34 +221,35 @@ impl ChannelRegistry {
     /// (可能为空——等价于旧实现"DB 读失败 ⇒ 选路 None ⇒ 503")并留痕,
     /// 不缓存失败的令牌(下一请求重试)。
     ///
-    /// 持有 DB 读锁做一次令牌点查,调用方须在 blocking 线程上下文。
-    pub fn current(&self, pool: &DbPool) -> Arc<TopologySnapshot> {
+    /// 阶段 S:令牌点查与全量拉取都是 Surreal 查询(async 化翻转,
+    /// docs/surreal-migration.md §六),不再需要 blocking 线程上下文。
+    pub async fn current(&self, store: &crate::store::AppStore) -> Arc<TopologySnapshot> {
         let epoch = aikun_admin::admin_providers::topology_epoch();
-        let token = match pool.channel_topology_token() {
+        let token = match store.channels.topology_token().await {
             Ok(t) => Some(t),
             Err(e) => {
-                warn!("channel topology token probe failed: {}", e);
+                warn!("channel topology token probe failed: {e}");
                 None
             }
         };
-        if let Some(snap) = self.matching(pool.id, epoch, token.as_ref()) {
+        if let Some(snap) = self.matching(store.id, epoch, token.as_ref()) {
             return snap;
         }
-        let loaded = pool.active_channels();
+        let loaded = store.channels.active_channels().await;
         let mut st = self.lock_write();
-        // 双检查:竞态下另一线程可能已完成同一 (pool, epoch, token) 的重建。
-        if let Some(snap) = state_matches(&st, pool.id, epoch, token.as_ref()) {
+        // 双检查:竞态下另一任务可能已完成同一 (store, epoch, token) 的重建。
+        if let Some(snap) = state_matches(&st, store.id, epoch, token.as_ref()) {
             return snap;
         }
         match loaded {
             Ok(providers) => {
-                st.owner = pool.id;
+                st.owner = store.id;
                 st.epoch = epoch;
                 st.token = token;
                 st.snap = Arc::new(TopologySnapshot::from_providers(providers));
             }
             Err(e) => {
-                warn!("channel topology snapshot rebuild failed: {}", e);
+                warn!("channel topology snapshot rebuild failed: {e}");
                 // 不更新缓存世代/令牌:下一请求重试重建。
             }
         }
@@ -286,7 +286,7 @@ fn state_matches(
     epoch: u64,
     token: Option<&CacheToken>,
 ) -> Option<Arc<TopologySnapshot>> {
-    // owner(池实例序号)参与比对:不同库(单测的多个 :memory: 池)即使
+    // owner(存储实例序号)参与比对:不同库(单测的多实例)即使
     // 表令牌字符串相同也不是同一份快照。
     (st.owner == owner && st.epoch == epoch && st.token.as_ref() == token && token.is_some())
         .then(|| Arc::clone(&st.snap))

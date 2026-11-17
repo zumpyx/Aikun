@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use tracing::{debug, warn};
 
 use crate::AppState;
-use crate::billing::ledger::{insert_request_log, request_log_sync, spawn_request_log};
+use crate::billing::ledger::{request_log_sync, spawn_request_log};
 use crate::channel::selector::{spawn_record_failure, spawn_record_result};
 use crate::pipeline::admission::ConcurrencyGuard;
 use aikun_protocol::{
@@ -26,7 +26,7 @@ use aikun_protocol::{
 /// usage captured so far. Provider health metrics are intentionally not
 /// touched — a client disconnect says nothing about the provider.
 struct StreamAbortGuard {
-    pool: Arc<crate::db::DbPool>,
+    store: Arc<crate::store::AppStore>,
     user_id: String,
     api_key_id: Option<String>,
     provider_id: String,
@@ -50,21 +50,22 @@ impl Drop for StreamAbortGuard {
         }
         let latency = self.start.elapsed().as_millis() as i32;
         let (p, c, t, k) = self.usage.lock().map(|u| *u).unwrap_or((0, 0, 0, 0));
-        // The DB write takes a blocking mutex; dispatch it to the blocking
-        // pool so a Drop on the async executor never stalls the runtime.
-        let pool = self.pool.clone();
+        // 阶段 S:记账是 async Surreal 查询,Drop 里投递为独立任务(无
+        // runtime 上下文时丢弃并留痕——进程已在关停,与旧的"无运行时
+        // 同步写"等价取舍:499 断连的补偿记账尽力而为)。
+        let store = self.store.clone();
         let user_id = self.user_id.clone();
         let api_key_id = self.api_key_id.clone();
         let provider_id = self.provider_id.clone();
         let model = self.model.clone();
         let request_type = self.request_type.clone();
-        let write = move || {
-            insert_request_log(
-                &pool,
-                &user_id,
-                api_key_id.as_deref(),
-                Some(&provider_id),
-                &model,
+        let write = async move {
+            crate::billing::ledger::spawn_request_log_for_guard(
+                &store,
+                user_id,
+                api_key_id,
+                Some(provider_id),
+                model,
                 &request_type,
                 p,
                 c,
@@ -76,12 +77,10 @@ impl Drop for StreamAbortGuard {
                 Some("client disconnected".to_string()),
             );
         };
-        // Drop 可能发生在无运行时上下文（如关停后）：此时 spawn 会 panic 并
-        // abort 进程，故无运行时直接同步写。
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn_blocking(write);
+            handle.spawn(write);
         } else {
-            write();
+            tracing::warn!("StreamAbortGuard dropped without runtime — 499 补账日志丢弃");
         }
     }
 }
@@ -107,7 +106,7 @@ pub(super) fn stream_response(
     concurrency_guard: Option<ConcurrencyGuard>,
 ) -> Response {
     let byte_stream = resp.bytes_stream();
-    let pool = state.pool.clone();
+    let store = state.store.clone();
     let shutdown = state.shutdown.clone();
     let threshold = state.config.auto_disable_threshold;
     let model_log = model.clone();
@@ -133,7 +132,7 @@ pub(super) fn stream_response(
         let _concurrency_guard = concurrency_guard;
         let usage_cell = Arc::new(Mutex::new((0, 0, 0, 0)));
         let mut guard = StreamAbortGuard {
-            pool: pool.clone(),
+            store: store.clone(),
             user_id: user_id.clone(),
             api_key_id: api_key_id.clone(),
             provider_id: provider_id.clone(),
@@ -217,10 +216,10 @@ pub(super) fn stream_response(
         if let Some(err_msg) = stream_error {
             // The upstream stream was unusable — count it as a provider failure.
             let latency = start.elapsed().as_millis() as f64;
-            spawn_record_failure(pool.clone(), provider_id.clone(), latency, 0, threshold, true);
+            spawn_record_failure(store.clone(), provider_id.clone(), latency, 0, threshold, true);
             let (p, c, t, k) = converter.usage();
             spawn_request_log(
-                &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
+                &state, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
                 model_log.clone(), client_protocol.as_str(),
                 p, c, t, k, latency as i32, 502, false, Some(err_msg.clone()),
             );
@@ -268,9 +267,9 @@ pub(super) fn stream_response(
         if events == 0 {
             let err_msg = "upstream sent an empty SSE stream".to_string();
             let latency = start.elapsed().as_millis() as f64;
-            spawn_record_failure(pool.clone(), provider_id.clone(), latency, 0, threshold, true);
+            spawn_record_failure(store.clone(), provider_id.clone(), latency, 0, threshold, true);
             spawn_request_log(
-                &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
+                &state, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
                 model_log.clone(), client_protocol.as_str(),
                 0, 0, 0, 0, latency as i32, 502, false, Some(err_msg.clone()),
             );
@@ -292,9 +291,9 @@ pub(super) fn stream_response(
         if error_frame {
             // 上游流内错误帧:HTTP 虽 200,语义上是失败。按失败记账(已捕获
             // 的 usage 照扣,与流中途错误同口径),不让刷错误帧的渠道显得健康。
-            spawn_record_failure(pool.clone(), provider_id.clone(), latency, 0, threshold, true);
+            spawn_record_failure(store.clone(), provider_id.clone(), latency, 0, threshold, true);
             request_log_sync(
-                &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
+                &state, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
                 model_log.clone(), client_protocol.as_str(),
                 p, c, t, k, latency as i32, 502, false,
                 Some("upstream sent an in-stream error frame".to_string()),
@@ -303,11 +302,11 @@ pub(super) fn stream_response(
             guard.finish();
             return;
         }
-        spawn_record_result(pool.clone(), provider_id.clone(), latency, true);
+        spawn_record_result(store.clone(), provider_id.clone(), latency, true);
         // 计费级:与非流式一致,流结束时同步等待日志与扣费落库,
         // fire-and-forget 在进程退出时会丢账。
         request_log_sync(
-            &pool, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
+            &state, user_id.clone(), api_key_id.clone(), Some(provider_id.clone()),
             model_log.clone(), client_protocol.as_str(),
             p, c, t, k, latency as i32, 200, true, None,
         )

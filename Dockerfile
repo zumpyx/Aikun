@@ -12,27 +12,31 @@ RUN case "$TARGETPLATFORM" in \
       *) echo "unsupported platform: $TARGETPLATFORM" >&2; exit 1 ;; \
     esac && \
     rustup target add "$T" && \
-    cargo zigbuild --release --target "$T" && \
+    cargo zigbuild --release --target "$T" -p aikun -p aikun-migrate && \
     mkdir -p /out && \
-    cp "target/$T/release/aikun" /out/aikun
+    cp "target/$T/release/aikun" /out/aikun && \
+    cp "target/$T/release/aikun-migrate" /out/aikun-migrate
 
 # ---- 运行阶段 --------------------------------------------------------------
-# 二进制全静态(rusqlite bundled SQLite + rustls webpki-roots 证书),
-# 不依赖任何系统库;alpine 仅提供 shell 便于 exec 排查,总体积约 20MB。
+# 二进制全静态(嵌入式 SurrealKV + rustls webpki-roots 证书),不依赖任何
+# 系统库;alpine 仅提供 shell 便于 exec 排查。
 FROM alpine:3.21
 RUN adduser -D -u 10001 aikun \
     && mkdir -p /data \
     && chown aikun:aikun /data
 
 COPY --from=builder --chown=aikun:aikun /out/aikun /usr/local/bin/aikun
+# 存量迁移工具(SQLite → SurrealDB;源库由 AIKUN_DATABASE_URL 指定)
+COPY --from=builder --chown=aikun:aikun /out/aikun-migrate /usr/local/bin/aikun-migrate
 
 USER aikun
-# 工作目录设为 /data:即使外部传入相对路径的 AIKUN_DATABASE_URL,
-# 库文件也会落在可写的 /data 卷中,而不是容器根目录(无写权限)。
+# 工作目录设为 /data:即使外部传入相对路径的 AIKUN_SURREAL_URL,
+# 数据目录也会落在可写的 /data 卷中,而不是容器根目录(无写权限)。
 WORKDIR /data
-# 容器内必须监听 0.0.0.0 才能接受宿主机转发;库文件落在 /data 卷中持久化。
+# 容器内必须监听 0.0.0.0 才能接受宿主机转发;嵌入式 SurrealKV 数据目录
+# 落在 /data 卷中持久化(阶段 S 默认切换,docs/surreal-migration.md §二)。
 ENV AIKUN_HOST=0.0.0.0:3000 \
-    AIKUN_DATABASE_URL=sqlite:///data/aikun.db?mode=rwc
+    AIKUN_SURREAL_URL=surrealkv:///data/aikun.surreal
 EXPOSE 3000
 VOLUME ["/data"]
 

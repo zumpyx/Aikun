@@ -134,75 +134,46 @@ pub fn parse_expiry(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 
 /// Look up an API key and build claims for its owner.
 /// Returns (claims, auth_context) on success.
-/// 入库的是 sha256 哈希;旧明文 key(以 "sk-" 开头)按明文比对兜底,待迁移。
-/// 只在 blocking 线程池中调用(见 auth_middleware),不在 executor 上持锁。
-fn authenticate_api_key(pool: &crate::db::DbPool, key: &str) -> Option<(Claims, AuthContext)> {
+/// 入库的是 sha256 哈希;Surreal 侧唯一索引点查,属主用户状态与模型
+/// 白名单一次投影带回(单往返,语义同旧 JOIN 查询)。
+async fn authenticate_api_key(
+    identity: &dyn aikun_store::surreal::identity::IdentityStore,
+    key: &str,
+) -> Option<(Claims, AuthContext)> {
     if key.is_empty() {
         return None;
     }
-    // 纯查询走只读连接(每请求热路径);last_used_at 节流写走写连接。
-    let conn = pool.read().lock().ok()?;
-    let row = conn
-        .query_row(
-            "SELECT k.id, k.user_id, k.is_active, k.expires_at, k.models,
-                    u.username, u.role, u.is_active
-             FROM api_keys k JOIN users u ON u.id = k.user_id
-             WHERE k.key = ?1 OR k.key = ?2",
-            rusqlite::params![hash_api_key(key), key],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, bool>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, bool>(7)?,
-                ))
-            },
-        )
-        .ok()?;
+    let row = identity
+        .find_api_key_auth(&crate::auth::hash_api_key(key))
+        .await
+        .ok()
+        .flatten()?;
 
-    let (key_id, user_id, key_active, expires_at, models_json, username, role, user_active) = row;
-
-    if !key_active || !user_active {
+    if !row.key_active || !row.user_active {
         return None;
     }
-    if let Some(exp) = expires_at.as_deref() {
-        match parse_expiry(exp) {
-            Some(t) if t > chrono::Utc::now() => {}
-            _ => return None, // expired or unparseable
-        }
+    if let Some(exp) = row.expires_at
+        && exp <= chrono::Utc::now()
+    {
+        return None; // expired
     }
 
-    // 空串表示不限制;JSON 损坏时 fail-closed 拒绝认证(而不是当作全放行)。
-    let allowed_models = if models_json.trim().is_empty() {
+    // 空集表示不限制;损坏行 fail-closed 拒绝认证(不当作全放行)。
+    // 旧库 models 列是 JSON 文本,坏 JSON 在迁移侧已归一为空集。
+    let allowed_models = if row.models.is_empty() {
         None
     } else {
-        match serde_json::from_str::<Vec<String>>(&models_json) {
-            Ok(allowed) if !allowed.is_empty() => Some(allowed),
-            Ok(_) => None,
-            Err(_) => return None,
-        }
+        Some(row.models)
     };
 
-    // 节流:距上次写入不足 60s 就不更新,避免每次请求都写库。
-    // 写操作换写连接;读锁先释放,避免读写两锁并持。
-    drop(conn);
-    if let Ok(wconn) = pool.conn.lock() {
-        let _ = wconn.execute(
-            "UPDATE api_keys SET last_used_at = datetime('now')
-             WHERE id = ?1 AND (last_used_at IS NULL OR last_used_at <= datetime('now', '-60 seconds'))",
-            rusqlite::params![key_id],
-        );
-    }
+    // 节流:距上次写入不足 60s 不更新(实现内自带,失败尽力而为)。
+    let _ = identity.touch_api_key_used(&row.key_id).await;
 
     let now = chrono::Utc::now().timestamp() as usize;
     let claims = Claims {
-        sub: user_id,
-        username,
-        role,
+        sub: row.user_id,
+        username: row.username,
+        role: row.role,
         // API key requests carry no token expiry; claims exp is informational.
         exp: now,
         iat: now,
@@ -211,7 +182,7 @@ fn authenticate_api_key(pool: &crate::db::DbPool, key: &str) -> Option<(Claims, 
     Some((
         claims,
         AuthContext {
-            api_key_id: Some(key_id),
+            api_key_id: Some(row.key_id),
             allowed_models,
         },
     ))
@@ -220,26 +191,16 @@ fn authenticate_api_key(pool: &crate::db::DbPool, key: &str) -> Option<(Claims, 
 /// Re-check a JWT-authenticated user against the database: disabled users are
 /// rejected, and the live role from the DB overrides the (possibly stale) role
 /// embedded in the token.
-fn authenticate_jwt(pool: &crate::db::DbPool, mut claims: Claims) -> Option<(Claims, AuthContext)> {
-    let conn = pool.read().lock().ok()?;
-    let (role, is_active, token_version) = conn
-        .query_row(
-            "SELECT role, is_active, token_version FROM users WHERE id = ?1",
-            rusqlite::params![claims.sub],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, bool>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .ok()?;
+async fn authenticate_jwt(
+    identity: &dyn aikun_store::surreal::identity::IdentityStore,
+    mut claims: Claims,
+) -> Option<(Claims, AuthContext)> {
+    let login = identity.find_login_user_by_id(&claims.sub).await.ok()??;
     // 改密后 token_version 递增,旧 JWT 随之失效。
-    if !is_active || token_version != claims.token_version {
+    if !login.is_active || login.token_version != claims.token_version {
         return None;
     }
-    claims.role = role;
+    claims.role = login.role;
     Some((
         claims,
         AuthContext {
@@ -296,21 +257,12 @@ pub async fn auth_middleware(
             // Try JWT first, then fall back to API key lookup.
             // API keys are only valid for /v1/* relay endpoints, not management APIs.
             // DB 访问全部派发到 blocking 线程池,不在 async executor 上持锁。
+            let identity = state.store.identity.clone();
             let authed = match validate_token(token, config) {
-                Ok(claims) => {
-                    let pool = state.pool.clone();
-                    tokio::task::spawn_blocking(move || authenticate_jwt(&pool, claims))
-                        .await
-                        .ok()
-                        .flatten()
-                }
+                Ok(claims) => authenticate_jwt(identity.as_ref(), claims).await,
                 Err(_) if !on_api => {
-                    let pool = state.pool.clone();
                     let key = token.to_string();
-                    tokio::task::spawn_blocking(move || authenticate_api_key(&pool, &key))
-                        .await
-                        .ok()
-                        .flatten()
+                    authenticate_api_key(identity.as_ref(), &key).await
                 }
                 Err(_) => None,
             };
@@ -347,12 +299,8 @@ pub async fn auth_middleware(
             let authed = if key.is_empty() {
                 None
             } else {
-                let pool = state.pool.clone();
-                let key = key.to_string();
-                tokio::task::spawn_blocking(move || authenticate_api_key(&pool, &key))
-                    .await
-                    .ok()
-                    .flatten()
+                let identity = state.store.identity.clone();
+                authenticate_api_key(identity.as_ref(), key).await
             };
             match authed {
                 Some((claims, ctx)) => {

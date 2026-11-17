@@ -22,27 +22,22 @@ aikun-store = { path = "../crates/aikun-store" }
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
-# main.rs 的过渡期端口适配器实现 aikun-admin 的 async_trait 端口
-# (ProviderStore / ProviderProbes),与 aikun-admin 同版本
+# main.rs 的端口适配器实现 aikun-admin 的 async_trait 端口,与 aikun-admin
+# 同版本;阶段 S 起 Surreal 域 trait 也用 async_trait
 async-trait = "0.1"
 
-# Database
-rusqlite = { version = "0.34", features = ["bundled"] }
+# 新记录 record id(渠道等;迁移旧行沿用旧 uuid,docs/surreal-migration.md §三)
+ulid = "1"
+
+# 响应缓存键哈希(src/cache)
+sha2 = "0.10"
 
 # Auth
 jsonwebtoken = "9"
-argon2 = "0.5"
 rand = "0.9"
 
 # HTTP client(rustls 替代系统 OpenSSL,便于静态构建)
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "socks", "rustls-tls"] }
-
-# 哈希(api key 存储等)
-sha2 = "0.10"
-
-# 上游渠道 key 静态加密(AES-256-GCM,密钥派生自 JWT secret)
-aes-gcm = "0.10"
-base64 = "0.22"
 
 # Streaming (SSE)
 futures-util = "0.3"

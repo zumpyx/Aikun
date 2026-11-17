@@ -75,7 +75,7 @@ pub async fn passthrough(
         });
         if !model_allowed {
             spawn_request_log(
-                &state.pool,
+                &state,
                 claims.sub.clone(),
                 auth_ctx.api_key_id.clone(),
                 None,
@@ -106,7 +106,7 @@ pub async fn passthrough(
     if !has_positive_balance(&state, &claims.sub).await {
         let msg = "Insufficient balance: please top up before making more requests".to_string();
         spawn_request_log(
-            &state.pool,
+            &state,
             claims.sub.clone(),
             auth_ctx.api_key_id.clone(),
             None,
@@ -134,7 +134,7 @@ pub async fn passthrough(
         match enforce_key_limits(&state, key_id).await {
             Err(msg) => {
                 spawn_request_log(
-                    &state.pool,
+                    &state,
                     claims.sub.clone(),
                     auth_ctx.api_key_id.clone(),
                     None,
@@ -170,7 +170,7 @@ pub async fn passthrough(
 
     for _ in 0..max_attempts {
         let provider = match select_provider_async(
-            state.pool.clone(),
+            state.store.clone(),
             model.clone(),
             tried.clone(),
             auth_ctx.api_key_id.clone(),
@@ -197,7 +197,7 @@ pub async fn passthrough(
                 provider.name
             );
             spawn_record_failure(
-                state.pool.clone(),
+                state.store.clone(),
                 provider.id.clone(),
                 0.0,
                 0,
@@ -259,7 +259,7 @@ pub async fn passthrough(
                     provider.name, path, e
                 );
                 spawn_record_failure(
-                    state.pool.clone(),
+                    state.store.clone(),
                     provider.id.clone(),
                     latency,
                     0,
@@ -267,7 +267,7 @@ pub async fn passthrough(
                     failure_counted.insert(provider.id.clone()),
                 );
                 spawn_request_log(
-                    &state.pool,
+                    &state,
                     claims.sub.clone(),
                     auth_ctx.api_key_id.clone(),
                     Some(provider.id.clone()),
@@ -295,9 +295,9 @@ pub async fn passthrough(
         if status == 200 {
             match read_json_limited(resp).await {
                 Ok(resp_body) => {
-                    spawn_record_result(state.pool.clone(), provider.id.clone(), latency, true);
+                    spawn_record_result(state.store.clone(), provider.id.clone(), latency, true);
                     spawn_pin_channel(
-                        state.pool.clone(),
+                        state.store.clone(),
                         auth_ctx.api_key_id.clone(),
                         model.clone(),
                         provider.id.clone(),
@@ -306,7 +306,7 @@ pub async fn passthrough(
                     // 计费级:响应返回前日志与扣费已落库(await)。
                     let (p, c, t, k) = extract_usage_any(&resp_body);
                     request_log_sync(
-                        &state.pool,
+                        &state,
                         claims.sub.clone(),
                         auth_ctx.api_key_id.clone(),
                         Some(provider.id.clone()),
@@ -335,7 +335,7 @@ pub async fn passthrough(
                         provider.name, msg
                     );
                     spawn_record_failure(
-                        state.pool.clone(),
+                        state.store.clone(),
                         provider.id.clone(),
                         latency,
                         0,
@@ -343,7 +343,7 @@ pub async fn passthrough(
                         failure_counted.insert(provider.id.clone()),
                     );
                     spawn_request_log(
-                        &state.pool,
+                        &state,
                         claims.sub.clone(),
                         auth_ctx.api_key_id.clone(),
                         Some(provider.id.clone()),
@@ -380,7 +380,7 @@ pub async fn passthrough(
             path, model, provider.name, status, msg
         );
         spawn_record_failure(
-            state.pool.clone(),
+            state.store.clone(),
             provider.id.clone(),
             latency,
             status,
@@ -394,7 +394,7 @@ pub async fn passthrough(
             msg.clone()
         };
         spawn_request_log(
-            &state.pool,
+            &state,
             claims.sub.clone(),
             auth_ctx.api_key_id.clone(),
             Some(provider.id.clone()),
@@ -441,7 +441,7 @@ pub async fn passthrough(
         }
         None => {
             spawn_request_log(
-                &state.pool,
+                &state,
                 claims.sub.clone(),
                 auth_ctx.api_key_id.clone(),
                 None,

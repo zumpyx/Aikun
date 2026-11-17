@@ -147,6 +147,9 @@ pub struct UserPatch {
 
 /// users 方法组端口(过渡期由 main.rs 适配器实现,aikun-store 就位后收编)。
 /// 方法是同步的:SQLite 进程内 + 互斥锁,单条开销极小(与 AuthStore 同口径)。
+/// 阶段 S async 化(docs/surreal-migration.md §六):端口随装配适配器
+/// 翻转 `#[async_trait]`;纯计算方法(random_password)保持 sync。
+#[async_trait::async_trait]
 pub trait AdminUsersStore: Send + Sync + 'static {
     /// 列表页(读锁):
     /// `SELECT id, username, display_name, role, is_active, created_at,
@@ -155,7 +158,7 @@ pub trait AdminUsersStore: Send + Sync + 'static {
     /// 与页无关;rowid 是分页稳定性加的并列决胜——旧行为仅
     /// created_at DESC,同秒顺序本就未定义,users.rs:108-109)。
     /// 行映射失败按旧语义静默跳过(filter_map .ok(),users.rs:117)。
-    fn list_users(
+    async fn list_users(
         &self,
         limit: i64,
         offset: i64,
@@ -164,18 +167,18 @@ pub trait AdminUsersStore: Send + Sync + 'static {
     /// 查单个(读锁):同列 `WHERE id = ?`。**查询错误与不存在统一
     /// Ok(None)**(旧 `.ok()` 语义 → 404,users.rs:415-429);仅锁不可用
     /// 返回 Err。
-    fn find_user(&self, id: &str) -> Result<Option<AdminUserRecord>, UsersStoreError>;
+    async fn find_user(&self, id: &str) -> Result<Option<AdminUserRecord>, UsersStoreError>;
 
     /// 插入单条(写锁):`INSERT INTO users (id, username, password_hash,
     /// display_name, role) VALUES (uuid4, ?, ?, ?, ?)`(users.rs:196-199)。
     /// 唯一约束冲突 → Ok(UsernameExists);其他 INSERT 错误 → Err(Failed)。
-    fn insert_user(&self, user: &NewUser) -> Result<InsertOutcome, UsersStoreError>;
+    async fn insert_user(&self, user: &NewUser) -> Result<InsertOutcome, UsersStoreError>;
 
     /// 批量插入(写锁):**一把锁内逐条** INSERT,不包整体事务(单项失败
     /// 不影响其余,users.rs:349-388);返回与入参**等长等序**的逐条结果,
     /// 单条非唯一约束失败 → BatchInsertItem::Failed(而非整体 Err)。
     /// 仅锁不可用 → Err(整体失败)。
-    fn insert_users_batch(
+    async fn insert_users_batch(
         &self,
         users: &[PreparedUser],
     ) -> Result<Vec<BatchInsertItem>, UsersStoreError>;
@@ -190,18 +193,22 @@ pub trait AdminUsersStore: Send + Sync + 'static {
     ///    `token_version = token_version + 1` / is_active / role),恒附
     ///    `updated_at = datetime('now')`,执行 UPDATE;影响行数 0 → NotFound;
     /// 3. 回读整行(`find_user` 同列)返回 Updated(新版返回资源)。
-    fn update_user(&self, id: &str, patch: &UserPatch) -> Result<UpdateOutcome, UsersStoreError>;
+    async fn update_user(
+        &self,
+        id: &str,
+        patch: &UserPatch,
+    ) -> Result<UpdateOutcome, UsersStoreError>;
 
     /// 软禁用(一把写锁内先 last_admin 判定,同上):`UPDATE users SET
     /// is_active = 0, updated_at = datetime('now') WHERE id = ?`
     /// (users.rs:565-578);影响行数 0 → NotFound。
-    fn disable_user(&self, id: &str) -> Result<DisableOutcome, UsersStoreError>;
+    async fn disable_user(&self, id: &str) -> Result<DisableOutcome, UsersStoreError>;
 
     /// Argon2 哈希(CPU 密集;impl 侧已派发 blocking 线程池)。
     /// Err = 哈希失败(旧 hash_failed)。unit Err 是刻意的:失败细节只进
     /// 日志不进响应(与 AuthStore::find_login_user 同口径)。
     #[allow(clippy::result_unit_err)]
-    fn hash_password(&self, password: &str) -> Result<String, ()>;
+    async fn hash_password(&self, password: &str) -> Result<String, ()>;
 
     /// 随机密码(批量创建缺省密码时生成,仅回显一次)。
     fn random_password(&self) -> String;
@@ -239,7 +246,7 @@ impl AdminUsersService {
         let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(MIN_LIMIT, MAX_LIMIT);
         // 负 offset 防御:生成路由已 422 拦截(minimum: 0),这里兜底直调。
         let offset = offset.unwrap_or(0).max(0);
-        match self.store.list_users(limit, offset) {
+        match self.store.list_users(limit, offset).await {
             Ok((records, total)) => AdminListUsersResponse::Ok(UserWithBalancePage {
                 items: records.iter().map(to_user_with_balance).collect(),
                 total,
@@ -280,28 +287,31 @@ impl AdminUsersService {
             None => username.clone(),
         };
 
-        // Argon2 在 blocking 线程池哈希(旧 users.rs:174)。
+        // Argon2 的 blocking 派发在端口 impl 侧(async 化翻转后服务层
+        // 直接 await,语义同旧"哈希在 blocking 线程池")。
         let password = body.password.clone();
-        let store = Arc::clone(&self.store);
-        let password_hash =
-            match tokio::task::spawn_blocking(move || store.hash_password(&password)).await {
-                Ok(Ok(h)) => h,
-                _ => {
-                    tracing::error!("admin_create_user: password hashing failed");
-                    return AdminCreateUserResponse::Forbidden(problem(
-                        403,
-                        "hash_failed",
-                        "密码哈希失败,请稍后重试",
-                    ));
-                }
-            };
+        let password_hash = match self.store.hash_password(&password).await {
+            Ok(h) => h,
+            Err(()) => {
+                tracing::error!("admin_create_user: password hashing failed");
+                return AdminCreateUserResponse::Forbidden(problem(
+                    403,
+                    "hash_failed",
+                    "密码哈希失败,请稍后重试",
+                ));
+            }
+        };
 
-        match self.store.insert_user(&NewUser {
-            username: username.clone(),
-            display_name: display_name.clone(),
-            role: role.clone(),
-            password_hash,
-        }) {
+        match self
+            .store
+            .insert_user(&NewUser {
+                username: username.clone(),
+                display_name: display_name.clone(),
+                role: role.clone(),
+                password_hash,
+            })
+            .await
+        {
             // 出参与旧实现同构:请求值 + 当前时间(不回读,users.rs:203-211)。
             Ok(InsertOutcome::Created(id)) => {
                 let now = chrono::Utc::now();
@@ -353,25 +363,13 @@ impl AdminUsersService {
             ));
         }
 
-        // 相位 1:校验 + Argon2,一把 blocking 任务跑完(旧 users.rs:336)。
-        let store = Arc::clone(&self.store);
+        // 相位 1:校验 + Argon2(旧 users.rs:336;blocking 派发在端口
+        // impl 侧,这里顺序 await)。
         let (prepared, mut results, prepared_result_idx) =
-            match tokio::task::spawn_blocking(move || prepare_batch_users(&*store, body.users))
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!("admin_create_users_batch: prepare task failed: {e}");
-                    return AdminCreateUsersBatchResponse::Forbidden(store_failure(
-                        "internal_error",
-                        UsersStoreError::Unavailable,
-                        "admin_create_users_batch",
-                    ));
-                }
-            };
+            prepare_batch_users(self.store.as_ref(), body.users).await;
 
         // 相位 2:一把写锁内逐条插入,单项失败不影响其余(旧 users.rs:349)。
-        let outcomes = match self.store.insert_users_batch(&prepared) {
+        let outcomes = match self.store.insert_users_batch(&prepared).await {
             Ok(v) => v,
             Err(e) => {
                 return AdminCreateUsersBatchResponse::Forbidden(store_failure(
@@ -418,7 +416,7 @@ impl AdminUsersService {
     /// `GET /api/users/{id}`(旧 `GET /api/admin/users/{id}`)。查询失败与
     /// 不存在同走 404(旧 `.ok()` 语义);锁不可用 fail-closed(文件头)。
     pub async fn admin_get_user(&self, id: String) -> AdminGetUserResponse {
-        match self.store.find_user(&id) {
+        match self.store.find_user(&id).await {
             Ok(Some(rec)) => AdminGetUserResponse::Ok(to_user_with_balance(&rec)),
             Ok(None) => AdminGetUserResponse::NotFound(problem(404, "not_found", "用户不存在")),
             Err(e) => {
@@ -451,22 +449,19 @@ impl AdminUsersService {
             return AdminUpdateUserResponse::BadRequest(p);
         }
 
-        // 改密哈希在 blocking 线程池(旧 users.rs:461)。
+        // 改密哈希(blocking 派发在端口 impl 侧;旧 users.rs:461)。
         let password_hash = match body.password.clone() {
-            Some(password) => {
-                let store = Arc::clone(&self.store);
-                match tokio::task::spawn_blocking(move || store.hash_password(&password)).await {
-                    Ok(Ok(h)) => Some(h),
-                    _ => {
-                        tracing::error!("admin_update_user: password hashing failed");
-                        return AdminUpdateUserResponse::Forbidden(problem(
-                            403,
-                            "hash_failed",
-                            "密码哈希失败,请稍后重试",
-                        ));
-                    }
+            Some(password) => match self.store.hash_password(&password).await {
+                Ok(h) => Some(h),
+                Err(()) => {
+                    tracing::error!("admin_update_user: password hashing failed");
+                    return AdminUpdateUserResponse::Forbidden(problem(
+                        403,
+                        "hash_failed",
+                        "密码哈希失败,请稍后重试",
+                    ));
                 }
-            }
+            },
             None => None,
         };
 
@@ -492,7 +487,7 @@ impl AdminUsersService {
             ));
         }
 
-        match self.store.update_user(&id, &patch) {
+        match self.store.update_user(&id, &patch).await {
             Ok(UpdateOutcome::Updated(rec)) => AdminUpdateUserResponse::Ok(to_api_user(&rec)),
             Ok(UpdateOutcome::NotFound) => {
                 AdminUpdateUserResponse::NotFound(problem(404, "not_found", "用户不存在"))
@@ -516,7 +511,7 @@ impl AdminUsersService {
     /// 保留,不提供物理删除;200 `{message}` → 204(语义变化 #4);
     /// last_admin 409。
     pub async fn admin_delete_user(&self, id: String) -> AdminDeleteUserResponse {
-        match self.store.disable_user(&id) {
+        match self.store.disable_user(&id).await {
             Ok(DisableOutcome::Disabled) => AdminDeleteUserResponse::NoContent,
             Ok(DisableOutcome::NotFound) => {
                 AdminDeleteUserResponse::NotFound(problem(404, "not_found", "用户不存在"))
@@ -651,7 +646,7 @@ fn store_failure(op_code: &str, e: UsersStoreError, op: &str) -> Problem {
 /// 批量不放弱账号进来;缺省密码随机生成并记入 `generated_password`
 /// (仅回显一次)。返回 (待插入项, 逐项结果占位向量, 待插入项在结果
 /// 向量中的下标)。
-fn prepare_batch_users(
+async fn prepare_batch_users(
     store: &dyn AdminUsersStore,
     users: Vec<BatchCreateUserItem>,
 ) -> (Vec<PreparedUser>, Vec<BatchUserItemResult>, Vec<usize>) {
@@ -687,7 +682,7 @@ fn prepare_batch_users(
                 (p.clone(), Some(p))
             }
         };
-        let password_hash = match store.hash_password(&password) {
+        let password_hash = match store.hash_password(&password).await {
             Ok(h) => h,
             Err(_) => {
                 tracing::error!("admin_create_users_batch: hash failed for {username}");

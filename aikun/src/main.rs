@@ -5,9 +5,9 @@ mod cache;
 mod channel;
 mod config;
 mod crypto;
-mod db;
 mod models;
 mod pipeline;
+mod store;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -24,12 +24,13 @@ use tracing::info;
 
 use crate::auth::{auth_middleware, require_admin};
 use crate::config::AppConfig;
-use crate::db::DbPool;
+use crate::store::AppStore;
 
 /// Shared application state — all handlers receive this via `State<AppState>`.
 #[derive(Clone)]
 pub struct AppState {
-    pub pool: Arc<DbPool>,
+    /// SurrealDB 存储门面(阶段 S 默认切换:三域能力 + 渠道 key 解密器)。
+    pub store: Arc<AppStore>,
     pub config: Arc<AppConfig>,
     /// Cached reqwest clients keyed by "proxy_url|timeout_secs" — building a
     /// client per request is expensive and defeats connection pooling.
@@ -54,8 +55,21 @@ pub struct AppState {
     pub cache: Arc<cache::GatewayCache>,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // 阶段 S 栈配置(集成批必办,docs/surreal-migration.md §一):嵌入式
+    // SurrealKV 的查询执行在调用任务栈上内联递归,默认 2MiB tokio 线程
+    // 栈执行 SCHEMA_SURQL 级别的多语句查询即溢出(store 单测实测复现),
+    // 官方 engine::local 文档建议 ~10MiB——显式建运行时替换 #[tokio::main]
+    // 宏默认值。
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(10 * 1024 * 1024)
+        .build()
+        .expect("failed to build tokio runtime");
+    runtime.block_on(async_main());
+}
+
+async fn async_main() {
     dotenvy::dotenv().ok();
 
     tracing_subscriber::fmt()
@@ -86,8 +100,14 @@ async fn main() {
         );
     }
 
-    let pool = Arc::new(DbPool::new(&config).expect("Failed to initialize database"));
-    info!("Database initialized");
+    // SurrealDB 装配:连接(嵌入式 SurrealKV / 远程 URL)→ schema 初始化
+    // (幂等)→ 默认价格/admin 播种 → 计数器重建。任一步失败拒绝启动。
+    let store = Arc::new(
+        store::init(&config)
+            .await
+            .expect("Failed to initialize SurrealDB"),
+    );
+    info!("Database initialized (SurrealDB)");
 
     // 运维逃生口:设置 AIKUN_RESET_ADMIN_PASSWORD 后,启动即重置 admin 密码
     // 并 token_version + 1(旧会话全部失效)。密码本身绝不打印到日志。
@@ -96,23 +116,20 @@ async fn main() {
             tracing::warn!("AIKUN_RESET_ADMIN_PASSWORD 为空,忽略密码重置");
         } else {
             match crate::auth::hash_password(&new_password) {
-                Ok(hash) => match pool.conn.lock() {
-                    Ok(conn) => match crate::db::reset_admin_password(&conn, &hash) {
-                        Ok(true) => info!("管理员密码已通过环境变量重置,请尽快修改并移除该变量"),
-                        Ok(false) => tracing::warn!(
-                            "AIKUN_RESET_ADMIN_PASSWORD 已设置,但库中不存在 admin 用户"
-                        ),
-                        Err(e) => tracing::error!("管理员密码重置失败: {}", e),
-                    },
-                    Err(_) => tracing::error!("管理员密码重置失败:数据库锁不可用"),
+                Ok(hash) => match store.identity.reset_admin_password(&hash).await {
+                    Ok(true) => info!("管理员密码已通过环境变量重置,请尽快修改并移除该变量"),
+                    Ok(false) => {
+                        tracing::warn!("AIKUN_RESET_ADMIN_PASSWORD 已设置,但库中不存在 admin 用户")
+                    }
+                    Err(e) => tracing::error!("管理员密码重置失败: {e}"),
                 },
-                Err(e) => tracing::error!("管理员密码重置失败(哈希计算): {}", e),
+                Err(e) => tracing::error!("管理员密码重置失败(哈希计算): {e}"),
             }
         }
     }
 
     let state = AppState {
-        pool: pool.clone(),
+        store: store.clone(),
         config: config.clone(),
         clients: Arc::new(Mutex::new(HashMap::new())),
         login_attempts: Arc::new(Mutex::new(HashMap::new())),
@@ -128,8 +145,8 @@ async fn main() {
     // 签名只有 body,拿不到对端地址,也表达不了自定义头(详见
     // crates/aikun-admin/src/auth.rs 文件头的装配契约)。
     let auth_service = aikun_admin::auth::AuthService::new(
-        std::sync::Arc::new(DbAuthStore {
-            pool: pool.clone(),
+        std::sync::Arc::new(SurrealAuthStore {
+            store: store.clone(),
             config: config.clone(),
         }),
         state.login_attempts.clone(),
@@ -149,7 +166,9 @@ async fn main() {
     // JWT → claims_to_user_auth 把二进制 Claims 映射为 user::UserAuth 塞回
     // extensions → user_auth_scope 转入 task-local 供 impl 读取。 ---
     let user_service = aikun_admin::user::UserService::new(
-        Arc::new(DbUserStore { pool: pool.clone() }),
+        Arc::new(SurrealUserStore {
+            store: store.clone(),
+        }),
         state.redeem_attempts.clone(),
         state.api_key_rate.clone(),
         env!("CARGO_PKG_VERSION"),
@@ -168,20 +187,24 @@ async fn main() {
     // require_admin;401/403 错误体已归一 problem+json(auth/mod.rs)。 ---
     let admin_service = aikun_admin::AdminService {
         providers: aikun_admin::admin_providers::AdminProvidersService::new(
-            Arc::new(DbProviderStore { pool: pool.clone() }),
+            Arc::new(SurrealProviderStore {
+                store: store.clone(),
+            }),
             Arc::new(GatewayProbes {
-                pool: pool.clone(),
+                store: store.clone(),
                 clients: state.clients.clone(),
             }),
         ),
-        users: aikun_admin::admin_users::AdminUsersService::new(Arc::new(DbAdminUsersStore {
-            pool: pool.clone(),
+        users: aikun_admin::admin_users::AdminUsersService::new(Arc::new(SurrealAdminUsersStore {
+            store: store.clone(),
         })),
-        billing: aikun_admin::admin_billing::AdminBillingService::new(Arc::new(DbBillingStore {
-            pool: pool.clone(),
-        })),
-        stats: aikun_admin::admin_stats::AdminStatsService::new(Arc::new(DbStatsStore {
-            pool: pool.clone(),
+        billing: aikun_admin::admin_billing::AdminBillingService::new(Arc::new(
+            SurrealBillingStore {
+                store: store.clone(),
+            },
+        )),
+        stats: aikun_admin::admin_stats::AdminStatsService::new(Arc::new(SurrealStatsStore {
+            store: store.clone(),
         })),
     };
     let admin_routes =
@@ -217,7 +240,7 @@ async fn main() {
     // Spawn the health check background task under a supervisor: if the loop
     // ever panics or exits, log it and restart after a short backoff so
     // health tracking cannot silently die.
-    let health_pool = pool.clone();
+    let health_store = store.clone();
     let health_config = config.clone();
     let health_clients = state.clients.clone();
     tokio::spawn(async move {
@@ -225,7 +248,7 @@ async fn main() {
         loop {
             let result =
                 std::panic::AssertUnwindSafe(crate::channel::health::run_health_check_loop(
-                    health_pool.clone(),
+                    health_store.clone(),
                     health_config.clone(),
                     health_clients.clone(),
                 ))
@@ -242,14 +265,14 @@ async fn main() {
     });
 
     // Same supervision for the 30-minute per-model live test loop.
-    let model_test_pool = pool.clone();
+    let model_test_store = store.clone();
     let model_test_clients = state.clients.clone();
     tokio::spawn(async move {
         use futures_util::FutureExt;
         loop {
             let result =
                 std::panic::AssertUnwindSafe(crate::channel::model_test::run_model_test_loop(
-                    model_test_pool.clone(),
+                    model_test_store.clone(),
                     model_test_clients.clone(),
                 ))
                 .catch_unwind()
@@ -380,54 +403,58 @@ async fn claims_to_user_auth(
     next.run(req).await
 }
 
-// ---------- Auth tag 适配器(DbAuthStore,Auth 批已交付) ----------
+// ---------- Auth tag 适配器(SurrealDB;阶段 S 默认切换) ----------
 
-// aikun-admin 的登录端口(aikun_admin::auth::AuthStore)由二进制的
-// DbPool + auth 模块实现,SQL 与哈希/签发逻辑迁自旧 api::auth::login;
-// aikun-store 就位后由 store 层收编(plan 步骤 8),届时删除本适配器。
-struct DbAuthStore {
-    pool: Arc<DbPool>,
+/// aikun-admin 的登录端口由 Surreal 身份域实现;哈希/签发复用二进制
+/// crate::auth(aikun-store 的 password 模块)。时间出参统一 RFC3339
+/// (aikun-admin 的 sqlite_utc 助手兼容两种格式)。
+struct SurrealAuthStore {
+    store: Arc<AppStore>,
     config: Arc<AppConfig>,
 }
 
-impl aikun_admin::auth::AuthStore for DbAuthStore {
+#[async_trait::async_trait]
+impl aikun_admin::auth::AuthStore for SurrealAuthStore {
     /// 查询错误与"用户不存在"一律 Ok(None)(旧实现 `.ok()` 语义,统一
-    /// 401 防枚举);连接锁中毒 → Err(())。
-    fn find_login_user(
+    /// 401 防枚举)。
+    async fn find_login_user(
         &self,
         username: &str,
     ) -> Result<Option<aikun_admin::auth::LoginUserRecord>, ()> {
-        let conn = self.pool.read().lock().map_err(|_| ())?;
-        Ok(conn
-            .query_row(
-                "SELECT id, username, password_hash, display_name, role, is_active, created_at, updated_at, token_version
-                 FROM users WHERE username = ?1",
-                rusqlite::params![username],
-                |row| {
-                    Ok(aikun_admin::auth::LoginUserRecord {
-                        id: row.get(0)?,
-                        username: row.get(1)?,
-                        password_hash: row.get(2)?,
-                        display_name: row.get(3)?,
-                        role: row.get(4)?,
-                        is_active: row.get(5)?,
-                        created_at: row.get(6)?,
-                        updated_at: row.get(7)?,
-                        token_version: row.get(8)?,
-                    })
-                },
-            )
-            .ok())
+        Ok(self
+            .store
+            .identity
+            .find_login_user(username)
+            .await
+            .ok()
+            .flatten()
+            .map(|u| aikun_admin::auth::LoginUserRecord {
+                id: u.id,
+                username: u.username,
+                password_hash: u.password_hash,
+                display_name: u.display_name,
+                role: u.role,
+                is_active: u.is_active,
+                created_at: u.created_at.to_rfc3339(),
+                updated_at: u.updated_at.to_rfc3339(),
+                token_version: u.token_version,
+            }))
     }
 
-    fn verify_password(&self, password: &str, hash: &str) -> bool {
-        crate::auth::verify_password(password, hash).unwrap_or(false)
+    async fn verify_password(&self, password: &str, hash: &str) -> bool {
+        // Argon2 CPU 密集:派发 blocking 线程池(语义同旧)。
+        let (password, hash) = (password.to_string(), hash.to_string());
+        tokio::task::spawn_blocking(move || {
+            crate::auth::verify_password(&password, &hash).unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
     }
 
     fn dummy_password_hash(&self) -> &'static str {
         // A valid Argon2 hash used to equalize response timing when the
         // requested username does not exist (prevents account-enumeration
-        // via timing).迁自旧 api::auth::dummy_password_hash。
+        // via timing)。
         static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         DUMMY.get_or_init(|| {
             crate::auth::hash_password("dummy-password").unwrap_or_else(|_| {
@@ -437,7 +464,7 @@ impl aikun_admin::auth::AuthStore for DbAuthStore {
         })
     }
 
-    fn create_token(&self, user: &aikun_admin::auth::LoginUserRecord) -> Result<String, ()> {
+    async fn create_token(&self, user: &aikun_admin::auth::LoginUserRecord) -> Result<String, ()> {
         crate::auth::create_token(
             &user.id,
             &user.username,
@@ -449,116 +476,71 @@ impl aikun_admin::auth::AuthStore for DbAuthStore {
     }
 }
 
-// ---------- User tag 适配器(DbUserStore;SQL 迁自旧 api/auth.rs、
-// api/logs.rs、api/redemption.rs::redeem_code) ----------
+// ---------- User tag 适配器(SurrealUserStore;身份域 + 计费域) ----------
 
 use aikun_admin::user as user_port;
+use aikun_store::surreal::billing_store as sbilling;
+use aikun_store::surreal::identity as sidentity;
 
-struct DbUserStore {
-    pool: Arc<DbPool>,
+struct SurrealUserStore {
+    store: Arc<AppStore>,
 }
 
-/// api_keys 行 → 库内视角记录(key 只带掩码后缀;完整哈希永不出端口)。
-const API_KEY_COLS: &str =
-    "id, user_id, key_suffix, name, is_active, last_used_at, expires_at, models,
-                            rate_limit_rpm, quota_daily_tokens, max_concurrent, created_at";
-
-fn row_to_api_key_record(row: &rusqlite::Row) -> rusqlite::Result<user_port::ApiKeyRecord> {
-    Ok(user_port::ApiKeyRecord {
-        id: row.get(0)?,
-        user_id: row.get(1)?,
-        key_suffix: row.get(2)?,
-        name: row.get(3)?,
-        is_active: row.get(4)?,
-        last_used_at: row.get(5)?,
-        expires_at: row.get(6)?,
-        models_json: row.get(7)?,
-        rate_limit_rpm: row.get(8)?,
-        quota_daily_tokens: row.get(9)?,
-        max_concurrent: row.get(10)?,
-        created_at: row.get(11)?,
-    })
+/// Surreal api_key 行 → 端口记录(models 数组 → JSON 文本)。
+fn api_key_record(row: &sidentity::ApiKeyRow) -> user_port::ApiKeyRecord {
+    user_port::ApiKeyRecord {
+        id: row.id.clone(),
+        user_id: row.user_id.clone(),
+        key_suffix: row.key_suffix.clone(),
+        name: row.name.clone(),
+        is_active: row.is_active,
+        last_used_at: row.last_used_at.map(|t| t.to_rfc3339()),
+        expires_at: row.expires_at.map(|t| t.to_rfc3339()),
+        models_json: serde_json::to_string(&row.models).unwrap_or_else(|_| "[]".to_string()),
+        rate_limit_rpm: row.rate_limit_rpm,
+        quota_daily_tokens: row.quota_daily_tokens,
+        max_concurrent: row.max_concurrent,
+        created_at: row.created_at.to_rfc3339(),
+    }
 }
 
-/// 日志过滤 → (WHERE 子句, 参数),列名带 l. 前缀(LEFT JOIN 歧义防护)。
-/// 迁自旧 api/logs.rs::build_log_filters;success 已是 0/1。
-fn user_log_where(
-    filters: &user_port::LogFilters,
-) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
-    let mut conditions = Vec::new();
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    if let Some(uid) = &filters.user_id {
-        conditions.push("l.user_id = ?");
-        params.push(Box::new(uid.clone()));
+/// 端口日志过滤 → Surreal 计费域过滤(success 0/1 → bool;since 原文
+/// 宽松解析为 datetime,不可解析忽略该条件)。
+fn surreal_log_filters(f: &user_port::LogFilters) -> sbilling::LogFilters {
+    sbilling::LogFilters {
+        user_id: f.user_id.clone(),
+        api_key_id: None,
+        provider_id: None,
+        model: f.model.clone(),
+        success: f.success.map(|s| s == 1),
+        since: f.since.as_deref().and_then(crate::auth::parse_expiry),
+        until: None,
     }
-    if let Some(model) = &filters.model {
-        conditions.push("l.model = ?");
-        params.push(Box::new(model.clone()));
-    }
-    if let Some(s) = filters.success {
-        conditions.push("l.success = ?");
-        params.push(Box::new(s));
-    }
-    if let Some(since) = &filters.since {
-        conditions.push("l.created_at >= ?");
-        params.push(Box::new(since.clone()));
-    }
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {} ", conditions.join(" AND "))
-    };
-    (where_clause, params)
 }
 
-fn row_to_log_record(row: &rusqlite::Row) -> rusqlite::Result<user_port::LogRecord> {
-    Ok(user_port::LogRecord {
-        id: row.get(0)?,
-        user_id: row.get(1)?,
-        api_key_id: row.get(2)?,
-        provider_id: row.get(3)?,
-        username: row.get(16)?,
-        provider_name: row.get(17)?,
-        model: row.get(4)?,
-        request_type: row.get(5)?,
-        prompt_tokens: row.get(6)?,
-        completion_tokens: row.get(7)?,
-        total_tokens: row.get(8)?,
-        cached_tokens: row.get(9)?,
-        latency_ms: row.get(10)?,
-        status_code: row.get(11)?,
-        success: row.get(12)?,
-        error_message: row.get(13)?,
-        cost_micro: row.get(14)?,
-        created_at: row.get(15)?,
-    })
-}
-
-impl user_port::UserStore for DbUserStore {
-    fn find_user_with_balance(
+#[async_trait::async_trait]
+impl user_port::UserStore for SurrealUserStore {
+    async fn find_user_with_balance(
         &self,
         user_id: &str,
     ) -> Result<Option<user_port::UserBalanceRecord>, ()> {
-        let conn = self.pool.read().lock().map_err(|_| ())?;
-        Ok(conn
-            .query_row(
-                "SELECT id, username, display_name, role, is_active, created_at, updated_at, balance
-                 FROM users WHERE id = ?1",
-                rusqlite::params![user_id],
-                |row| {
-                    Ok(user_port::UserBalanceRecord {
-                        id: row.get(0)?,
-                        username: row.get(1)?,
-                        display_name: row.get(2)?,
-                        role: row.get(3)?,
-                        is_active: row.get(4)?,
-                        created_at: row.get(5)?,
-                        updated_at: row.get(6)?,
-                        balance_micro: row.get(7)?,
-                    })
-                },
-            )
-            .ok())
+        Ok(self
+            .store
+            .identity
+            .find_user(user_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|u| user_port::UserBalanceRecord {
+                id: u.id,
+                username: u.username,
+                display_name: u.display_name,
+                role: u.role,
+                is_active: u.is_active,
+                created_at: u.created_at.to_rfc3339(),
+                updated_at: u.updated_at.to_rfc3339(),
+                balance_micro: u.balance_micro,
+            }))
     }
 
     fn generate_api_key_material(&self) -> (String, String, String, String) {
@@ -571,502 +553,348 @@ impl user_port::UserStore for DbUserStore {
         (id, key, key_hash, key_suffix)
     }
 
-    fn insert_api_key(&self, row: &user_port::NewApiKey) -> Result<user_port::ApiKeyRecord, ()> {
-        let conn = self.pool.conn.lock().map_err(|_| ())?;
-        conn.execute(
-            "INSERT INTO api_keys (id, user_id, key, key_suffix, name, expires_at, models, rate_limit_rpm, quota_daily_tokens, max_concurrent)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![
-                row.id,
-                row.user_id,
-                row.key_hash,
-                row.key_suffix,
-                row.name,
-                row.expires_at,
-                row.models_json,
-                row.rate_limit_rpm,
-                row.quota_daily_tokens,
-                row.max_concurrent
-            ],
-        )
-        .map_err(|e| {
-            tracing::error!("DbUserStore::insert_api_key: {e}")
-        })?;
-        conn.query_row(
-            &format!("SELECT {API_KEY_COLS} FROM api_keys WHERE id = ?1"),
-            rusqlite::params![row.id],
-            row_to_api_key_record,
-        )
-        .map_err(|_| ())
+    async fn insert_api_key(
+        &self,
+        row: &user_port::NewApiKey,
+    ) -> Result<user_port::ApiKeyRecord, ()> {
+        // 建行(模型清单转原生数组)→ 一次性补齐过期时刻与三项限额
+        // (桩契约 NewApiKey 只带核心列,补丁走 update_api_key)。
+        let models: Vec<String> = serde_json::from_str(&row.models_json).unwrap_or_default();
+        let created = self
+            .store
+            .identity
+            .insert_api_key(sidentity::NewApiKey {
+                id: Some(row.id.clone()),
+                user_id: row.user_id.clone(),
+                key_hash: row.key_hash.clone(),
+                key_suffix: row.key_suffix.clone(),
+                name: row.name.clone(),
+                models,
+            })
+            .await
+            .map_err(|e| tracing::error!("SurrealUserStore::insert_api_key: {e}"))?;
+        let expires = row
+            .expires_at
+            .as_deref()
+            .and_then(crate::auth::parse_expiry);
+        let patch = sidentity::ApiKeyPatch {
+            expires_at: Some(expires),
+            rate_limit_rpm: Some(row.rate_limit_rpm),
+            quota_daily_tokens: Some(row.quota_daily_tokens),
+            max_concurrent: Some(row.max_concurrent),
+            ..Default::default()
+        };
+        let row = self
+            .store
+            .identity
+            .update_api_key(&created.id, None, patch)
+            .await
+            .map_err(|e| tracing::error!("SurrealUserStore::insert_api_key(patch): {e}"))?
+            .unwrap_or(created);
+        Ok(api_key_record(&row))
     }
 
-    fn list_api_keys(
+    async fn list_api_keys(
         &self,
         target_user_id: &str,
         limit: i64,
         offset: i64,
     ) -> Result<(i64, Vec<user_port::ApiKeyRecord>), ()> {
-        let conn = self.pool.read().lock().map_err(|_| ())?;
-        let total: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM api_keys WHERE user_id = ?1",
-                rusqlite::params![target_user_id],
-                |r| r.get(0),
-            )
+        let (total, rows) = self
+            .store
+            .identity
+            .list_api_keys(target_user_id, limit, offset)
+            .await
             .map_err(|_| ())?;
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT {API_KEY_COLS} FROM api_keys WHERE user_id = ?1
-                 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"
-            ))
-            .map_err(|_| ())?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![target_user_id, limit, offset],
-                row_to_api_key_record,
-            )
-            .map_err(|_| ())?;
-        Ok((total, rows.filter_map(|r| r.ok()).collect()))
+        Ok((total, rows.iter().map(api_key_record).collect()))
     }
 
-    fn update_api_key(
+    async fn update_api_key(
         &self,
         key_id: &str,
         owner: Option<&str>,
         updates: &user_port::ApiKeyUpdates,
     ) -> Result<Option<user_port::ApiKeyRecord>, ()> {
-        let conn = self.pool.conn.lock().map_err(|_| ())?;
-        let mut sets = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        if let Some(name) = &updates.name {
-            sets.push("name = ?");
-            params.push(Box::new(name.clone()));
-        }
-        if let Some(active) = updates.is_active {
-            sets.push("is_active = ?");
-            params.push(Box::new(active as i32));
-        }
-        if let Some(exp) = &updates.expires_at {
-            sets.push("expires_at = ?");
-            // Some(None) = 清除(永不过期);Some(Some(s)) = 设置原文。
-            params.push(Box::new(exp.clone()));
-        }
-        if let Some(models_json) = &updates.models_json {
-            sets.push("models = ?");
-            params.push(Box::new(models_json.clone()));
-        }
-        if let Some(rpm) = updates.rate_limit_rpm {
-            sets.push("rate_limit_rpm = ?");
-            params.push(Box::new(rpm));
-        }
-        if let Some(quota) = updates.quota_daily_tokens {
-            sets.push("quota_daily_tokens = ?");
-            params.push(Box::new(quota));
-        }
-        if let Some(mc) = updates.max_concurrent {
-            sets.push("max_concurrent = ?");
-            params.push(Box::new(mc));
-        }
-        // 属主过滤:非 admin 限自己的 key,未命中影响行数 0 → Ok(None)。
-        let sql = if owner.is_some() {
-            format!(
-                "UPDATE api_keys SET {} WHERE id = ? AND user_id = ?",
-                sets.join(", ")
-            )
-        } else {
-            format!("UPDATE api_keys SET {} WHERE id = ?", sets.join(", "))
+        let patch = sidentity::ApiKeyPatch {
+            name: updates.name.clone(),
+            is_active: updates.is_active,
+            // Some(None) = 清除(永不过期);Some(Some(s)) = 设置
+            //(服务层已校验可解析的未来时刻)。
+            expires_at: updates
+                .expires_at
+                .as_ref()
+                .map(|e| e.as_deref().and_then(crate::auth::parse_expiry)),
+            models: updates
+                .models_json
+                .as_ref()
+                .map(|j| serde_json::from_str(j).unwrap_or_default()),
+            rate_limit_rpm: updates.rate_limit_rpm,
+            quota_daily_tokens: updates.quota_daily_tokens,
+            max_concurrent: updates.max_concurrent,
         };
-        params.push(Box::new(key_id.to_string()));
-        if let Some(uid) = owner {
-            params.push(Box::new(uid.to_string()));
-        }
-        let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let n = conn
-            .execute(&sql, refs.as_slice())
-            .map_err(|e| tracing::error!("DbUserStore::update_api_key: {e}"))?;
-        if n == 0 {
-            return Ok(None);
-        }
-        Ok(conn
-            .query_row(
-                &format!("SELECT {API_KEY_COLS} FROM api_keys WHERE id = ?1"),
-                rusqlite::params![key_id],
-                row_to_api_key_record,
-            )
-            .ok())
+        Ok(self
+            .store
+            .identity
+            .update_api_key(key_id, owner, patch)
+            .await
+            .map_err(|e| tracing::error!("SurrealUserStore::update_api_key: {e}"))?
+            .as_ref()
+            .map(api_key_record))
     }
 
-    fn delete_api_key(&self, key_id: &str, owner: Option<&str>) -> Result<i64, ()> {
-        let conn = self.pool.conn.lock().map_err(|_| ())?;
-        let n = if let Some(uid) = owner {
-            conn.execute(
-                "DELETE FROM api_keys WHERE id = ?1 AND user_id = ?2",
-                rusqlite::params![key_id, uid],
-            )
-        } else {
-            conn.execute(
-                "DELETE FROM api_keys WHERE id = ?1",
-                rusqlite::params![key_id],
-            )
-        }
-        .map_err(|e| tracing::error!("DbUserStore::delete_api_key: {e}"))?;
-        Ok(n as i64)
+    async fn delete_api_key(&self, key_id: &str, owner: Option<&str>) -> Result<i64, ()> {
+        let deleted = self
+            .store
+            .identity
+            .delete_api_key(key_id, owner)
+            .await
+            .map_err(|e| tracing::error!("SurrealUserStore::delete_api_key: {e}"))?;
+        Ok(i64::from(deleted))
     }
 
-    fn query_logs(
+    async fn query_logs(
         &self,
         filters: &user_port::LogFilters,
         limit: i64,
         offset: i64,
     ) -> Result<(i64, Vec<user_port::LogRecord>), ()> {
-        let conn = self.pool.read().lock().map_err(|_| ())?;
-        let (where_clause, mut params) = user_log_where(filters);
-        let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let total: i64 = conn
-            .query_row(
-                &format!("SELECT COUNT(*) FROM request_logs l {where_clause}"),
-                refs.as_slice(),
-                |r| r.get(0),
-            )
-            .map_err(|e| tracing::error!("DbUserStore::query_logs count: {e}"))?;
-        params.push(Box::new(limit));
-        params.push(Box::new(offset));
-        let sql = format!(
-            "SELECT l.id, l.user_id, l.api_key_id, l.provider_id, l.model, l.request_type,
-                    l.prompt_tokens, l.completion_tokens, l.total_tokens, l.cached_tokens, l.latency_ms,
-                    l.status_code, l.success, l.error_message, l.cost, l.created_at,
-                    u.username, p.name
-             FROM request_logs l
-             LEFT JOIN users u ON u.id = l.user_id
-             LEFT JOIN providers p ON p.id = l.provider_id
-             {where_clause}ORDER BY l.created_at DESC LIMIT ? OFFSET ?"
-        );
-        let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| tracing::error!("DbUserStore::query_logs prepare: {e}"))?;
-        let rows = stmt
-            .query_map(refs.as_slice(), row_to_log_record)
-            .map_err(|e| tracing::error!("DbUserStore::query_logs map: {e}"))?;
-        Ok((total, rows.filter_map(|r| r.ok()).collect()))
+        let (total, rows) = self
+            .store
+            .billing
+            .query_logs(&surreal_log_filters(filters), limit, offset)
+            .await
+            .map_err(|e| tracing::error!("SurrealUserStore::query_logs: {e}"))?;
+        Ok((
+            total,
+            rows.into_iter()
+                .map(|r| user_port::LogRecord {
+                    id: r.id,
+                    user_id: r.user_id,
+                    api_key_id: r.api_key_id,
+                    provider_id: r.provider_id,
+                    username: r.username,
+                    provider_name: r.provider_name,
+                    model: r.model,
+                    request_type: r.request_type,
+                    prompt_tokens: i64::from(r.prompt_tokens),
+                    completion_tokens: i64::from(r.completion_tokens),
+                    total_tokens: i64::from(r.total_tokens),
+                    cached_tokens: i64::from(r.cached_tokens),
+                    latency_ms: r.latency_ms,
+                    status_code: r.status_code,
+                    success: r.success,
+                    error_message: r.error_message,
+                    cost_micro: r.cost_micro,
+                    created_at: r.created_at.to_rfc3339(),
+                })
+                .collect(),
+        ))
     }
 
-    fn query_log_stats(
+    async fn query_log_stats(
         &self,
         filters: &user_port::LogFilters,
     ) -> Result<user_port::LogStatsRaw, ()> {
-        let conn = self.pool.read().lock().map_err(|_| ())?;
-        let (where_clause, params) = user_log_where(filters);
-        let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        conn.query_row(
-            &format!(
-                "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(AVG(latency_ms), 0),
-                        COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0),
-                        COALESCE(SUM(cost), 0)
-                 FROM request_logs l {where_clause}"
-            ),
-            refs.as_slice(),
-            |row| {
-                Ok(user_port::LogStatsRaw {
-                    total_requests: row.get(0)?,
-                    total_tokens: row.get(1)?,
-                    avg_latency_ms: row.get(2)?,
-                    success_rate_pct: row.get(3)?,
-                    total_cost_micro: row.get(4)?,
-                })
-            },
-        )
-        .map_err(|e| {
-            tracing::error!("DbUserStore::query_log_stats: {e}")
-        })
+        self.store
+            .billing
+            .log_stats(&surreal_log_filters(filters))
+            .await
+            .map(|s| user_port::LogStatsRaw {
+                total_requests: s.total_requests,
+                total_tokens: s.total_tokens,
+                avg_latency_ms: s.avg_latency_ms,
+                success_rate_pct: s.success_rate_pct,
+                total_cost_micro: s.total_cost_micro,
+            })
+            .map_err(|e| {
+                tracing::error!("SurrealUserStore::query_log_stats: {e}");
+            })
     }
 
-    fn wallet_snapshot(
+    async fn wallet_snapshot(
         &self,
         user_id: &str,
         since_date: &str,
     ) -> Result<user_port::WalletSnapshot, ()> {
-        let conn = self.pool.read().lock().map_err(|_| ())?;
-        let balance: i64 = conn
-            .query_row(
-                "SELECT balance FROM users WHERE id = ?1",
-                rusqlite::params![user_id],
-                |r| r.get(0),
-            )
-            .map_err(|_| ())?;
-        // 每日序列:明细(request_logs)与聚合(usage_daily)按日合并
-        // (purge 在同一事务里聚合 + 删除,两边相加不重复计数;迁自旧
-        // api/logs.rs::wallet_daily)。
-        let mut stmt = conn
-            .prepare(
-                "SELECT d, COALESCE(SUM(c), 0), COALESCE(SUM(t), 0), COALESCE(SUM(r), 0) FROM (
-                     SELECT substr(created_at, 1, 10) AS d, SUM(cost) AS c,
-                            SUM(total_tokens) AS t, COUNT(*) AS r
-                     FROM request_logs
-                     WHERE user_id = ?1 AND substr(created_at, 1, 10) >= ?2
-                     GROUP BY d
-                     UNION ALL
-                     SELECT date AS d, cost AS c, tokens AS t, requests AS r
-                     FROM usage_daily
-                     WHERE user_id = ?1 AND date >= ?2
-                 )
-                 GROUP BY d ORDER BY d",
-            )
-            .map_err(|_| ())?;
-        let daily = stmt
-            .query_map(rusqlite::params![user_id, since_date], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            })
+        let balance_micro = self
+            .store
+            .identity
+            .find_user(user_id)
+            .await
             .map_err(|_| ())?
-            .filter_map(|r| r.ok())
-            .collect::<Vec<_>>();
-        let mut stmt = conn
-            .prepare(
-                "SELECT model, COALESCE(SUM(cost), 0) AS c, COUNT(*)
-                 FROM request_logs
-                 WHERE user_id = ?1 AND substr(created_at, 1, 10) >= ?2
-                 GROUP BY model ORDER BY c DESC LIMIT 8",
-            )
+            .ok_or(())?
+            .balance_micro;
+        let series = self
+            .store
+            .billing
+            .wallet_series(user_id, since_date)
+            .await
             .map_err(|_| ())?;
-        let top_models = stmt
-            .query_map(rusqlite::params![user_id, since_date], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-            .map_err(|_| ())?
-            .filter_map(|r| r.ok())
-            .collect::<Vec<_>>();
         Ok(user_port::WalletSnapshot {
-            balance_micro: balance,
-            daily,
-            top_models,
+            balance_micro,
+            daily: series.daily,
+            top_models: series.top_models,
         })
     }
 
-    fn available_prices(&self) -> Result<Vec<(String, Option<user_port::PriceTriple>)>, ()> {
-        // 健康渠道提供的全部模型(已排序)逐个经 find_price 展开;
-        // 未定价三价出 null(迁自旧 api/admin/billing.rs::list_public_prices)。
-        let models = crate::channel::selector::list_available_models(&self.pool);
-        let conn = self.pool.read().lock().map_err(|_| ())?;
+    async fn available_prices(&self) -> Result<Vec<(String, Option<user_port::PriceTriple>)>, ()> {
+        // 健康渠道提供的全部模型(拓扑快照,已排序)逐个经价格缓存展开;
+        // 未定价三价出 null。
+        let models = crate::channel::registry::shared()
+            .current(&self.store)
+            .await
+            .available_models();
+        let rules = self.store.billing.price_rules().await.map_err(|_| ())?;
         Ok(models
             .into_iter()
             .map(|m| {
-                let price = crate::billing::find_price(&conn, &m);
+                let price = aikun_store::pricing::find_in_rules(&rules, &m);
                 (m, price)
             })
             .collect())
     }
 
     fn hash_code(&self, code: &str) -> String {
-        use sha2::{Digest, Sha256};
-        format!("{:x}", Sha256::digest(code.as_bytes()))
+        crate::auth::hash_api_key(code)
     }
 
-    fn redeem(&self, user_id: &str, code_hash: &str) -> Result<Option<(i64, i64)>, ()> {
-        let mut conn = self.pool.conn.lock().map_err(|_| ())?;
-        (|| -> Result<Option<(i64, i64)>, rusqlite::Error> {
-            let tx = conn.transaction()?;
-            // 核销与加余额同事务:UPDATE 的 WHERE 同时覆盖状态与过期校验,
-            // 影响行数 = 0 即"无效/已用/已禁用/已过期"(迁自旧 redemption.rs)。
-            let n = tx.execute(
-                "UPDATE redemption_codes SET status = 'used', used_by = ?1, used_at = datetime('now')
-                 WHERE code_hash = ?2 AND status = 'unused'
-                   AND (expires_at IS NULL OR expires_at > datetime('now'))",
-                rusqlite::params![user_id, code_hash],
-            )?;
-            if n == 0 {
-                return Ok(None);
+    async fn redeem(&self, user_id: &str, code_hash: &str) -> Result<Option<(i64, i64)>, ()> {
+        // 红线 2:核销事务原子性在计费域实现(单次 BEGIN…COMMIT)。
+        match self.store.billing.redeem_code(user_id, code_hash).await {
+            Ok(sbilling::RedeemOutcome::Redeemed {
+                amount_micro,
+                balance_after_micro,
+            }) => Ok(Some((amount_micro, balance_after_micro))),
+            Ok(sbilling::RedeemOutcome::Invalid) => Ok(None),
+            Err(e) => {
+                tracing::error!("SurrealUserStore::redeem: {e}");
+                Err(())
             }
-            let amount: i64 = tx.query_row(
-                "SELECT amount FROM redemption_codes WHERE code_hash = ?1",
-                rusqlite::params![code_hash],
-                |row| row.get(0),
-            )?;
-            tx.execute(
-                "UPDATE users SET balance = balance + ?1, updated_at = datetime('now') WHERE id = ?2",
-                rusqlite::params![amount, user_id],
-            )?;
-            let balance: i64 = tx.query_row(
-                "SELECT balance FROM users WHERE id = ?1",
-                rusqlite::params![user_id],
-                |row| row.get(0),
-            )?;
-            tx.execute(
-                "INSERT INTO billing_transactions (id, user_id, amount, balance_after, kind, note)
-                 VALUES (?1, ?2, ?3, ?4, 'recharge', '兑换码充值')",
-                rusqlite::params![uuid::Uuid::new_v4().to_string(), user_id, amount, balance],
-            )?;
-            tx.commit()?;
-            Ok(Some((amount, balance)))
-        })()
-        .map_err(|e| {
-            tracing::error!("DbUserStore::redeem: {e}")
-        })
+        }
     }
 }
 
-// ---------- Admin·Users 适配器(DbAdminUsersStore;SQL 迁自旧
-// api/admin/users.rs) ----------
+// ---------- Admin·Users 适配器(SurrealAdminUsersStore) ----------
 
 use aikun_admin::admin_users as users_port;
+use aikun_store::surreal::identity::UserRow;
 
-struct DbAdminUsersStore {
-    pool: Arc<DbPool>,
+struct SurrealAdminUsersStore {
+    store: Arc<AppStore>,
 }
 
-const ADMIN_USER_COLS: &str =
-    "id, username, display_name, role, is_active, created_at, updated_at, balance";
-
-fn row_to_admin_user_record(row: &rusqlite::Row) -> rusqlite::Result<users_port::AdminUserRecord> {
-    Ok(users_port::AdminUserRecord {
-        id: row.get(0)?,
-        username: row.get(1)?,
-        display_name: row.get(2)?,
-        role: row.get(3)?,
-        is_active: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
-        balance_micro: row.get(7)?,
-    })
+fn admin_user_record(u: &UserRow) -> users_port::AdminUserRecord {
+    users_port::AdminUserRecord {
+        id: u.id.clone(),
+        username: u.username.clone(),
+        display_name: u.display_name.clone(),
+        role: u.role.clone(),
+        is_active: u.is_active,
+        created_at: u.created_at.to_rfc3339(),
+        updated_at: u.updated_at.to_rfc3339(),
+        balance_micro: u.balance_micro,
+    }
 }
 
-fn is_unique_violation(e: &rusqlite::Error) -> bool {
-    matches!(
-        e,
-        rusqlite::Error::SqliteFailure(err, _)
-            if err.code == rusqlite::ErrorCode::ConstraintViolation
-    )
-}
-
-/// 是否为唯一活跃 admin(旧 api/admin/users.rs::is_last_active_admin:
-/// 计数查询失败按 0 的 fail-open 口径保留)。
-fn last_active_admin(conn: &rusqlite::Connection, user_id: &str) -> bool {
-    let target: Option<(String, bool)> = conn
-        .query_row(
-            "SELECT role, is_active FROM users WHERE id = ?1",
-            rusqlite::params![user_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .ok();
-    match target {
-        Some((role, is_active)) if role == "admin" && is_active => {
-            let count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-            count <= 1
-        }
+/// 是否为唯一活跃 admin(last_admin 409 守卫;旧 SQL 在同一把写锁内
+/// 判定,Surreal 侧读-判定两查,窗口内并发的降级/禁用可能同时通过——
+/// 管理端 PATCH 已被服务级 patch_lock 串行化,残余竞态仅剩绕过本服务
+/// 的直写,语义可接受)。
+async fn last_active_admin(store: &AppStore, user_id: &str) -> bool {
+    match store.identity.find_user(user_id).await {
+        Ok(Some(u)) if u.role == "admin" && u.is_active => matches!(
+            store.identity.count_active_admins().await,
+            Ok(n) if n <= 1
+        ),
         _ => false,
     }
 }
 
-impl users_port::AdminUsersStore for DbAdminUsersStore {
-    fn list_users(
+#[async_trait::async_trait]
+impl users_port::AdminUsersStore for SurrealAdminUsersStore {
+    async fn list_users(
         &self,
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<users_port::AdminUserRecord>, i64), users_port::UsersStoreError> {
-        let conn = self
-            .pool
-            .read()
-            .lock()
+        let (total, rows) = self
+            .store
+            .identity
+            .list_users("", limit, offset)
+            .await
             .map_err(|_| users_port::UsersStoreError::Unavailable)?;
-        let total: i64 = conn
-            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
-            .map_err(|_| users_port::UsersStoreError::Failed)?;
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT {ADMIN_USER_COLS} FROM users
-                 ORDER BY created_at DESC, rowid DESC LIMIT ?1 OFFSET ?2"
-            ))
-            .map_err(|_| users_port::UsersStoreError::Failed)?;
-        let rows = stmt
-            .query_map(rusqlite::params![limit, offset], row_to_admin_user_record)
-            .map_err(|_| users_port::UsersStoreError::Failed)?;
-        Ok((rows.filter_map(|r| r.ok()).collect(), total))
+        Ok((rows.iter().map(admin_user_record).collect(), total))
     }
 
-    fn find_user(
+    async fn find_user(
         &self,
         id: &str,
     ) -> Result<Option<users_port::AdminUserRecord>, users_port::UsersStoreError> {
-        let conn = self
-            .pool
-            .read()
-            .lock()
-            .map_err(|_| users_port::UsersStoreError::Unavailable)?;
-        Ok(conn
-            .query_row(
-                &format!("SELECT {ADMIN_USER_COLS} FROM users WHERE id = ?1"),
-                rusqlite::params![id],
-                row_to_admin_user_record,
-            )
-            .ok())
+        Ok(self
+            .store
+            .identity
+            .find_user(id)
+            .await
+            .map_err(|_| users_port::UsersStoreError::Unavailable)?
+            .as_ref()
+            .map(admin_user_record))
     }
 
-    fn insert_user(
+    async fn insert_user(
         &self,
         user: &users_port::NewUser,
     ) -> Result<users_port::InsertOutcome, users_port::UsersStoreError> {
-        let conn = self
-            .pool
-            .conn
-            .lock()
-            .map_err(|_| users_port::UsersStoreError::Unavailable)?;
-        let id = uuid::Uuid::new_v4().to_string();
-        match conn.execute(
-            "INSERT INTO users (id, username, password_hash, display_name, role)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                id,
-                user.username,
-                user.password_hash,
-                user.display_name,
-                user.role
-            ],
-        ) {
-            Ok(_) => Ok(users_port::InsertOutcome::Created(id)),
-            Err(e) if is_unique_violation(&e) => Ok(users_port::InsertOutcome::UsernameExists),
+        match self
+            .store
+            .identity
+            .create_user(sidentity::NewUser {
+                id: None,
+                username: user.username.clone(),
+                password_hash: user.password_hash.clone(),
+                display_name: user.display_name.clone(),
+                role: user.role.clone(),
+            })
+            .await
+        {
+            Ok(u) => Ok(users_port::InsertOutcome::Created(u.id)),
+            Err(e) if e.to_string().contains("unique_user_username") => {
+                Ok(users_port::InsertOutcome::UsernameExists)
+            }
             Err(e) => {
-                tracing::error!("DbAdminUsersStore::insert_user: {e}");
+                tracing::error!("SurrealAdminUsersStore::insert_user: {e}");
                 Err(users_port::UsersStoreError::Failed)
             }
         }
     }
 
-    fn insert_users_batch(
+    async fn insert_users_batch(
         &self,
         users: &[users_port::PreparedUser],
     ) -> Result<Vec<users_port::BatchInsertItem>, users_port::UsersStoreError> {
-        let conn = self
-            .pool
-            .conn
-            .lock()
-            .map_err(|_| users_port::UsersStoreError::Unavailable)?;
-        // 一把锁内逐条 INSERT,不包整体事务(单项失败不影响其余)。
+        // 逐条插入(单项失败不影响其余,旧相位 2 语义;每条一次往返)。
         let mut out = Vec::with_capacity(users.len());
         for p in users {
-            let id = uuid::Uuid::new_v4().to_string();
-            let outcome = match conn.execute(
-                "INSERT INTO users (id, username, password_hash, display_name, role)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![id, p.username, p.password_hash, p.display_name, p.role],
-            ) {
-                Ok(_) => users_port::BatchInsertItem::Created(id),
-                Err(e) if is_unique_violation(&e) => users_port::BatchInsertItem::UsernameExists,
+            let outcome = match self
+                .store
+                .identity
+                .create_user(sidentity::NewUser {
+                    id: None,
+                    username: p.username.clone(),
+                    password_hash: p.password_hash.clone(),
+                    display_name: p.display_name.clone(),
+                    role: p.role.clone(),
+                })
+                .await
+            {
+                Ok(u) => users_port::BatchInsertItem::Created(u.id),
+                Err(e) if e.to_string().contains("unique_user_username") => {
+                    users_port::BatchInsertItem::UsernameExists
+                }
                 Err(e) => {
-                    tracing::error!("DbAdminUsersStore::insert_users_batch {}: {e}", p.username);
+                    tracing::error!(
+                        "SurrealAdminUsersStore::insert_users_batch {}: {e}",
+                        p.username
+                    );
                     users_port::BatchInsertItem::Failed
                 }
             };
@@ -1075,94 +903,66 @@ impl users_port::AdminUsersStore for DbAdminUsersStore {
         Ok(out)
     }
 
-    fn update_user(
+    async fn update_user(
         &self,
         id: &str,
         patch: &users_port::UserPatch,
     ) -> Result<users_port::UpdateOutcome, users_port::UsersStoreError> {
-        let conn = self
-            .pool
-            .conn
-            .lock()
-            .map_err(|_| users_port::UsersStoreError::Unavailable)?;
-        // last_admin 保护:同一把写锁内先判定再更新(旧 users.rs:486-496)。
-        if patch.demotes_or_disables && last_active_admin(&conn, id) {
+        // last_admin 保护:降级或禁用唯一活跃 admin 前置拦截。
+        if patch.demotes_or_disables && last_active_admin(&self.store, id).await {
             return Ok(users_port::UpdateOutcome::LastAdmin);
         }
-        let mut sets = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        if let Some(name) = &patch.display_name {
-            sets.push("display_name = ?");
-            params.push(Box::new(name.clone()));
-        }
-        if let Some(hash) = &patch.password_hash {
-            sets.push("password_hash = ?");
-            params.push(Box::new(hash.clone()));
-            // 改密后递增 token_version,踢掉该用户全部已签发 JWT。
-            sets.push("token_version = token_version + 1");
-        }
-        if let Some(active) = patch.is_active {
-            sets.push("is_active = ?");
-            params.push(Box::new(active as i32));
-        }
-        if let Some(role) = &patch.role {
-            sets.push("role = ?");
-            params.push(Box::new(role.clone()));
-        }
-        sets.push("updated_at = datetime('now')");
-        params.push(Box::new(id.to_string()));
-        let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let n = conn
-            .execute(
-                &format!("UPDATE users SET {} WHERE id = ?", sets.join(", ")),
-                refs.as_slice(),
+        match self
+            .store
+            .identity
+            .update_user(
+                id,
+                patch.display_name.clone(),
+                patch.role.clone(),
+                patch.is_active,
+                patch.password_hash.clone(),
             )
-            .map_err(|e| {
-                tracing::error!("DbAdminUsersStore::update_user: {e}");
-                users_port::UsersStoreError::Failed
-            })?;
-        if n == 0 {
-            return Ok(users_port::UpdateOutcome::NotFound);
+            .await
+        {
+            Ok(Some(u)) => Ok(users_port::UpdateOutcome::Updated(Box::new(
+                admin_user_record(&u),
+            ))),
+            Ok(None) => Ok(users_port::UpdateOutcome::NotFound),
+            Err(e) => {
+                tracing::error!("SurrealAdminUsersStore::update_user: {e}");
+                Err(users_port::UsersStoreError::Failed)
+            }
         }
-        let row = conn
-            .query_row(
-                &format!("SELECT {ADMIN_USER_COLS} FROM users WHERE id = ?1"),
-                rusqlite::params![id],
-                row_to_admin_user_record,
-            )
-            .map_err(|_| users_port::UsersStoreError::Failed)?;
-        Ok(users_port::UpdateOutcome::Updated(Box::new(row)))
     }
 
-    fn disable_user(
+    async fn disable_user(
         &self,
         id: &str,
     ) -> Result<users_port::DisableOutcome, users_port::UsersStoreError> {
-        let conn = self
-            .pool
-            .conn
-            .lock()
-            .map_err(|_| users_port::UsersStoreError::Unavailable)?;
-        if last_active_admin(&conn, id) {
+        if last_active_admin(&self.store, id).await {
             return Ok(users_port::DisableOutcome::LastAdmin);
         }
-        let n = conn
-            .execute(
-                "UPDATE users SET is_active = 0, updated_at = datetime('now') WHERE id = ?1",
-                rusqlite::params![id],
-            )
-            .map_err(|e| {
-                tracing::error!("DbAdminUsersStore::disable_user: {e}");
-                users_port::UsersStoreError::Failed
-            })?;
-        if n == 0 {
-            return Ok(users_port::DisableOutcome::NotFound);
+        match self
+            .store
+            .identity
+            .update_user(id, None, None, Some(false), None)
+            .await
+        {
+            Ok(Some(_)) => Ok(users_port::DisableOutcome::Disabled),
+            Ok(None) => Ok(users_port::DisableOutcome::NotFound),
+            Err(e) => {
+                tracing::error!("SurrealAdminUsersStore::disable_user: {e}");
+                Err(users_port::UsersStoreError::Failed)
+            }
         }
-        Ok(users_port::DisableOutcome::Disabled)
     }
 
-    fn hash_password(&self, password: &str) -> Result<String, ()> {
-        crate::auth::hash_password(password).map_err(|_| ())
+    async fn hash_password(&self, password: &str) -> Result<String, ()> {
+        let password = password.to_string();
+        tokio::task::spawn_blocking(move || crate::auth::hash_password(&password))
+            .await
+            .map_err(|_| ())?
+            .map_err(|_| ())
     }
 
     fn random_password(&self) -> String {
@@ -1170,135 +970,77 @@ impl users_port::AdminUsersStore for DbAdminUsersStore {
     }
 }
 
-// ---------- Admin·Billing 适配器(DbBillingStore;SQL 迁自旧
-// api/admin/billing.rs 与 api/redemption.rs 管理端三 op) ----------
+// ---------- Admin·Billing 适配器(SurrealBillingStore) ----------
 
 use aikun_admin::admin_billing as billing_port;
 
-struct DbBillingStore {
-    pool: Arc<DbPool>,
-}
-
-const PRICE_COLS: &str =
-    "id, model, prompt_price, completion_price, cached_price, created_at, updated_at";
-
-fn row_to_price_record(row: &rusqlite::Row) -> rusqlite::Result<billing_port::PriceRecord> {
-    Ok(billing_port::PriceRecord {
-        id: row.get(0)?,
-        model: row.get(1)?,
-        prompt_price: row.get(2)?,
-        completion_price: row.get(3)?,
-        cached_price: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
-    })
-}
-
-fn row_to_tx_record(row: &rusqlite::Row) -> rusqlite::Result<billing_port::TxRecord> {
-    Ok(billing_port::TxRecord {
-        id: row.get(0)?,
-        user_id: row.get(1)?,
-        username: row.get(2)?,
-        amount_micro: row.get(3)?,
-        balance_after_micro: row.get(4)?,
-        kind: row.get(5)?,
-        note: row.get(6)?,
-        created_at: row.get(7)?,
-    })
-}
-
-fn row_to_redemption_record(
-    row: &rusqlite::Row,
-) -> rusqlite::Result<billing_port::RedemptionCodeRecord> {
-    Ok(billing_port::RedemptionCodeRecord {
-        id: row.get(0)?,
-        code_suffix: row.get(1)?,
-        amount_micro: row.get(2)?,
-        batch: row.get(3)?,
-        status: row.get(4)?,
-        used_by_username: row.get(5)?,
-        used_at: row.get(6)?,
-        expires_at: row.get(7)?,
-        note: row.get(8)?,
-        created_at: row.get(9)?,
-        expired: row.get(10)?,
-    })
+struct SurrealBillingStore {
+    store: Arc<AppStore>,
 }
 
 /// 兑换码码字符集:去除易混淆的 0/O/1/I(迁自旧 api/redemption.rs)。
 const CODE_CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-impl billing_port::BillingStore for DbBillingStore {
-    fn all_prices(
+/// 价格行错误映射:唯一索引冲突 → Constraint(调用方 409/500 code_collision)。
+fn price_err(e: aikun_store::StoreError) -> billing_port::BillingStoreError {
+    if e.to_string().contains("unique_model_price_model") {
+        billing_port::BillingStoreError::Constraint
+    } else {
+        tracing::error!("SurrealBillingStore price op failed: {e}");
+        billing_port::BillingStoreError::Failed(e.to_string())
+    }
+}
+
+fn price_record(r: &sbilling::PriceRecordRow) -> billing_port::PriceRecord {
+    billing_port::PriceRecord {
+        id: r.id.clone(),
+        model: r.model.clone(),
+        prompt_price: r.prompt_price,
+        completion_price: r.completion_price,
+        cached_price: r.cached_price,
+        created_at: r.created_at.to_rfc3339(),
+        updated_at: r.updated_at.to_rfc3339(),
+    }
+}
+
+#[async_trait::async_trait]
+impl billing_port::BillingStore for SurrealBillingStore {
+    async fn all_prices(
         &self,
     ) -> Result<Vec<billing_port::PriceRecord>, billing_port::BillingStoreError> {
-        let conn = self
-            .pool
-            .read()
-            .lock()
-            .map_err(|_| billing_port::BillingStoreError::Unavailable)?;
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT {PRICE_COLS} FROM model_prices ORDER BY model"
-            ))
-            .map_err(|e| billing_port::BillingStoreError::Failed(e.to_string()))?;
-        let rows = stmt
-            .query_map([], row_to_price_record)
-            .map_err(|e| billing_port::BillingStoreError::Failed(e.to_string()))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        self.store
+            .billing
+            .list_price_records()
+            .await
+            .map(|rows| rows.iter().map(price_record).collect())
+            .map_err(price_err)
     }
 
-    fn all_channel_models(&self) -> std::collections::HashSet<String> {
+    async fn all_channel_models(&self) -> std::collections::HashSet<String> {
         // 查询失败静默返回空集(旧 channel_models 的 if let Ok 语义)。
-        let mut set = std::collections::HashSet::new();
-        if let Ok(conn) = self.pool.read().lock()
-            && let Ok(mut stmt) = conn.prepare("SELECT models FROM providers")
-            && let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0))
-        {
-            for r in rows.flatten() {
-                if let Ok(list) = serde_json::from_str::<Vec<String>>(&r) {
-                    set.extend(list);
-                }
-            }
-        }
-        set
+        self.store
+            .channels
+            .all_channel_models()
+            .await
+            .unwrap_or_default()
     }
 
-    fn insert_price(
+    async fn insert_price(
         &self,
         model: &str,
         prompt_price: f64,
         completion_price: f64,
         cached_price: Option<f64>,
     ) -> Result<billing_port::PriceRecord, billing_port::BillingStoreError> {
-        let conn = self
-            .pool
-            .conn
-            .lock()
-            .map_err(|_| billing_port::BillingStoreError::Unavailable)?;
-        let id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO model_prices (id, model, prompt_price, completion_price, cached_price)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![id, model, prompt_price, completion_price, cached_price],
-        )
-        .map_err(|e| {
-            if is_unique_violation(&e) {
-                billing_port::BillingStoreError::Constraint
-            } else {
-                tracing::error!("DbBillingStore::insert_price: {e}");
-                billing_port::BillingStoreError::Failed(e.to_string())
-            }
-        })?;
-        conn.query_row(
-            &format!("SELECT {PRICE_COLS} FROM model_prices WHERE id = ?1"),
-            rusqlite::params![id],
-            row_to_price_record,
-        )
-        .map_err(|e| billing_port::BillingStoreError::Failed(e.to_string()))
+        self.store
+            .billing
+            .insert_price_record(model, prompt_price, completion_price, cached_price)
+            .await
+            .map(|r| price_record(&r))
+            .map_err(price_err)
     }
 
-    fn update_price(
+    async fn update_price(
         &self,
         id: &str,
         model: Option<&str>,
@@ -1306,170 +1048,79 @@ impl billing_port::BillingStore for DbBillingStore {
         completion_price: Option<f64>,
         cached_price: Option<Option<f64>>,
     ) -> Result<Option<billing_port::PriceRecord>, billing_port::BillingStoreError> {
-        let conn = self
-            .pool
-            .conn
-            .lock()
-            .map_err(|_| billing_port::BillingStoreError::Unavailable)?;
-        let mut sets = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        if let Some(m) = model {
-            sets.push("model = ?");
-            params.push(Box::new(m.to_string()));
-        }
-        if let Some(p) = prompt_price {
-            sets.push("prompt_price = ?");
-            params.push(Box::new(p));
-        }
-        if let Some(c) = completion_price {
-            sets.push("completion_price = ?");
-            params.push(Box::new(c));
-        }
-        // cached_price 双层 Option:缺省不改动;Some(None) 清回 NULL;
-        // Some(Some(v)) 正常更新。
-        if let Some(k) = cached_price {
-            sets.push("cached_price = ?");
-            params.push(Box::new(k));
-        }
-        sets.push("updated_at = datetime('now')");
-        params.push(Box::new(id.to_string()));
-        let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let n = conn
-            .execute(
-                &format!("UPDATE model_prices SET {} WHERE id = ?", sets.join(", ")),
-                refs.as_slice(),
-            )
-            .map_err(|e| {
-                if is_unique_violation(&e) {
-                    billing_port::BillingStoreError::Constraint
-                } else {
-                    tracing::error!("DbBillingStore::update_price: {e}");
-                    billing_port::BillingStoreError::Failed(e.to_string())
-                }
-            })?;
-        if n == 0 {
-            return Ok(None);
-        }
-        Ok(conn
-            .query_row(
-                &format!("SELECT {PRICE_COLS} FROM model_prices WHERE id = ?1"),
-                rusqlite::params![id],
-                row_to_price_record,
-            )
-            .ok())
+        self.store
+            .billing
+            .update_price_record(id, model, prompt_price, completion_price, cached_price)
+            .await
+            .map(|r| r.as_ref().map(price_record))
+            .map_err(price_err)
     }
 
-    fn delete_price(&self, id: &str) -> Result<bool, billing_port::BillingStoreError> {
-        let conn = self
-            .pool
-            .conn
-            .lock()
-            .map_err(|_| billing_port::BillingStoreError::Unavailable)?;
-        conn.execute(
-            "DELETE FROM model_prices WHERE id = ?1",
-            rusqlite::params![id],
-        )
-        .map(|n| n > 0)
-        .map_err(|e| {
-            tracing::error!("DbBillingStore::delete_price: {e}");
-            billing_port::BillingStoreError::Failed(e.to_string())
-        })
+    async fn delete_price(&self, id: &str) -> Result<bool, billing_port::BillingStoreError> {
+        self.store
+            .billing
+            .delete_price_record(id)
+            .await
+            .map_err(price_err)
     }
 
-    fn adjust_balance(
+    async fn adjust_balance(
         &self,
         user_id: &str,
         amount_micro: i64,
         kind: &str,
         note: &str,
     ) -> Result<Option<i64>, billing_port::BillingStoreError> {
-        let mut conn = self
-            .pool
-            .conn
-            .lock()
-            .map_err(|_| billing_port::BillingStoreError::Unavailable)?;
-        (|| -> Result<Option<i64>, rusqlite::Error> {
-            // UPDATE 余额与 INSERT 流水同一事务:失败整体回滚,不留
-            // "余额变了但没流水"的中间态(迁自旧 adjust_balance)。
-            let tx = conn.transaction()?;
-            let updated = tx.execute(
-                "UPDATE users SET balance = balance + ?1, updated_at = datetime('now') WHERE id = ?2",
-                rusqlite::params![amount_micro, user_id],
-            )?;
-            if updated == 0 {
-                return Ok(None);
+        // 先确认用户存在(端口 None → 404);余额写 + 流水同事务在计费域。
+        match self.store.identity.find_user(user_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                tracing::error!("SurrealBillingStore::adjust_balance lookup: {e}");
+                return Err(billing_port::BillingStoreError::Failed(e.to_string()));
             }
-            let balance: i64 = tx.query_row(
-                "SELECT balance FROM users WHERE id = ?1",
-                rusqlite::params![user_id],
-                |row| row.get(0),
-            )?;
-            tx.execute(
-                "INSERT INTO billing_transactions (id, user_id, amount, balance_after, kind, note)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    uuid::Uuid::new_v4().to_string(),
-                    user_id,
-                    amount_micro,
-                    balance,
-                    kind,
-                    note
-                ],
-            )?;
-            tx.commit()?;
-            Ok(Some(balance))
-        })()
-        .map_err(|e| {
-            tracing::error!("DbBillingStore::adjust_balance: {e}");
-            billing_port::BillingStoreError::Failed(e.to_string())
-        })
+        }
+        self.store
+            .billing
+            .adjust_balance(user_id, amount_micro, kind, note)
+            .await
+            .map(Some)
+            .map_err(|e| {
+                tracing::error!("SurrealBillingStore::adjust_balance: {e}");
+                billing_port::BillingStoreError::Failed(e.to_string())
+            })
     }
 
-    fn list_transactions(
+    async fn list_transactions(
         &self,
         user_id: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<(i64, Vec<billing_port::TxRecord>), billing_port::BillingStoreError> {
-        let conn = self
-            .pool
-            .read()
-            .lock()
-            .map_err(|_| billing_port::BillingStoreError::Unavailable)?;
-        let uid = user_id.unwrap_or("").trim();
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        let where_clause = if uid.is_empty() {
-            ""
-        } else {
-            params.push(Box::new(uid.to_string()));
-            "WHERE t.user_id = ?"
-        };
-        let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let total: i64 = conn
-            .query_row(
-                &format!("SELECT COUNT(*) FROM billing_transactions t {where_clause}"),
-                refs.as_slice(),
-                |r| r.get(0),
-            )
+        let (total, rows) = self
+            .store
+            .billing
+            .list_transactions_scoped(user_id, limit, offset)
+            .await
             .map_err(|e| billing_port::BillingStoreError::Failed(e.to_string()))?;
-        params.push(Box::new(limit));
-        params.push(Box::new(offset));
-        let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT t.id, t.user_id, u.username, t.amount, t.balance_after, t.kind, t.note, t.created_at
-                 FROM billing_transactions t LEFT JOIN users u ON u.id = t.user_id
-                 {where_clause}
-                 ORDER BY t.created_at DESC, t.rowid DESC LIMIT ? OFFSET ?"
-            ))
-            .map_err(|e| billing_port::BillingStoreError::Failed(e.to_string()))?;
-        let rows = stmt
-            .query_map(refs.as_slice(), row_to_tx_record)
-            .map_err(|e| billing_port::BillingStoreError::Failed(e.to_string()))?;
-        Ok((total, rows.filter_map(|r| r.ok()).collect()))
+        Ok((
+            total,
+            rows.into_iter()
+                .map(|r| billing_port::TxRecord {
+                    id: r.id,
+                    user_id: r.user_id,
+                    username: r.username,
+                    amount_micro: r.amount_micro,
+                    balance_after_micro: r.balance_after_micro,
+                    kind: r.kind,
+                    note: r.note,
+                    created_at: r.created_at.to_rfc3339(),
+                })
+                .collect(),
+        ))
     }
 
-    fn list_redemption_codes(
+    async fn list_redemption_codes(
         &self,
         batch: Option<&str>,
         status: Option<&str>,
@@ -1477,126 +1128,91 @@ impl billing_port::BillingStore for DbBillingStore {
         offset: i64,
     ) -> Result<(i64, Vec<billing_port::RedemptionCodeRecord>), billing_port::BillingStoreError>
     {
-        let conn = self
-            .pool
-            .read()
-            .lock()
-            .map_err(|_| billing_port::BillingStoreError::Unavailable)?;
-        let batch = batch.unwrap_or("").trim();
-        // expired 是显示态:库中 status 仍为 unused,按过期时间判定;
-        // 状态片段只做白名单内的固定字符串拼接,无注入面。
-        let status_sql = match status.unwrap_or("") {
-            "" => "",
-            "expired" => {
-                " AND c.status = 'unused' AND c.expires_at IS NOT NULL AND c.expires_at <= datetime('now')"
-            }
-            "unused" => " AND c.status = 'unused'",
-            "used" => " AND c.status = 'used'",
-            "disabled" => " AND c.status = 'disabled'",
-            // 生成层已枚举校验,防御直调。
-            _ => "",
-        };
-        let where_sql = format!("(?1 = '' OR c.batch = ?1){status_sql}");
-        let total: i64 = conn
-            .query_row(
-                &format!("SELECT COUNT(*) FROM redemption_codes c WHERE {where_sql}"),
-                rusqlite::params![batch],
-                |r| r.get(0),
-            )
+        let (total, rows) = self
+            .store
+            .billing
+            .list_redemption_codes(batch.unwrap_or(""), status, limit, offset)
+            .await
             .map_err(|e| billing_port::BillingStoreError::Failed(e.to_string()))?;
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT c.id, c.code_suffix, c.amount, c.batch, c.status, u.username,
-                        c.used_at, c.expires_at, c.note, c.created_at,
-                        (c.expires_at IS NOT NULL AND c.expires_at <= datetime('now'))
-                 FROM redemption_codes c LEFT JOIN users u ON u.id = c.used_by
-                 WHERE {where_sql}
-                 ORDER BY c.created_at DESC, c.rowid DESC LIMIT ?2 OFFSET ?3"
-            ))
-            .map_err(|e| billing_port::BillingStoreError::Failed(e.to_string()))?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![batch, limit, offset],
-                row_to_redemption_record,
-            )
-            .map_err(|e| billing_port::BillingStoreError::Failed(e.to_string()))?;
-        Ok((total, rows.filter_map(|r| r.ok()).collect()))
+        let now = chrono::Utc::now();
+        Ok((
+            total,
+            rows.into_iter()
+                .map(|r| {
+                    let expired = r.status == "unused" && r.expires_at.is_some_and(|t| t <= now);
+                    billing_port::RedemptionCodeRecord {
+                        id: r.id,
+                        code_suffix: r.code_suffix,
+                        amount_micro: r.amount_micro,
+                        batch: r.batch,
+                        status: r.status,
+                        used_by_username: r.used_by,
+                        used_at: r.used_at.map(|t| t.to_rfc3339()),
+                        expires_at: r.expires_at.map(|t| t.to_rfc3339()),
+                        note: r.note,
+                        created_at: r.created_at.to_rfc3339(),
+                        expired,
+                    }
+                })
+                .collect(),
+        ))
     }
 
-    fn insert_redemption_codes(
+    async fn insert_redemption_codes(
         &self,
         rows: &[billing_port::NewRedemptionCode],
     ) -> Result<(), billing_port::BillingStoreError> {
-        let mut conn = self
-            .pool
-            .conn
-            .lock()
-            .map_err(|_| billing_port::BillingStoreError::Unavailable)?;
-        (|| -> Result<(), rusqlite::Error> {
-            // 整批一个事务:中途失败整体回滚,避免哈希落库而明文从未送达。
-            let tx = conn.transaction()?;
-            {
-                let mut stmt = tx.prepare(
-                    "INSERT INTO redemption_codes (id, code_hash, code_suffix, amount, batch, expires_at, note)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                )?;
-                for r in rows {
-                    stmt.execute(rusqlite::params![
-                        uuid::Uuid::new_v4().to_string(),
-                        r.code_hash,
-                        r.code_suffix,
-                        r.amount_micro,
-                        r.batch,
-                        r.expires_at,
-                        r.note,
-                    ])?;
+        // expires_at 原文宽松解析(服务层已限定格式);整批一个事务
+        //(计费域 create_redemption_codes,中途失败整体回滚)。
+        let new: Vec<sbilling::NewRedemptionCode> = rows
+            .iter()
+            .map(|r| sbilling::NewRedemptionCode {
+                code_hash: r.code_hash.clone(),
+                code_suffix: r.code_suffix.clone(),
+                amount_micro: r.amount_micro,
+                batch: r.batch.clone(),
+                expires_at: r.expires_at.as_deref().and_then(crate::auth::parse_expiry),
+                note: r.note.clone(),
+            })
+            .collect();
+        self.store
+            .billing
+            .create_redemption_codes(new)
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                if e.to_string().contains("unique_redemption_code_hash") {
+                    billing_port::BillingStoreError::Constraint
+                } else {
+                    tracing::error!("SurrealBillingStore::insert_redemption_codes: {e}");
+                    billing_port::BillingStoreError::Failed(e.to_string())
                 }
-            }
-            tx.commit()
-        })()
-        .map_err(|e| {
-            if is_unique_violation(&e) {
-                billing_port::BillingStoreError::Constraint
-            } else {
-                tracing::error!("DbBillingStore::insert_redemption_codes: {e}");
-                billing_port::BillingStoreError::Failed(e.to_string())
-            }
-        })
+            })
     }
 
-    fn disable_redemption_code(
+    async fn disable_redemption_code(
         &self,
         id: &str,
     ) -> Result<billing_port::DisableOutcome, billing_port::BillingStoreError> {
-        let conn = self
-            .pool
-            .conn
-            .lock()
-            .map_err(|_| billing_port::BillingStoreError::Unavailable)?;
-        let n = conn
-            .execute(
-                "UPDATE redemption_codes SET status = 'disabled' WHERE id = ?1 AND status = 'unused'",
-                rusqlite::params![id],
-            )
-            .map_err(|e| {
-                tracing::error!("DbBillingStore::disable_redemption_code: {e}");
-                billing_port::BillingStoreError::Failed(e.to_string())
-            })?;
-        if n == 1 {
-            return Ok(billing_port::DisableOutcome::Disabled);
-        }
-        // 影响行数 0:回查存在性区分"非 unused"与"不存在"。
-        let exists: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM redemption_codes WHERE id = ?1)",
-                rusqlite::params![id],
-                |r| r.get(0),
-            )
-            .unwrap_or(false);
-        if exists {
-            Ok(billing_port::DisableOutcome::NotUnused)
-        } else {
-            Ok(billing_port::DisableOutcome::NotFound)
+        match self
+            .store
+            .billing
+            .disable_redemption_code(id)
+            .await
+            .map_err(|e| billing_port::BillingStoreError::Failed(e.to_string()))?
+        {
+            true => Ok(billing_port::DisableOutcome::Disabled),
+            // 影响行数 0:回查存在性区分"非 unused"与"不存在"。
+            false => match self
+                .store
+                .billing
+                .get_redemption_code(id)
+                .await
+                .map_err(|e| billing_port::BillingStoreError::Failed(e.to_string()))?
+            {
+                Some(_) => Ok(billing_port::DisableOutcome::NotUnused),
+                None => Ok(billing_port::DisableOutcome::NotFound),
+            },
         }
     }
 
@@ -1617,100 +1233,38 @@ impl billing_port::BillingStore for DbBillingStore {
     }
 
     fn hash_code(&self, code: &str) -> String {
-        use sha2::{Digest, Sha256};
-        format!("{:x}", Sha256::digest(code.as_bytes()))
+        crate::auth::hash_api_key(code)
     }
 }
 
-// ---------- Admin·Providers 适配器(DbProviderStore + GatewayProbes;
-// SQL 迁自旧 api/admin/providers.rs,探测复用 channel 层传输/适配器) ----------
+// ---------- Admin·Providers 适配器(SurrealProviderStore + GatewayProbes;
+// 渠道域经 aikun-store 的 ChannelStore) ----------
 
 use aikun_admin::admin_providers as providers_port;
+use aikun_store::surreal::channels_store as schannels;
 
-struct DbProviderStore {
-    pool: Arc<DbPool>,
+struct SurrealProviderStore {
+    store: Arc<AppStore>,
 }
 
 struct GatewayProbes {
-    pool: Arc<DbPool>,
+    store: Arc<AppStore>,
     clients: Arc<Mutex<HashMap<String, reqwest::Client>>>,
 }
 
-/// providers 配置列(复制/插入用,与 providers_port::ProviderConfig 一一对应)。
-const PROVIDER_CONFIG_COLS: &str = "name, provider_type, openai_base_url, anthropic_base_url,
-    api_key, key_hash, models, priority, weight, max_retries, timeout_secs, proxy_url,
-    model_mapping, protocols, default_protocol, note, website_url, channel_kind";
-
-fn row_to_provider_config(row: &rusqlite::Row) -> rusqlite::Result<providers_port::ProviderConfig> {
-    Ok(providers_port::ProviderConfig {
-        name: row.get(0)?,
-        provider_type: row.get(1)?,
-        openai_base_url: row.get(2)?,
-        anthropic_base_url: row.get(3)?,
-        api_key_stored: row.get(4)?,
-        key_hash: row.get(5)?,
-        models_json: row.get(6)?,
-        priority: row.get(7)?,
-        weight: row.get(8)?,
-        max_retries: row.get(9)?,
-        timeout_secs: row.get(10)?,
-        proxy_url: row.get(11)?,
-        model_mapping_json: row.get(12)?,
-        protocols_json: row.get(13)?,
-        default_protocol: row.get(14)?,
-        note: row.get(15)?,
-        website_url: row.get(16)?,
-        channel_kind: row.get(17)?,
-    })
-}
-
-fn insert_provider_row(
-    conn: &rusqlite::Connection,
-    id: &str,
-    c: &providers_port::ProviderConfig,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        &format!(
-            "INSERT INTO providers (id, {PROVIDER_CONFIG_COLS})
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"
-        ),
-        rusqlite::params![
-            id,
-            c.name,
-            c.provider_type,
-            c.openai_base_url,
-            c.anthropic_base_url,
-            c.api_key_stored,
-            c.key_hash,
-            c.models_json,
-            c.priority,
-            c.weight,
-            c.max_retries,
-            c.timeout_secs,
-            c.proxy_url,
-            c.model_mapping_json,
-            c.protocols_json,
-            c.default_protocol,
-            c.note,
-            c.website_url,
-            c.channel_kind
-        ],
-    )?;
-    Ok(())
-}
-
 #[async_trait::async_trait]
-impl providers_port::ProviderStore for DbProviderStore {
+impl providers_port::ProviderStore for SurrealProviderStore {
     fn new_provider_id(&self) -> String {
-        uuid::Uuid::new_v4().to_string()
+        // 新建记录用 ULID(时间可排序;迁移旧行沿用旧 uuid,设计文档 §三)。
+        ulid::Ulid::new().to_string()
     }
 
     fn encrypt_key(&self, plaintext: &str) -> String {
-        self.pool.cipher.encrypt(plaintext)
+        self.store.cipher.encrypt(plaintext)
     }
 
     fn decrypt_key(&self, stored: &str) -> String {
-        crate::crypto::decrypt_or_plain(&self.pool.cipher, stored)
+        crate::crypto::decrypt_or_plain(&self.store.cipher, stored)
     }
 
     fn hash_key(&self, key: &str) -> String {
@@ -1722,68 +1276,53 @@ impl providers_port::ProviderStore for DbProviderStore {
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<aikun_channels::Provider>, i64), ()> {
-        let pool = self.pool.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = pool.read().lock().map_err(|_| ())?;
-            let total: i64 = conn
-                .query_row("SELECT COUNT(*) FROM providers", [], |r| r.get(0))
-                .map_err(|_| ())?;
-            let mut stmt = conn
-                .prepare(&format!(
-                    "SELECT {} FROM providers ORDER BY priority DESC, name ASC LIMIT ?1 OFFSET ?2",
-                    crate::models::PROVIDER_SELECT_COLUMNS
-                ))
-                .map_err(|_| ())?;
-            let rows = stmt
-                .query_map(
-                    rusqlite::params![limit, offset],
-                    crate::models::row_to_provider,
-                )
-                .map_err(|_| ())?;
-            Ok((rows.filter_map(|r| r.ok()).collect(), total))
-        })
-        .await
-        .map_err(|_| ())?
+        let (total, rows) = self
+            .store
+            .channels
+            .list_providers_by_priority(limit, offset)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::list_providers: {e}"))?;
+        Ok((rows, total))
     }
 
     async fn find_provider(&self, id: &str) -> Result<Option<aikun_channels::Provider>, ()> {
-        let pool = self.pool.clone();
-        let id = id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let conn = pool.read().lock().map_err(|_| ())?;
-            Ok(conn
-                .query_row(
-                    &format!(
-                        "SELECT {} FROM providers WHERE id = ?1",
-                        crate::models::PROVIDER_SELECT_COLUMNS
-                    ),
-                    rusqlite::params![id],
-                    crate::models::row_to_provider,
-                )
-                .ok())
-        })
-        .await
-        .map_err(|_| ())?
+        self.store
+            .channels
+            .get_provider(id)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::find_provider: {e}"))
     }
 
     async fn read_provider_config(
         &self,
         id: &str,
     ) -> Result<Option<providers_port::ProviderConfig>, ()> {
-        let pool = self.pool.clone();
-        let id = id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let conn = pool.read().lock().map_err(|_| ())?;
-            Ok(conn
-                .query_row(
-                    &format!("SELECT {PROVIDER_CONFIG_COLS} FROM providers WHERE id = ?1"),
-                    rusqlite::params![id],
-                    row_to_provider_config,
-                )
-                .ok())
-        })
-        .await
-        .map_err(|_| ())?
+        Ok(self
+            .store
+            .channels
+            .read_provider_stored(id)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::read_provider_config: {e}"))?
+            .map(|c| providers_port::ProviderConfig {
+                name: c.name,
+                provider_type: c.provider_type,
+                openai_base_url: c.openai_base_url,
+                anthropic_base_url: c.anthropic_base_url,
+                api_key_stored: c.api_key_stored,
+                key_hash: c.key_hash,
+                models_json: c.models_json,
+                priority: c.priority,
+                weight: c.weight,
+                max_retries: c.max_retries,
+                timeout_secs: c.timeout_secs,
+                proxy_url: c.proxy_url,
+                model_mapping_json: c.model_mapping_json,
+                protocols_json: c.protocols_json,
+                default_protocol: c.default_protocol,
+                note: c.note,
+                website_url: c.website_url,
+                channel_kind: c.channel_kind,
+            }))
     }
 
     async fn insert_provider(
@@ -1791,34 +1330,43 @@ impl providers_port::ProviderStore for DbProviderStore {
         id: &str,
         config: &providers_port::ProviderConfig,
     ) -> Result<(), ()> {
-        let pool = self.pool.clone();
-        let id = id.to_string();
-        let config = config.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = pool.conn.lock().map_err(|_| ())?;
-            insert_provider_row(&conn, &id, &config)
-                .map_err(|e| tracing::error!("DbProviderStore::insert_provider: {e}"))
-        })
-        .await
-        .map_err(|_| ())?
+        // 密文与 key_hash 由服务层算好原样落库(管理面已加密)。
+        self.store
+            .channels
+            .insert_provider_stored(
+                id,
+                &schannels::StoredProviderConfig {
+                    name: config.name.clone(),
+                    provider_type: config.provider_type.clone(),
+                    openai_base_url: config.openai_base_url.clone(),
+                    anthropic_base_url: config.anthropic_base_url.clone(),
+                    api_key_stored: config.api_key_stored.clone(),
+                    key_hash: config.key_hash.clone(),
+                    models_json: config.models_json.clone(),
+                    priority: config.priority,
+                    weight: config.weight,
+                    max_retries: config.max_retries,
+                    timeout_secs: config.timeout_secs,
+                    proxy_url: config.proxy_url.clone(),
+                    model_mapping_json: config.model_mapping_json.clone(),
+                    protocols_json: config.protocols_json.clone(),
+                    default_protocol: config.default_protocol.clone(),
+                    note: config.note.clone(),
+                    website_url: config.website_url.clone(),
+                    channel_kind: config.channel_kind.clone(),
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| tracing::error!("SurrealProviderStore::insert_provider: {e}"))
     }
 
     async fn find_key_owner(&self, key_hash: &str, exclude_id: &str) -> Result<Option<String>, ()> {
-        let pool = self.pool.clone();
-        let key_hash = key_hash.to_string();
-        let exclude_id = exclude_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let conn = pool.read().lock().map_err(|_| ())?;
-            Ok(conn
-                .query_row(
-                    "SELECT name FROM providers WHERE key_hash = ?1 AND id != ?2 LIMIT 1",
-                    rusqlite::params![key_hash, exclude_id],
-                    |row| row.get(0),
-                )
-                .ok())
-        })
-        .await
-        .map_err(|_| ())?
+        self.store
+            .channels
+            .find_key_owner(key_hash, exclude_id)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::find_key_owner: {e}"))
     }
 
     async fn update_provider(
@@ -1826,133 +1374,55 @@ impl providers_port::ProviderStore for DbProviderStore {
         id: &str,
         patch: &providers_port::ProviderPatch,
     ) -> Result<u64, ()> {
-        let pool = self.pool.clone();
-        let id = id.to_string();
-        let patch = patch.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = pool.conn.lock().map_err(|_| ())?;
-            let mut sets: Vec<&'static str> = Vec::new();
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-            let push = |sets: &mut Vec<&'static str>,
-                        params: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
-                        set: &'static str,
-                        v: String| {
-                sets.push(set);
-                params.push(Box::new(v));
-            };
-            if let Some(v) = &patch.name {
-                push(&mut sets, &mut params, "name = ?", v.clone());
+        let stored = schannels::StoredProviderPatch {
+            name: patch.name.clone(),
+            provider_type: patch.provider_type.clone(),
+            openai_base_url: patch.openai_base_url.clone(),
+            anthropic_base_url: patch.anthropic_base_url.clone(),
+            note: patch.note.clone(),
+            website_url: patch.website_url.clone(),
+            channel_kind: patch.channel_kind.clone(),
+            api_key_stored: patch.api_key_stored.clone(),
+            key_hash: patch.key_hash.clone(),
+            models_json: patch.models_json.clone(),
+            priority: patch.priority,
+            weight: patch.weight,
+            is_active: patch.is_active,
+            max_retries: patch.max_retries,
+            timeout_secs: patch.timeout_secs,
+            proxy_url: patch.proxy_url.clone(),
+            model_mapping_json: patch.model_mapping_json.clone(),
+            protocols_json: patch.protocols_json.clone(),
+            default_protocol: patch.default_protocol.clone(),
+        };
+        match self.store.channels.apply_provider_patch(id, stored).await {
+            Ok(Some(_)) => Ok(1),
+            Ok(None) => Ok(0),
+            Err(e) => {
+                tracing::error!("SurrealProviderStore::update_provider: {e}");
+                Err(())
             }
-            if let Some(v) = &patch.provider_type {
-                push(&mut sets, &mut params, "provider_type = ?", v.clone());
-            }
-            if let Some(v) = &patch.openai_base_url {
-                push(&mut sets, &mut params, "openai_base_url = ?", v.clone());
-            }
-            if let Some(v) = &patch.anthropic_base_url {
-                push(&mut sets, &mut params, "anthropic_base_url = ?", v.clone());
-            }
-            if let Some(v) = &patch.note {
-                push(&mut sets, &mut params, "note = ?", v.clone());
-            }
-            if let Some(v) = &patch.website_url {
-                push(&mut sets, &mut params, "website_url = ?", v.clone());
-            }
-            if let Some(v) = &patch.channel_kind {
-                push(&mut sets, &mut params, "channel_kind = ?", v.clone());
-            }
-            if let Some(v) = &patch.api_key_stored {
-                push(&mut sets, &mut params, "api_key = ?", v.clone());
-            }
-            if let Some(v) = &patch.key_hash {
-                push(&mut sets, &mut params, "key_hash = ?", v.clone());
-            }
-            if let Some(v) = &patch.models_json {
-                push(&mut sets, &mut params, "models = ?", v.clone());
-            }
-            if let Some(v) = patch.priority {
-                sets.push("priority = ?");
-                params.push(Box::new(v));
-            }
-            if let Some(v) = patch.weight {
-                sets.push("weight = ?");
-                params.push(Box::new(v));
-            }
-            if let Some(active) = patch.is_active {
-                sets.push("is_active = ?");
-                params.push(Box::new(active as i32));
-                if active {
-                    // 手动重启用:清自动禁用状态(旧实现语义)。
-                    sets.push("disabled_reason = ''");
-                    sets.push("consecutive_failures = 0");
-                }
-            }
-            if let Some(v) = patch.max_retries {
-                sets.push("max_retries = ?");
-                params.push(Box::new(v));
-            }
-            if let Some(v) = patch.timeout_secs {
-                sets.push("timeout_secs = ?");
-                params.push(Box::new(v));
-            }
-            if let Some(v) = &patch.proxy_url {
-                push(&mut sets, &mut params, "proxy_url = ?", v.clone());
-            }
-            if let Some(v) = &patch.model_mapping_json {
-                push(&mut sets, &mut params, "model_mapping = ?", v.clone());
-            }
-            if let Some(v) = &patch.protocols_json {
-                push(&mut sets, &mut params, "protocols = ?", v.clone());
-            }
-            if let Some(v) = &patch.default_protocol {
-                push(&mut sets, &mut params, "default_protocol = ?", v.clone());
-            }
-            sets.push("updated_at = datetime('now')");
-            params.push(Box::new(id.clone()));
-            let refs: Vec<&dyn rusqlite::types::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
-            conn.execute(
-                &format!("UPDATE providers SET {} WHERE id = ?", sets.join(", ")),
-                refs.as_slice(),
-            )
-            .map(|n| n as u64)
-            .map_err(|e| tracing::error!("DbProviderStore::update_provider: {e}"))
-        })
-        .await
-        .map_err(|_| ())?
+        }
     }
 
     async fn delete_provider(&self, id: &str) -> Result<u64, ()> {
-        let pool = self.pool.clone();
-        let id = id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let conn = pool.conn.lock().map_err(|_| ())?;
-            conn.execute("DELETE FROM providers WHERE id = ?1", rusqlite::params![id])
-                .map(|n| n as u64)
-                .map_err(|e| tracing::error!("DbProviderStore::delete_provider: {e}"))
-        })
-        .await
-        .map_err(|_| ())?
+        let deleted = self
+            .store
+            .channels
+            .delete_provider(id)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::delete_provider: {e}"))?;
+        Ok(u64::from(deleted))
     }
 
-    async fn update_health(&self, id: &str, status: &str, checked_at: &str) -> Result<(), ()> {
-        let pool = self.pool.clone();
-        let id = id.to_string();
-        let status = status.to_string();
-        let checked_at = checked_at.to_string();
-        tokio::task::spawn_blocking(move || {
-            let conn = pool.conn.lock().map_err(|_| ())?;
-            // 刻意不更新 latency_ms:ping 延迟不代表真实请求延迟(与后台
-            // 健康检查循环同口径)。
-            conn.execute(
-                "UPDATE providers SET health_status = ?1, last_health_check = ?2 WHERE id = ?3",
-                rusqlite::params![status, checked_at, id],
-            )
-            .map(|_| ())
-            .map_err(|e| tracing::error!("DbProviderStore::update_health: {e}"))
-        })
-        .await
-        .map_err(|_| ())?
+    async fn update_health(&self, id: &str, status: &str, _checked_at: &str) -> Result<(), ()> {
+        // 只写 health_status + last_health_check(实现侧 time::now();
+        // 刻意不更新 latency_ms——ping 延迟不代表真实请求延迟)。
+        self.store
+            .channels
+            .record_health_ping(id, status)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::update_health: {e}"))
     }
 
     async fn record_model_health(
@@ -1963,22 +1433,16 @@ impl providers_port::ProviderStore for DbProviderStore {
         latency_ms: f64,
         error: Option<&str>,
     ) {
-        let pool = self.pool.clone();
-        let provider_id = provider_id.to_string();
-        let model = model.to_string();
-        let error = error.map(str::to_string);
         // model_health upsert + 渠道 EMA 记账(与代理转发路径同口径);
         // 尽力而为,失败只留痕。
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::channel::model_test::record_model_health(
-                &pool,
-                &provider_id,
-                &model,
-                ok,
-                latency_ms,
-                error.as_deref(),
-            )
-        })
+        let _ = crate::channel::model_test::record_model_health(
+            &self.store,
+            provider_id,
+            model,
+            ok,
+            latency_ms,
+            error,
+        )
         .await;
     }
 
@@ -1988,79 +1452,41 @@ impl providers_port::ProviderStore for DbProviderStore {
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<providers_port::ModelHealthRow>, i64), ()> {
-        let pool = self.pool.clone();
-        let provider_id = provider_id.map(str::to_string);
-        tokio::task::spawn_blocking(move || {
-            let conn = pool.read().lock().map_err(|_| ())?;
-            let row_map = |row: &rusqlite::Row| {
-                Ok(providers_port::ModelHealthRow {
-                    provider_id: row.get(0)?,
-                    model: row.get(1)?,
-                    status: row.get(2)?,
-                    latency_ms: row.get(3)?,
-                    error: row.get(4)?,
-                    checked_at: row.get(5)?,
+        let (total, rows) = self
+            .store
+            .channels
+            .list_model_health_scoped(provider_id, limit, offset)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::list_model_health: {e}"))?;
+        Ok((
+            rows.into_iter()
+                .map(|r| providers_port::ModelHealthRow {
+                    provider_id: r.provider_id,
+                    model: r.model,
+                    status: r.status,
+                    latency_ms: r.latency_ms,
+                    error: r.error,
+                    checked_at: r.checked_at.map(|t| t.to_rfc3339()),
                 })
-            };
-            let (total, rows) = match &provider_id {
-                Some(p) => {
-                    let total: i64 = conn
-                        .query_row(
-                            "SELECT COUNT(*) FROM model_health WHERE provider_id = ?1",
-                            rusqlite::params![p],
-                            |r| r.get(0),
-                        )
-                        .map_err(|_| ())?;
-                    let mut stmt = conn
-                        .prepare(
-                            "SELECT provider_id, model, status, latency_ms, error, checked_at
-                             FROM model_health WHERE provider_id = ?1
-                             ORDER BY provider_id, model LIMIT ?2 OFFSET ?3",
-                        )
-                        .map_err(|_| ())?;
-                    let rows = stmt
-                        .query_map(rusqlite::params![p, limit, offset], row_map)
-                        .map_err(|_| ())?;
-                    (total, rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
-                }
-                None => {
-                    let total: i64 = conn
-                        .query_row("SELECT COUNT(*) FROM model_health", [], |r| r.get(0))
-                        .map_err(|_| ())?;
-                    let mut stmt = conn
-                        .prepare(
-                            "SELECT provider_id, model, status, latency_ms, error, checked_at
-                             FROM model_health
-                             ORDER BY provider_id, model LIMIT ?1 OFFSET ?2",
-                        )
-                        .map_err(|_| ())?;
-                    let rows = stmt
-                        .query_map(rusqlite::params![limit, offset], row_map)
-                        .map_err(|_| ())?;
-                    (total, rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
-                }
-            };
-            Ok((rows, total))
-        })
-        .await
-        .map_err(|_| ())?
+                .collect(),
+            total,
+        ))
     }
 
     async fn find_provider_credentials(&self, id: &str) -> Result<Option<(String, String)>, ()> {
-        let pool = self.pool.clone();
-        let id = id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let conn = pool.read().lock().map_err(|_| ())?;
-            Ok(conn
-                .query_row(
-                    "SELECT api_key, proxy_url FROM providers WHERE id = ?1",
-                    rusqlite::params![id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        // 编辑态回退用:库存 (api_key 原文, proxy_url)。
+        Ok(self
+            .store
+            .channels
+            .read_provider_stored(id)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::find_provider_credentials: {e}"))?
+            .map(|c| {
+                (
+                    crate::crypto::decrypt_or_plain(&self.store.cipher, &c.api_key_stored),
+                    c.proxy_url,
                 )
-                .ok())
-        })
-        .await
-        .map_err(|_| ())?
+            }))
     }
 }
 
@@ -2221,7 +1647,7 @@ impl providers_port::ProviderProbes for GatewayProbes {
             .unwrap_or_else(|| aikun_protocol::Protocol::for_provider_type(&protocol));
         let protocol_str = protocol.as_str().to_string();
         let clients = self.clients.clone();
-        let pool = self.pool.clone();
+        let store = self.store.clone();
         // 探针请求体(口径同 channel::model_test 的 build_probe_body)。
         let mut body = json!({
             "model": model,
@@ -2386,139 +1812,59 @@ impl providers_port::ProviderProbes for GatewayProbes {
             let pid = provider.id.clone();
             let model_for_record = model.clone();
             let err_for_record = error_msg.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                crate::channel::model_test::record_model_health(
-                    &pool,
-                    &pid,
-                    &model_for_record,
-                    ok,
-                    latency,
-                    err_for_record.as_deref(),
-                )
-            })
+            let _ = crate::channel::model_test::record_model_health(
+                &store,
+                &pid,
+                &model_for_record,
+                ok,
+                latency,
+                err_for_record.as_deref(),
+            )
             .await;
         };
         sse_response(stream)
     }
 }
 
-// ---------- Admin·Stats 适配器(DbStatsStore;SQL 迁自旧
-// api/logs.rs::usage_stats / admin_stats) ----------
+// ---------- Admin·Stats 适配器(SurrealStatsStore) ----------
 
 use aikun_admin::admin_stats as stats_port;
 
-struct DbStatsStore {
-    pool: Arc<DbPool>,
+struct SurrealStatsStore {
+    store: Arc<AppStore>,
 }
 
-impl stats_port::StatsStore for DbStatsStore {
-    fn usage_snapshot(&self) -> Result<stats_port::UsageSnapshot, ()> {
-        let conn = self.pool.read().lock().map_err(|_| ())?;
-        // created_at 前 10 位即 YYYY-MM-DD(RFC3339 与 SQLite datetime 通用);
-        // 一次查询拆出 today/week/month 三组计数(近 30 天窗口)。
-        let today = chrono::Utc::now().date_naive();
-        let fmt = |d: chrono::NaiveDate| d.format("%Y-%m-%d").to_string();
-        let today_s = fmt(today);
-        let week_s = fmt(today - chrono::Duration::days(6));
-        let month_s = fmt(today - chrono::Duration::days(29));
-
-        let (month_req, month_tok, today_req, today_tok, week_req, week_tok) = conn
-            .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0),
-                        COALESCE(SUM(CASE WHEN substr(created_at, 1, 10) = ?1 THEN 1 ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN substr(created_at, 1, 10) = ?1 THEN total_tokens ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN substr(created_at, 1, 10) >= ?2 THEN 1 ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN substr(created_at, 1, 10) >= ?2 THEN total_tokens ELSE 0 END), 0)
-                 FROM request_logs
-                 WHERE substr(created_at, 1, 10) >= ?3",
-                rusqlite::params![today_s, week_s, month_s],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
-                    ))
-                },
-            )
-            .map_err(|e| {
-                tracing::error!("DbStatsStore::usage_snapshot totals: {e}")
-            })?;
-
-        let daily = conn
-            .prepare(
-                "SELECT substr(created_at, 1, 10) AS d, COUNT(*), COALESCE(SUM(total_tokens), 0),
-                        COALESCE(AVG(latency_ms), 0),
-                        COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0)
-                 FROM request_logs
-                 WHERE substr(created_at, 1, 10) >= ?1
-                 GROUP BY d",
-            )
-            .and_then(|mut stmt| {
-                stmt.query_map(rusqlite::params![month_s], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, f64>(3)?,
-                        row.get::<_, f64>(4)?,
-                    ))
-                })
-                .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
-            })
-            .map_err(|e| {
-                tracing::error!("DbStatsStore::usage_snapshot daily: {e}")
-            })?;
-
-        let top_models = conn
-            .prepare(
-                "SELECT model, COUNT(*) AS c, COALESCE(SUM(total_tokens), 0)
-                 FROM request_logs
-                 WHERE substr(created_at, 1, 10) >= ?1
-                 GROUP BY model ORDER BY c DESC LIMIT 8",
-            )
-            .and_then(|mut stmt| {
-                stmt.query_map(rusqlite::params![month_s], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                })
-                .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
-            })
-            .map_err(|e| tracing::error!("DbStatsStore::usage_snapshot top_models: {e}"))?;
-
+#[async_trait::async_trait]
+impl stats_port::StatsStore for SurrealStatsStore {
+    async fn usage_snapshot(&self) -> Result<stats_port::UsageSnapshot, ()> {
+        let s = self
+            .store
+            .billing
+            .usage_snapshot()
+            .await
+            .map_err(|e| tracing::error!("SurrealStatsStore::usage_snapshot: {e}"))?;
         Ok(stats_port::UsageSnapshot {
-            today: (today_req, today_tok),
-            week: (week_req, week_tok),
-            month: (month_req, month_tok),
-            daily,
-            top_models,
+            today: s.today,
+            week: s.week,
+            month: s.month,
+            daily: s.daily,
+            top_models: s.top_models,
         })
     }
 
-    fn global_counts(&self) -> Result<stats_port::GlobalCounts, ()> {
-        let conn = self.pool.read().lock().map_err(|_| ())?;
-        conn.query_row(
-            "SELECT (SELECT COUNT(*) FROM api_keys),
-                    (SELECT COUNT(*) FROM users),
-                    (SELECT COUNT(*) FROM providers),
-                    (SELECT COUNT(*) FROM request_logs WHERE substr(created_at, 1, 10) = date('now'))",
-            [],
-            |row| {
-                Ok(stats_port::GlobalCounts {
-                    api_keys: row.get(0)?,
-                    users: row.get(1)?,
-                    providers: row.get(2)?,
-                    requests_today: row.get(3)?,
-                })
-            },
-        )
-        .map_err(|e| {
-            tracing::error!("DbStatsStore::global_counts: {e}")
+    async fn global_counts(&self) -> Result<stats_port::GlobalCounts, ()> {
+        let stats = self
+            .store
+            .billing
+            .system_stats()
+            .await
+            .map_err(|e| tracing::error!("SurrealStatsStore::global_counts: {e}"))?;
+        let requests_today = self.store.billing.requests_today().await.unwrap_or(0);
+        Ok(stats_port::GlobalCounts {
+            api_keys: stats.api_keys,
+            users: stats.users,
+            providers: stats.providers,
+            requests_today,
         })
     }
 }
