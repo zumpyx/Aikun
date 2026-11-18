@@ -2887,6 +2887,21 @@ pub struct UpsertPriceRequest {
 pub struct VersionInfo {
     pub version: String,
 }
+/**token 查上游(billing/balance)得到的账号信息;name_updated =
+是否把自动生成名替换成了账号标识(手动命名不覆盖)。
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ZcodeAccountInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    ///上游 data 原始对象(套餐/额度/账号字段,原样)
+    pub balance: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+    pub name_updated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_name: Option<String>,
+}
 ///OAuth 授权流已发起;authorize_url 交给浏览器打开。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ZcodeLoginInitResult {

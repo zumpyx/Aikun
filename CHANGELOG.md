@@ -81,6 +81,19 @@
   `/data/aikun.surreal`);迁移工具默认目标同步。
 
 ## [Unreleased]
+### 变更(账号 = token 唯一必需 + 一键获取账号信息 + 手动备注)
+
+用户裁决(2026-11-19):账号必须的部分只有 token;名称/账号 id 添加后
+一键获取,备注可手动标记。
+- **在线登录建渠道只依赖 token**:name 自动生成 `zcode-{6hex}`
+  (不再依赖 email/phone——国内手机号账号 email 为空串曾致 400)。
+- **一键获取账号信息**(`POST /api/providers/{id}/zcode/account-info`):
+  token 查 billing/balance(零消耗),返回账号 id/标识/套餐,并回填
+  ——名称仅当仍是自动生成前缀(手动命名不覆盖),note 写账号摘要。
+  行操作新增「账号信息」按钮。
+- **手动备注**:行操作「备注」按钮,弹窗编辑渠道 note。
+
+## [Unreleased]
 ### 修复(在线登录国内账号 "name 不能为空" 400)
 
 - 国内(智谱)账号多为手机号登录,OAuth ready 响应 user.email 常为

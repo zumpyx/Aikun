@@ -274,6 +274,24 @@ impl aikun_admin::admin_providers::ZcodeClaimPort for ZcodeClaimImpl {
         }
     }
 
+    async fn fetch_balance(&self, base: &str, jwt: &str) -> Result<serde_json::Value, String> {
+        use aikun_channels::adapters::zcode::{BALANCE_PATH, BILLING_CLIENT_VERSION};
+        let path = format!("{BALANCE_PATH}?app_version={BILLING_CLIENT_VERSION}");
+        let (status, body) = self
+            .request_json(reqwest::Method::GET, base, &path, jwt, None)
+            .await?;
+        if status != 200 {
+            return Err(format!("balance HTTP {status}"));
+        }
+        if body["code"].as_i64() != Some(0) {
+            return Err(format!(
+                "balance code {}",
+                body["code"].as_i64().unwrap_or(-1)
+            ));
+        }
+        Ok(body["data"].clone())
+    }
+
     async fn confirm_campaign(
         &self,
         base: &str,

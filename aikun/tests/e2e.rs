@@ -2421,7 +2421,14 @@ async fn zcode_oauth_login_flow() {
     assert_eq!(body["email"], "dev@example.com");
     let provider = &body["provider"];
     assert_eq!(provider["channel_kind"], "zcode");
-    assert_eq!(provider["name"], "dev@example.com", "name 默认授权邮箱");
+    assert!(
+        provider["name"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("zcode-"),
+        "name 自动生成(token 唯一必需): {}",
+        provider["name"]
+    );
     assert_eq!(provider["default_protocol"], "anthropic");
     assert!(
         provider["models"]
@@ -3070,8 +3077,8 @@ async fn zcode_oauth_login_cn_env() {
     assert_eq!(body["provider"], "bigmodel");
 }
 
-/// 国内手机号登录的 ready 响应:user.email 为空串(智谱账号常无邮箱),
-/// name 兜底到 phone → 渠道正常创建(修复 "name 不能为空" 400)。
+/// 国内手机号登录的 ready 响应:user.email 为空串(智谱账号常无邮箱)。
+/// name 不依赖 email/phone:自动生成 zcode-{6hex},渠道正常创建。
 #[tokio::test]
 async fn zcode_oauth_login_cn_empty_email_falls_back() {
     let oauth = MockUpstream::start().await;
@@ -3115,7 +3122,14 @@ async fn zcode_oauth_login_cn_empty_email_falls_back() {
     assert_eq!(r.status(), 200, "空 email 不再 400");
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["status"], "ready");
-    assert_eq!(v["provider"]["name"], "13800001111", "name 兜底取 phone");
+    assert!(
+        v["provider"]["name"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("zcode-"),
+        "name 自动生成: {}",
+        v["provider"]["name"]
+    );
 
     // email/phone 全空:兜底 zcode-user(直接 poll,不再消费 init 响应)
     oauth.push_json(
@@ -3132,8 +3146,142 @@ async fn zcode_oauth_login_cn_empty_email_falls_back() {
         .unwrap();
     assert_eq!(r.status(), 200);
     let v: Value = r.json().await.unwrap();
-    assert_eq!(
-        v["provider"]["name"], "zcode-user",
-        "全空兜底 zcode-user: {v}"
+    assert!(
+        v["provider"]["name"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("zcode-"),
+        "全空 email/phone 也不再 400,name 自动生成: {v}"
     );
+}
+
+/// 一键获取账号信息:token 查 billing/balance,自动生成名回填为账号
+/// 标识、note 写摘要;手动命名不覆盖。
+#[tokio::test]
+async fn zcode_account_info_fetch_and_backfill() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn_with_env(&[
+        (
+            "AIKUN_ZCODE_OAUTH_BASE",
+            &format!("http://{}", mock.base.trim_start_matches("http://")),
+        ),
+        ("AIKUN_HEALTH_CHECK_INTERVAL", "3600"),
+    ])
+    .await;
+    let admin = app.admin_token().await;
+
+    // 建一个自动生成名的 zcode 渠道(在线登录;email/phone 全空)
+    mock.push_json(
+        200,
+        json!({"data": {"flow_id": "f9", "authorize_url": "https://x"}}),
+    );
+    mock.push_json(
+        200,
+        json!({"data": {"status": "ready", "token": "jwt-info", "user": {"email": "", "phone": ""}}}),
+    );
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-init", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"env": "intl"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-poll", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"flow_id": "f9", "poll_token": "any", "env": "intl"}))
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    let pid = v["provider"]["id"].as_str().unwrap().to_string();
+    assert!(
+        v["provider"]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("zcode-")
+    );
+    // 渠道 base 指向 mock(account-info/领取一样跟渠道 base 走)
+    let r = app
+        .client()
+        .patch(format!("{}/api/providers/{pid}", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"openai_base_url": mock.base, "anthropic_base_url": mock.base}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "PATCH base→mock");
+
+    // 一键获取账号信息(balance 返回账号字段)
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"account_id": "acc-123", "email": "user@z.ai",
+               "plans": [{"plan_id": "p1", "name": "Pro"}],
+               "balances": []}}),
+    );
+    let r = app
+        .client()
+        .post(format!(
+            "{}/api/providers/{pid}/zcode/account-info",
+            app.base
+        ))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "account-info 200");
+    let info: Value = r.json().await.unwrap();
+    assert_eq!(info["account_id"], "acc-123");
+    assert_eq!(info["display"], "user@z.ai");
+    assert_eq!(info["plan_name"], "Pro");
+    assert_eq!(info["name_updated"], true, "自动生成名回填");
+
+    // 渠道已回填
+    let r = app
+        .client()
+        .get(format!(
+            "{}/api/providers?category=proxy&kind=zcode",
+            app.base
+        ))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    let row = &v["items"][0];
+    assert_eq!(row["name"], "user@z.ai", "名称回填为账号标识");
+    assert!(
+        row["note"].as_str().unwrap_or("").contains("acc-123"),
+        "note 含账号 id"
+    );
+
+    // 手动命名不被覆盖:改名后再获取,保持手动名
+    let r = app
+        .client()
+        .patch(format!("{}/api/providers/{pid}", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"name": "我的主号"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"account_id": "acc-123", "email": "user@z.ai", "plans": [{"name": "Pro"}]}}),
+    );
+    let r = app
+        .client()
+        .post(format!(
+            "{}/api/providers/{pid}/zcode/account-info",
+            app.base
+        ))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    let info: Value = r.json().await.unwrap();
+    assert_eq!(info["name_updated"], false, "手动命名不覆盖");
 }

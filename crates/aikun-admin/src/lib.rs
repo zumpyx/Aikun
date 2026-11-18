@@ -244,6 +244,12 @@ impl AdminApi for AdminService {
     ) -> aikun_openapi::openapi::server::errors::AdminDeleteProxyResponse {
         self.providers.admin_delete_proxy(id).await
     }
+    async fn admin_zcode_account_info(
+        &self,
+        id: String,
+    ) -> aikun_openapi::openapi::server::errors::AdminZcodeAccountInfoResponse {
+        self.providers.admin_zcode_account_info(id).await
+    }
     async fn admin_zcode_claim_quota(
         &self,
         id: String,

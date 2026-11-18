@@ -5,11 +5,11 @@
 //! 的 zcode 专属方法都在这里;渠道 CRUD/导入导出等通用面见 `mod.rs`。
 
 use aikun_openapi::openapi::server::errors::{
-    AdminListZcodeTasksResponse, AdminZcodeClaimQuotaResponse, AdminZcodeLoginInitResponse,
-    AdminZcodeLoginPollResponse,
+    AdminListZcodeTasksResponse, AdminZcodeAccountInfoResponse, AdminZcodeClaimQuotaResponse,
+    AdminZcodeLoginInitResponse, AdminZcodeLoginPollResponse,
 };
 use aikun_openapi::openapi::types::{
-    AdminZcodeClaimResult, ProxyTaskList, ProxyTaskRecord, ProxyTaskRecordSource,
+    AdminZcodeClaimResult, ProxyTaskList, ProxyTaskRecord, ProxyTaskRecordSource, ZcodeAccountInfo,
     ZcodeLoginInitRequestEnv, ZcodeLoginInitResult, ZcodeLoginPollRequest,
     ZcodeLoginPollRequestEnv, ZcodeLoginPollResult, ZcodeLoginPollResultStatus,
 };
@@ -84,6 +84,10 @@ pub trait ZcodeClaimPort: Send + Sync + 'static {
         jwt: &str,
         campaign_id: &str,
     ) -> Result<(), String>;
+
+    /// GET billing/balance 返回 data 原始对象(零消耗;一键获取账号信息
+    /// 的数据源——套餐/额度/账号字段都在里面)。
+    async fn fetch_balance(&self, base: &str, jwt: &str) -> Result<serde_json::Value, String>;
 }
 
 // ---- 服务方法(挂在主模块的服务上;子模块可访问其私有字段) ----
@@ -154,15 +158,16 @@ impl AdminProvidersService {
                 })
             }
             ZcodePollStatus::Ready { token, email } => {
-                // name 三级兜底:显式 name → 授权账号标识(email/phone,
-                // 国内手机号登录时 email 常为空串)→ zcode-user。
+                // name 不依赖授权响应里的 email/phone(国内手机号账号常为
+                // 空串,踩过 400 坑;用户裁决 2026-11-19):显式 name →
+                // 自动生成 zcode-{6 hex},后续管理员自行改名标记;账号
+                // 标识可随时用 token 调上游查询,不阻塞建渠道。
                 let name = body
                     .name
                     .clone()
                     .map(|n| n.trim().to_string())
                     .filter(|n| !n.is_empty())
-                    .or_else(|| Some(email.trim().to_string()).filter(|e| !e.is_empty()))
-                    .unwrap_or_else(|| "zcode-user".to_string());
+                    .unwrap_or_else(|| format!("zcode-{}", random_hex6()));
                 // 建渠道 base 与登录账号体系同环境(凭证互不通用)
                 let (base, origin_note) = if env == "cn" {
                     ("https://zcode.bigmodel.cn", "国内 BigModel 账号")
@@ -252,6 +257,118 @@ impl AdminProvidersService {
     /// 序列,见 [`ZcodeClaimPort`])。
     pub async fn admin_zcode_claim_quota(&self, id: String) -> AdminZcodeClaimQuotaResponse {
         self.admin_zcode_claim_quota_sourced(id, "manual").await
+    }
+
+    /// `POST /api/providers/{id}/zcode/account-info`——token 查上游
+    /// billing/balance(零消耗),回填名称(仅自动生成名)与 note 摘要。
+    pub async fn admin_zcode_account_info(&self, id: String) -> AdminZcodeAccountInfoResponse {
+        let row = match self.store.find_provider(&id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                return AdminZcodeAccountInfoResponse::NotFound(problem(
+                    404,
+                    "not_found",
+                    "渠道不存在",
+                ));
+            }
+            Err(()) => {
+                return AdminZcodeAccountInfoResponse::NotFound(problem(
+                    502,
+                    "store_error",
+                    "渠道读取失败",
+                ));
+            }
+        };
+        if row.channel_kind.trim() != aikun_channels::adapters::zcode::KIND {
+            return AdminZcodeAccountInfoResponse::BadRequest(problem(
+                400,
+                "invalid_channel_kind",
+                "仅 zcode 渠道支持获取账号信息",
+            ));
+        }
+        let base = if row.anthropic_base_url.trim().is_empty() {
+            row.openai_base_url.trim().to_string()
+        } else {
+            row.anthropic_base_url.trim().to_string()
+        };
+        let (jwt, _) = match self.store.find_provider_credentials(&id).await {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                return AdminZcodeAccountInfoResponse::NotFound(problem(
+                    404,
+                    "not_found",
+                    "渠道不存在",
+                ));
+            }
+            Err(()) => {
+                return AdminZcodeAccountInfoResponse::BadRequest(problem(
+                    502,
+                    "store_error",
+                    "渠道凭证读取失败",
+                ));
+            }
+        };
+        let balance = match self.zcode_claim.fetch_balance(&base, &jwt).await {
+            Ok(v) => v,
+            Err(e) => {
+                return AdminZcodeAccountInfoResponse::BadGateway(problem(
+                    502,
+                    "upstream_error",
+                    &e,
+                ));
+            }
+        };
+        // 账号标识:常见字段里取第一个非空字符串
+        let pick = |keys: &[&str]| -> Option<String> {
+            keys.iter().find_map(|k| {
+                balance[k]
+                    .as_str()
+                    .filter(|v| !v.trim().is_empty())
+                    .map(str::to_string)
+            })
+        };
+        let account_id = pick(&["account_id", "accountId", "user_id", "id"]);
+        let display = pick(&["email", "phone", "username", "name"]);
+        let plan_name = balance["plans"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|p| p["name"].as_str())
+            .map(str::to_string);
+        // 回填:名称仅当仍是自动生成前缀(手动命名不覆盖);摘要进 note
+        //(用户裁决:备注可手动改,一键获取会覆盖为最新摘要)。
+        let mut name_updated = false;
+        let patch = super::ProviderPatch {
+            note: Some(format!(
+                "账号信息:{}{}{}",
+                display.clone().unwrap_or_default(),
+                account_id
+                    .as_ref()
+                    .map(|a| format!(" id={a}"))
+                    .unwrap_or_default(),
+                plan_name
+                    .as_ref()
+                    .map(|p| format!(" 套餐={p}"))
+                    .unwrap_or_default(),
+            )),
+            name: if row.name.trim().starts_with("zcode-") {
+                let picked = display.clone().or_else(|| account_id.clone());
+                if picked.is_some() {
+                    name_updated = true;
+                }
+                picked
+            } else {
+                None
+            },
+            ..Default::default()
+        };
+        let _ = self.store.update_provider(&id, &patch).await;
+        AdminZcodeAccountInfoResponse::Ok(ZcodeAccountInfo {
+            account_id,
+            display,
+            plan_name,
+            balance,
+            name_updated,
+        })
     }
 
     /// 领取核心(manual/oauth/auto 三来源共用):领取后把结果写进
@@ -427,4 +544,22 @@ impl AdminProvidersService {
             problems,
         }
     }
+}
+
+/// 渠道自动命名的短随机后缀(rand 已是 crate 依赖的等价物:这里手写
+/// 无依赖 xorshift,避免仅为 6 个字符引运行时)。
+fn random_hex6() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut x = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+        .unwrap_or(0x9e3779b9);
+    let mut out = String::with_capacity(6);
+    for _ in 0..6 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        out.push(std::char::from_digit((x & 0xf) as u32, 16).unwrap_or('0'));
+    }
+    out
 }

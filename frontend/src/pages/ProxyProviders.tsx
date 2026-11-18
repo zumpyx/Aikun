@@ -177,8 +177,10 @@ function AppPage({ appId }: { appId: AppId }) {
     loginTimer.current = window.setTimeout(() => void tick(), 3000)
   }
 
-  // ---- 领取免费额度 ----
+  // ---- 领取免费额度 / 账号信息 / 手动备注 ----
   const [claiming, setClaiming] = useState<Set<string>>(new Set())
+  const [fetchingInfo, setFetchingInfo] = useState<Set<string>>(new Set())
+  const [noteFor, setNoteFor] = useState<{ id: string; name: string; note: string } | null>(null)
   const doClaim = async (id: string, name: string) => {
     setClaiming((prev) => new Set(prev).add(id))
     const r = await api<{ claimed: string[]; skipped: string[]; problems: string[] }>('POST', `/api/providers/${id}/zcode/claim`)
@@ -199,6 +201,25 @@ function AppPage({ appId }: { appId: AppId }) {
     else if (r.data.problems.length === 0) sonnerToast.info(`${name}:当前没有可领的额度`)
     invalidate()
   }
+  // 一键获取账号信息:token 查上游,回填名称(自动生成名)/备注摘要
+  const fetchAccountInfo = async (id: string, name: string) => {
+    setFetchingInfo((prev) => new Set(prev).add(id))
+    const r = await api<{ account_id?: string; display?: string; plan_name?: string; name_updated: boolean }>(
+      'POST', `/api/providers/${id}/zcode/account-info`)
+    setFetchingInfo((prev) => {
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+    if (!r.ok) return sonnerToast.error(`${name} 获取账号信息失败:${errMsg(r)}`)
+    const parts: string[] = []
+    if (r.data.display) parts.push(r.data.display)
+    if (r.data.account_id) parts.push(`id=${r.data.account_id}`)
+    if (r.data.plan_name) parts.push(`套餐 ${r.data.plan_name}`)
+    sonnerToast.success(`${name}:${parts.join(' · ') || '已获取'}${r.data.name_updated ? '(名称已回填)' : ''}`)
+    invalidate()
+  }
+
   const claimAll = async () => {
     const targets = (list.data?.items ?? []).filter((p) => p.channel_kind === 'zcode')
     if (targets.length === 0) return sonnerToast.info('没有可领取的 ZCode 订阅渠道')
@@ -280,6 +301,7 @@ function AppPage({ appId }: { appId: AppId }) {
           )}
 
           {batchOpen && <BatchModal appId={appId} onOpenChange={setBatchOpen} />}
+          {noteFor && <NoteModal target={noteFor} onDone={invalidate} onClose={() => setNoteFor(null)} />}
           {importOpen && <ImportModal onOpenChange={setImportOpen} onDone={invalidate} />}
 
           {selected.size > 0 && (
@@ -339,10 +361,18 @@ function AppPage({ appId }: { appId: AppId }) {
                           )}
                           <TD>
                             {p.channel_kind === 'zcode' ? (
-                              <Button size="sm" variant="outline" disabled={claiming.has(p.id)} onClick={() => void doClaim(p.id, p.name)}>
-                                {claiming.has(p.id) ? '领取中…' : '领取'}
-                              </Button>
+                              <div className="flex gap-1">
+                                <Button size="sm" variant="outline" disabled={claiming.has(p.id)} onClick={() => void doClaim(p.id, p.name)}>
+                                  {claiming.has(p.id) ? '领取中…' : '领取'}
+                                </Button>
+                                <Button size="sm" variant="outline" disabled={fetchingInfo.has(p.id)} onClick={() => void fetchAccountInfo(p.id, p.name)}>
+                                  {fetchingInfo.has(p.id) ? '获取中…' : '账号信息'}
+                                </Button>
+                              </div>
                             ) : <span className="text-xs text-muted-foreground">-</span>}
+                            <Button size="sm" variant="ghost" className="mt-1" onClick={() => setNoteFor({ id: p.id, name: p.name, note: p.note ?? '' })}>
+                              备注
+                            </Button>
                           </TD>
                         </TR>
                       )
@@ -581,6 +611,43 @@ function ImportModal({ onOpenChange, onDone }: { onOpenChange: (v: boolean) => v
           <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
           <Button disabled={busy || !text.trim()} onClick={() => void submit(text)}>{busy ? '导入中…' : '导入'}</Button>
         </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+
+// ---- 手动备注(渠道 note 编辑) ----
+
+function NoteModal({ target, onDone, onClose }: { target: { id: string; name: string; note: string }; onDone: () => void; onClose: () => void }) {
+  const [note, setNote] = useState(target.note)
+  const [busy, setBusy] = useState(false)
+  const submit = async () => {
+    setBusy(true)
+    try {
+      const r = await api('PATCH', `/api/providers/${target.id}`, { note })
+      if (r.ok) {
+        sonnerToast.success('备注已保存')
+        onDone()
+        onClose()
+      } else sonnerToast.error(errMsg(r))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent title={`备注 · ${target.name}`}>
+        <form className="space-y-3.5" onSubmit={(e) => { e.preventDefault(); void submit() }}>
+          <textarea
+            className="flex min-h-24 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm"
+            value={note} onChange={(e) => setNote(e.target.value)}
+            placeholder="账号标记 / 用途 / 备注……(「账号信息」一键获取会覆盖为最新摘要)" />
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={onClose}>取消</Button>
+            <Button type="submit" disabled={busy}>{busy ? '保存中…' : '保存'}</Button>
+          </div>
+        </form>
       </DialogContent>
     </Dialog>
   )
