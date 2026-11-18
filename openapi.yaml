@@ -1516,6 +1516,15 @@ paths:
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/offset'
+        - name: category
+          in: query
+          description: |
+            分类过滤(管理视图拆分):standard = channel_kind 空/generic 的
+            标准协议渠道;proxy = zcode/workbuddy 等反代订阅型渠道。
+            不传 = 全部。
+          schema:
+            type: string
+            enum: [standard, proxy]
       responses:
         '200':
           description: 渠道页
@@ -1616,6 +1625,173 @@ paths:
                 $ref: '#/components/schemas/ProviderBatchResult'
         '400':
           description: 请求整体不可用(api_keys 空/超上限/name 空)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/providers/bulk:
+    post:
+      tags: [Admin]
+      operationId: adminBulkProviders
+      summary: 批量启停/删除渠道
+      description: |
+        action = enable / disable / delete;ids 1..=200。逐项执行,
+        200 + 逐项结果(口径同批量创建:部分失败不回滚成功的)。
+        每项成功即失效渠道拓扑快照(选路下一请求可见)。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProvidersBulkRequest'
+      responses:
+        '200':
+          description: 批量结果(逐项)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProvidersBulkResult'
+        '400':
+          description: ids 为空/超 200,或 action 非法
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/providers/export:
+    get:
+      tags: [Admin]
+      operationId: adminExportProviders
+      summary: 导出渠道配置(含明文凭证)
+      description: |
+        **⚠ 含明文 api_key / 代理凭证**(解密后打包;仅 admin)。
+        仅在可信环境存储/传输导出文件。响应为可下载 JSON:
+        {version, exported_at, providers: [...]};category 过滤同列表。
+      parameters:
+        - name: category
+          in: query
+          description: standard / proxy;不传 = 全部
+          schema:
+            type: string
+            enum: [standard, proxy]
+      responses:
+        '200':
+          description: |
+            导出文件(JSON 下载体)。providers 每项含渠道全部配置字段
+            与 api_key(明文)、proxy_url(明文)。
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/providers/import:
+    post:
+      tags: [Admin]
+      operationId: adminImportProviders
+      summary: 导入渠道配置
+      description: |
+        接受导出文件整包({version, exported_at, providers})或裸数组。
+        逐项走与创建同一校验/加密路径;**同 api_key 已存在则跳过**
+        (skipped 计数,不覆盖;v1 无 overwrite 模式)。成功项失效
+        拓扑快照。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/ProvidersImportFile'
+                - type: array
+                  items:
+                    $ref: '#/components/schemas/ProviderExportItem'
+      responses:
+        '200':
+          description: 导入结果(逐项)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProvidersImportResult'
+        '400':
+          description: 请求体不是合法的导入结构
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/providers/zcode/login-init:
+    post:
+      tags: [Admin]
+      operationId: adminZcodeLoginInit
+      summary: ZCode 在线登录——发起 OAuth 授权流
+      description: |
+        服务端生成 poll_token(随机),转发 z.ai OAuth CLI init,返回
+        authorize_url(交给浏览器授权)与 flow_id/poll_token(回传给
+        login-poll)。流程无服务端状态;flow TTL 约 5 分钟(上游控制)。
+        OAuth base 可配 AIKUN_ZCODE_OAUTH_BASE(默认
+        https://zcode.z.ai/api/v1)。
+      responses:
+        '200':
+          description: 授权流已发起
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcodeLoginInitResult'
+        '502':
+          description: 上游 init 失败
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/providers/zcode/login-poll:
+    post:
+      tags: [Admin]
+      operationId: adminZcodeLoginPoll
+      summary: ZCode 在线登录——轮询授权结果,ready 即建渠道
+      description: |
+        轮询上游(网络错误按 pending)。status=ready 时服务端用
+        Coding Plan JWT 自动创建渠道(channel_kind=zcode、anthropic 协议、
+        base https://code.z.ai 占位——以实际出参为准),name 默认取授权
+        邮箱,响应含完整渠道。pending/expired/failed 透传,不建渠道。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcodeLoginPollRequest'
+      responses:
+        '200':
+          description: |
+            轮询结果:ready(含创建的渠道)/ pending / expired / failed。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcodeLoginPollResult'
+        '400':
+          description: 请求体缺 flow_id/poll_token
           content:
             application/problem+json:
               schema:
@@ -3716,6 +3892,117 @@ components:
             minLength: 1
           description: 1..=100 个非空 key;批内重复归入失败组
       required: [name, models, api_keys]
+
+    ProvidersBulkRequest:
+      type: object
+      description: 批量启停/删除请求。
+      properties:
+        action:
+          type: string
+          enum: [enable, disable, delete]
+        ids:
+          type: array
+          items: {type: string}
+          minItems: 1
+          maxItems: 200
+      required: [action, ids]
+
+    ProvidersBulkResult:
+      type: object
+      description: 批量结果(200 + 逐项报告,部分失败不回滚)。
+      properties:
+        requested: {type: integer}
+        succeeded: {type: integer}
+        failed:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchFailureItem'
+
+    ProviderExportItem:
+      type: object
+      description: |
+        导出/导入的渠道项:创建面的全部配置字段 + api_key(明文)+
+        proxy_url(明文)。id/健康态等运行时字段导入时忽略。
+      properties:
+        name: {type: string}
+        note: {type: string}
+        website_url: {type: string}
+        channel_kind: {type: string}
+        provider_type: {type: string}
+        protocols:
+          type: array
+          items: {type: string}
+        default_protocol: {type: string}
+        openai_base_url: {type: string}
+        anthropic_base_url: {type: string}
+        api_key: {type: string}
+        proxy_url: {type: string}
+        models:
+          type: array
+          items: {type: string}
+        model_mapping:
+          type: object
+          additionalProperties: {type: string}
+        priority: {type: integer}
+        weight: {type: number}
+        max_retries: {type: integer}
+        timeout_secs: {type: integer}
+      required: [name, models, api_key]
+
+    ProvidersImportFile:
+      type: object
+      description: 导出文件的整包形态(与裸数组二选一)。
+      properties:
+        version: {type: integer}
+        exported_at: {type: string}
+        providers:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProviderExportItem'
+
+    ProvidersImportResult:
+      type: object
+      description: 导入结果:同 key 已存在 → skipped(不覆盖)。
+      properties:
+        imported: {type: integer}
+        skipped: {type: integer}
+        failed:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchFailureItem'
+
+    ZcodeLoginInitResult:
+      type: object
+      description: OAuth 授权流已发起;authorize_url 交给浏览器打开。
+      properties:
+        flow_id: {type: string}
+        authorize_url: {type: string}
+        poll_token: {type: string}
+      required: [flow_id, authorize_url, poll_token]
+
+    ZcodeLoginPollRequest:
+      type: object
+      properties:
+        flow_id: {type: string}
+        poll_token: {type: string}
+        name: {type: string}
+        priority: {type: integer}
+        weight: {type: number}
+      required: [flow_id, poll_token]
+
+    ZcodeLoginPollResult:
+      type: object
+      description: |
+        status = ready(渠道已创建,provider 为出参形状)/ pending /
+        expired / failed。ready 时 email 为授权账号。
+      properties:
+        status:
+          type: string
+          enum: [ready, pending, expired, failed]
+        email: {type: string}
+        provider:
+          $ref: '#/components/schemas/Provider'
+      required: [status]
 
     ProviderBatchResult:
       type: object

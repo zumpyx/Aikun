@@ -192,6 +192,9 @@ async fn async_main() {
                 clients: state.clients.clone(),
                 config: config.clone(),
             }),
+            Arc::new(ZcodeOAuthImpl {
+                base: config.zcode_oauth_base.clone(),
+            }),
         ),
         users: aikun_admin::admin_users::AdminUsersService::new(Arc::new(SurrealAdminUsersStore {
             store: store.clone(),
@@ -1250,6 +1253,109 @@ impl billing_port::BillingStore for SurrealBillingStore {
 use aikun_admin::admin_providers as providers_port;
 use aikun_store::surreal::channels_store as schannels;
 
+// ---------- ZCode OAuth 在线登录端口实现(渠道拆分批次) ----------
+//
+// 流程移植自 Zcode2Api internal/gateway/login.go:init(随机 poll_token
+// 作 Bearer,body {"provider":"zai"})→ 浏览器 authorize → poll 轮询。
+// captcha:origin 已 skip(2026-10-08 起 chat 请求不再要求),此处不带。
+
+struct ZcodeOAuthImpl {
+    base: String,
+}
+
+#[async_trait::async_trait]
+impl aikun_admin::admin_providers::ZcodeOAuth for ZcodeOAuthImpl {
+    async fn init(&self) -> Result<(aikun_admin::admin_providers::ZcodeOAuthInit, String), String> {
+        let poll_token: String = {
+            use rand::RngCore;
+            let mut buf = [0u8; 32];
+            rand::rng().fill_bytes(&mut buf);
+            buf.iter().map(|b| format!("{b:02x}")).collect()
+        };
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;
+        let resp = client
+            .post(format!("{}/oauth/cli/init", self.base))
+            .bearer_auth(&poll_token)
+            .json(&serde_json::json!({"provider": "zai"}))
+            .send()
+            .await
+            .map_err(|e| format!("oauth init 请求失败: {}", e.without_url()))?;
+        if !resp.status().is_success() {
+            return Err(format!("oauth init 上游返回 {}", resp.status()));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("oauth init 响应解析失败: {e}"))?;
+        let data = &body["data"];
+        let flow_id = data["flow_id"].as_str().unwrap_or_default().to_string();
+        let authorize_url = data["authorize_url"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if flow_id.is_empty() || authorize_url.is_empty() {
+            return Err("oauth init 响应缺少 flow_id / authorize_url".to_string());
+        }
+        Ok((
+            aikun_admin::admin_providers::ZcodeOAuthInit {
+                flow_id,
+                authorize_url,
+            },
+            poll_token,
+        ))
+    }
+
+    async fn poll(
+        &self,
+        flow_id: &str,
+        poll_token: &str,
+    ) -> aikun_admin::admin_providers::ZcodePollStatus {
+        use aikun_admin::admin_providers::ZcodePollStatus;
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return ZcodePollStatus::Pending,
+        };
+        // poll_token 作 Bearer(与 init 同凭证链);网络错误按 Pending。
+        let resp = match client
+            .get(format!("{}/oauth/cli/poll/{flow_id}", self.base))
+            .bearer_auth(poll_token)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => return ZcodePollStatus::Pending,
+        };
+        if !resp.status().is_success() {
+            return ZcodePollStatus::Pending;
+        }
+        let body: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(_) => return ZcodePollStatus::Pending,
+        };
+        let data = &body["data"];
+        match data["status"].as_str().unwrap_or("pending") {
+            "ready" => ZcodePollStatus::Ready {
+                token: data["token"].as_str().unwrap_or_default().to_string(),
+                email: data["user"]["email"]
+                    .as_str()
+                    .unwrap_or("zcode-user")
+                    .to_string(),
+            },
+            "expired" => ZcodePollStatus::Expired,
+            "failed" => {
+                ZcodePollStatus::Failed(data["error"].as_str().unwrap_or("授权失败").to_string())
+            }
+            _ => ZcodePollStatus::Pending,
+        }
+    }
+}
+
 struct SurrealProviderStore {
     store: Arc<AppStore>,
 }
@@ -1282,13 +1388,14 @@ impl providers_port::ProviderStore for SurrealProviderStore {
 
     async fn list_providers(
         &self,
+        category: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<aikun_channels::Provider>, i64), ()> {
         let (total, rows) = self
             .store
             .channels
-            .list_providers_by_priority(limit, offset)
+            .list_providers_by_priority(category, limit, offset)
             .await
             .map_err(|e| tracing::error!("SurrealProviderStore::list_providers: {e}"))?;
         Ok((rows, total))

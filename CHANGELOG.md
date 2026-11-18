@@ -35,6 +35,25 @@
   "ZCode(GLM)"。
 
 ## [Unreleased]
+### 新增(渠道拆分:标准协议 + 反代)
+
+- **管理视图拆分**:渠道页只列标准协议渠道(channel_kind 空/generic,
+  `GET /api/providers?category=standard`);新增"反代"页(zcode /
+  workbuddy / qoder 等订阅型,`category=proxy`)。同一张表、同一套
+  选路计费,仅视图拆分;未来新适配器自动归入反代类。
+- **批量操作**:`POST /api/providers/bulk`(enable/disable/delete,
+  ids 1..=200,逐项报告;每项成功即失效拓扑快照)。反代页行多选 +
+  批量工具条。
+- **导入导出**:`GET /api/providers/export?category=`(⚠ **含明文
+  api_key**,admin only,仅可信环境使用)/ `POST /api/providers/import`
+  (整包或裸数组;同 key 已存在跳过,不覆盖)。
+- **ZCode 在线登录**:`POST /api/providers/zcode/login-init` +
+  `login-poll`(OAuth CLI init → 浏览器 authorize → 轮询;ready 即用
+  Coding Plan JWT 自动建 zcode 渠道,name 默认授权邮箱)。OAuth base
+  可配 `AIKUN_ZCODE_OAUTH_BASE`;captcha 不需要(origin 已 skip)。
+  流程移植自 D3-vin/Zcode2Api。workbuddy/qoder 为占位协议,在线登录
+  暂不支持(粘贴凭证)。
+
 ### 变更(管理端 UI)
 
 - 导航改名:仪表盘 → **面板**、API Keys → **密钥**、接入文档 → **文档**。

@@ -21,6 +21,49 @@ mod tri_state_serde {
         T::deserialize(de).map(Some)
     }
 }
+/**status = ready(渠道已创建,provider 为出参形状)/ pending /
+expired / failed。ready 时 email 为授权账号。
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ZcodeLoginPollResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
+    pub status: ZcodeLoginPollResultStatus,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ZcodeLoginPollResultStatus {
+    #[default]
+    #[serde(rename = "ready")]
+    Ready,
+    #[serde(rename = "pending")]
+    Pending,
+    #[serde(rename = "expired")]
+    Expired,
+    #[serde(rename = "failed")]
+    Failed,
+}
+impl ZcodeLoginPollResultStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Pending => "pending",
+            Self::Expired => "expired",
+            Self::Failed => "failed",
+        }
+    }
+}
+impl ::std::fmt::Display for ZcodeLoginPollResultStatus {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ZcodeLoginPollResultStatus {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 ///本人钱包(金额均元;日序列合并明细表与日聚合表,不重复计数)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Wallet {
@@ -403,6 +446,62 @@ impl ::std::fmt::Display for RedemptionCodeStatus {
     }
 }
 impl AsRef<str> for RedemptionCodeStatus {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+///导入结果:同 key 已存在 → skipped(不覆盖)。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ProvidersImportResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed: Option<Vec<BatchFailureItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imported: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<i64>,
+}
+///批量结果(200 + 逐项报告,部分失败不回滚)。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ProvidersBulkResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed: Option<Vec<BatchFailureItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub succeeded: Option<i64>,
+}
+///批量启停/删除请求。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProvidersBulkRequest {
+    pub action: ProvidersBulkRequestAction,
+    ///Constraint: minItems=1, maxItems=200
+    pub ids: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ProvidersBulkRequestAction {
+    #[default]
+    #[serde(rename = "enable")]
+    Enable,
+    #[serde(rename = "disable")]
+    Disable,
+    #[serde(rename = "delete")]
+    Delete,
+}
+impl ProvidersBulkRequestAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Enable => "enable",
+            Self::Disable => "disable",
+            Self::Delete => "delete",
+        }
+    }
+}
+impl ::std::fmt::Display for ProvidersBulkRequestAction {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ProvidersBulkRequestAction {
     fn as_ref(&self) -> &str {
         self.as_str()
     }
@@ -2026,6 +2125,66 @@ pub struct ApiKey {
     pub user_id: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum AdminImportProvidersRequest {
+    ProvidersImportFile(ProvidersImportFile),
+    ProviderExportArray(Vec<ProviderExportItem>),
+}
+///导出文件的整包形态(与裸数组二选一)。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ProvidersImportFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exported_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub providers: Option<Vec<ProviderExportItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i64>,
+}
+/**导出/导入的渠道项:创建面的全部配置字段 + api_key(明文)+
+proxy_url(明文)。id/健康态等运行时字段导入时忽略。
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProviderExportItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anthropic_base_url: Option<String>,
+    pub api_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_mapping: Option<ProviderExportItemModelMapping>,
+    pub models: Vec<String>,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocols: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f64>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ProviderExportItemModelMapping {
+    /// Additional properties matching the spec's
+    /// `additionalProperties` value schema.
+    #[serde(flatten)]
+    pub additional_properties: std::collections::BTreeMap<String, String>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AdjustBalanceResult {
     ///调账后余额(元)
     pub balance: f64,
@@ -2098,6 +2257,7 @@ impl AdjustBalanceRequestBuilder {
         self.value
     }
 }
+pub type AdminExportProvidersResponse = serde_json::Value;
 ///OpenAI chat/completions 请求(混合宽松;字段全 optional, 缺 model 等校验留在网关管线以保持厂商格式错误体)。
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ChatCompletionRequest {
@@ -2456,4 +2616,74 @@ pub struct UpsertPriceRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VersionInfo {
     pub version: String,
+}
+///OAuth 授权流已发起;authorize_url 交给浏览器打开。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ZcodeLoginInitResult {
+    pub authorize_url: String,
+    pub flow_id: String,
+    pub poll_token: String,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ZcodeLoginPollRequest {
+    pub flow_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub poll_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f64>,
+}
+impl ZcodeLoginPollRequest {
+    /// Construct this request with every required wire field.
+    pub fn new(flow_id: String, poll_token: String) -> Self {
+        Self {
+            flow_id,
+            poll_token,
+            name: None,
+            priority: None,
+            weight: None,
+        }
+    }
+    /// Start a dependency-free builder with every required wire field.
+    pub fn builder(flow_id: String, poll_token: String) -> ZcodeLoginPollRequestBuilder {
+        ZcodeLoginPollRequestBuilder::new(flow_id, poll_token)
+    }
+}
+/// Dependency-free builder for [`#struct_name`].
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct ZcodeLoginPollRequestBuilder {
+    value: ZcodeLoginPollRequest,
+}
+impl ZcodeLoginPollRequestBuilder {
+    /// Start a builder with every required wire field.
+    pub fn new(flow_id: String, poll_token: String) -> Self {
+        Self {
+            value: ZcodeLoginPollRequest::new(flow_id, poll_token),
+        }
+    }
+    #[doc = concat!("Set the optional `", "name", "` request field.")]
+    #[must_use]
+    pub fn name(mut self, name: String) -> Self {
+        self.value.name = Some(name);
+        self
+    }
+    #[doc = concat!("Set the optional `", "priority", "` request field.")]
+    #[must_use]
+    pub fn priority(mut self, priority: i64) -> Self {
+        self.value.priority = Some(priority);
+        self
+    }
+    #[doc = concat!("Set the optional `", "weight", "` request field.")]
+    #[must_use]
+    pub fn weight(mut self, weight: f64) -> Self {
+        self.value.weight = Some(weight);
+        self
+    }
+    /// Finish building the request model.
+    pub fn build(self) -> ZcodeLoginPollRequest {
+        self.value
+    }
 }

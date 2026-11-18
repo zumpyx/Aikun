@@ -198,6 +198,7 @@ pub trait ChannelStore: Send + Sync {
     /// (+ total)。
     async fn list_providers_by_priority(
         &self,
+        category: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<(i64, Vec<Provider>), StoreError>;
@@ -1443,17 +1444,33 @@ impl ChannelStore for SurrealChannels {
 
     async fn list_providers_by_priority(
         &self,
+        category: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<(i64, Vec<Provider>), StoreError> {
+        // 管理视图分类(2026-11-18 渠道拆分):standard = channel_kind
+        // 空/generic;proxy = 其余(zcode/workbuddy/…)。谓词为静态枚举
+        // 展开(无用户输入),拼入安全;排序/分页不变。
+        let cond = match category {
+            Some("standard") => " WHERE (channel_kind = '' OR channel_kind = 'generic')",
+            Some("proxy") => " WHERE (channel_kind != '' AND channel_kind != 'generic')",
+            Some(other) => return Err(StoreError::Failed(format!("未知分类 {other}"))),
+            None => "",
+        };
+        let mut sql = String::from("SELECT * FROM provider");
+        sql.push_str(cond);
+        let mut sql = String::from("SELECT * FROM provider");
+        sql.push_str(cond);
+        sql.push_str(" ORDER BY priority DESC, name ASC LIMIT $limit START $offset;");
+        let mut count = String::from("SELECT count() AS total FROM provider");
+        count.push_str(cond);
+        count.push_str(" GROUP ALL;");
+        sql.push('\n');
+        sql.push_str(&count);
         let mut res = self
             .handle
             .db()
-            .query(
-                "SELECT * FROM provider ORDER BY priority DESC, name ASC \
-                 LIMIT $limit START $offset;\
-                 \nSELECT count() AS total FROM provider GROUP ALL;",
-            )
+            .query(sql.as_str())
             .bind(("limit", limit))
             .bind(("offset", offset))
             .await
@@ -2130,7 +2147,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let (total, page) = store.list_providers_by_priority(10, 0).await.unwrap();
+            let (total, page) = store.list_providers_by_priority(None, 10, 0).await.unwrap();
             assert_eq!(total, 2);
             assert_eq!(page[0].id, "prov-a", "priority 9 > 3");
 

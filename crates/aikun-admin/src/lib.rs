@@ -166,8 +166,54 @@ impl AdminApi for AdminService {
         &self,
         limit: ::std::option::Option<i64>,
         offset: ::std::option::Option<i64>,
+        category: ::std::option::Option<
+            aikun_openapi::openapi::server::api::AdminListProvidersCategory,
+        >,
     ) -> AdminListProvidersResponse {
-        self.providers.admin_list_providers(limit, offset).await
+        let cat = category.as_ref().map(|c| match c {
+            aikun_openapi::openapi::server::api::AdminListProvidersCategory::Standard => "standard",
+            aikun_openapi::openapi::server::api::AdminListProvidersCategory::Proxy => "proxy",
+        });
+        self.providers
+            .admin_list_providers(cat, limit, offset)
+            .await
+    }
+    async fn admin_bulk_providers(
+        &self,
+        body: aikun_openapi::openapi::types::ProvidersBulkRequest,
+    ) -> aikun_openapi::openapi::server::errors::AdminBulkProvidersResponse {
+        self.providers.admin_bulk_providers(body).await
+    }
+    async fn admin_export_providers(
+        &self,
+        category: ::std::option::Option<
+            aikun_openapi::openapi::server::api::AdminExportProvidersCategory,
+        >,
+    ) -> aikun_openapi::openapi::server::errors::AdminExportProvidersServerResponse {
+        let cat = category.as_ref().map(|c| match c {
+            aikun_openapi::openapi::server::api::AdminExportProvidersCategory::Standard => {
+                "standard"
+            }
+            aikun_openapi::openapi::server::api::AdminExportProvidersCategory::Proxy => "proxy",
+        });
+        self.providers.admin_export_providers(cat).await
+    }
+    async fn admin_import_providers(
+        &self,
+        body: aikun_openapi::openapi::types::AdminImportProvidersRequest,
+    ) -> aikun_openapi::openapi::server::errors::AdminImportProvidersResponse {
+        self.providers.admin_import_providers(body).await
+    }
+    async fn admin_zcode_login_init(
+        &self,
+    ) -> aikun_openapi::openapi::server::errors::AdminZcodeLoginInitResponse {
+        self.providers.admin_zcode_login_init().await
+    }
+    async fn admin_zcode_login_poll(
+        &self,
+        body: aikun_openapi::openapi::types::ZcodeLoginPollRequest,
+    ) -> aikun_openapi::openapi::server::errors::AdminZcodeLoginPollResponse {
+        self.providers.admin_zcode_login_poll(body).await
     }
     async fn admin_list_redemption_codes(
         &self,

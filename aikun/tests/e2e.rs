@@ -2032,3 +2032,422 @@ async fn zcode_channel_anthropic_protocol_end_to_end() {
     assert_eq!(log["total_tokens"], 8, "{log}");
     assert_eq!(log["model"], "GLM-5.3-Flash");
 }
+
+/// 渠道拆分(2026-11-18):category 过滤——generic 渠道只在 standard,
+/// zcode 渠道只在 proxy;不带参数返回全部。
+#[tokio::test]
+async fn providers_category_filter() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    let admin = app.admin_token().await;
+    seed_openai_provider(&app, &mock, "std-one").await;
+    app.seed_provider(&ProviderSeed {
+        name: "proxy-one",
+        protocol: "anthropic",
+        base_url: &mock.base,
+        models: &["GLM-5.3"],
+        ..ProviderSeed::default()
+    })
+    .await;
+
+    let all: Vec<String> = app
+        .client()
+        .get(format!("{}/api/providers?limit=200", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["items"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|p| p["name"].as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    // PATCH 第二个渠道的 channel_kind=zcode(种子默认 generic)
+    let proxy_id: String = {
+        let items = app
+            .client()
+            .get(format!("{}/api/providers?limit=200", app.base))
+            .bearer_auth(&admin)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        items["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "proxy-one")
+            .map(|p| p["id"].as_str().unwrap().to_string())
+            .unwrap()
+    };
+    let r = app
+        .client()
+        .patch(format!("{}/api/providers/{proxy_id}", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"channel_kind": "zcode"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(all.len() >= 2, "两个渠道都在未过滤列表: {all:?}");
+
+    let names_of = |cat: &str| {
+        app.client()
+            .get(format!(
+                "{}/api/providers?category={cat}&limit=200",
+                app.base
+            ))
+            .bearer_auth(&admin)
+            .send()
+    };
+    let std: Vec<String> = names_of("standard")
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["items"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|p| p["name"].as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let proxy: Vec<String> = names_of("proxy")
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["items"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|p| p["name"].as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        std.contains(&"std-one".to_string()) && !std.contains(&"proxy-one".to_string()),
+        "standard: {std:?}"
+    );
+    assert!(
+        proxy.contains(&"proxy-one".to_string()) && !proxy.contains(&"std-one".to_string()),
+        "proxy: {proxy:?}"
+    );
+}
+
+/// 渠道拆分:bulk 批量启停/删除(200 + 逐项结果;成功项立即失效拓扑)。
+#[tokio::test]
+async fn providers_bulk_enable_disable_delete() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    let admin = app.admin_token().await;
+    let p1 = seed_openai_provider(&app, &mock, "bulk-1").await;
+    let p2 = app
+        .seed_provider(&ProviderSeed {
+            name: "bulk-2",
+            base_url: &mock.base,
+            ..ProviderSeed::default()
+        })
+        .await;
+
+    // 批量禁用
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/bulk", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"action": "disable", "ids": [p1, p2]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["succeeded"], 2, "{body}");
+    // 下一请求立即看到禁用:选路无渠道 → 503(通过 /v1 探测)
+    let resp = app
+        .client()
+        .post(format!("{}/v1/chat/completions", app.base))
+        .json(&json!({"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}))
+        .bearer_auth(&app.seed_user_funded().await.api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503, "禁用后拓扑快照立即失效");
+
+    // 批量启用
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/bulk", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"action": "enable", "ids": [p1.clone(), p2.clone()]}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["succeeded"], 2, "{body}");
+
+    // 批量删除(含一个不存在的 id → 逐项报告)
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/bulk", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"action": "delete", "ids": [p1, p2, "no-such-id"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["succeeded"], 2, "{body}");
+    assert_eq!(body["requested"], 3);
+    assert!(
+        body["failed"]
+            .as_array()
+            .map(|f| f.len() == 1)
+            .unwrap_or(false),
+        "{body}"
+    );
+
+    let left: Value = app
+        .client()
+        .get(format!("{}/api/providers?limit=200", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(left["total"], 0, "{left}");
+}
+
+/// 渠道拆分:导出(含明文凭证)→ 删除 → 导入恢复(roundtrip)。
+#[tokio::test]
+async fn providers_export_import_roundtrip() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    let admin = app.admin_token().await;
+    let pid = app
+        .seed_provider(&ProviderSeed {
+            name: "rt-zcode",
+            protocol: "anthropic",
+            base_url: &mock.base,
+            models: &["GLM-5.3"],
+            api_key: "rt-jwt-secret-token",
+            ..ProviderSeed::default()
+        })
+        .await;
+    let r = app
+        .client()
+        .patch(format!("{}/api/providers/{pid}", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"channel_kind": "zcode"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    // 导出(proxy):明文 key 在文件里
+    let export: Value = app
+        .client()
+        .get(format!("{}/api/providers/export?category=proxy", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(export["version"], 1);
+    let items = export["providers"].as_array().cloned().unwrap_or_default();
+    assert_eq!(items.len(), 1, "{export}");
+    assert_eq!(items[0]["api_key"], "rt-jwt-secret-token", "导出含明文凭证");
+    assert_eq!(items[0]["channel_kind"], "zcode");
+    assert_eq!(items[0]["default_protocol"], "anthropic");
+
+    // 删除后导入恢复
+    let r = app
+        .client()
+        .delete(format!("{}/api/providers/{pid}", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/import", app.base))
+        .bearer_auth(&admin)
+        .json(&export)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["imported"], 1, "{body}");
+
+    // 恢复的渠道在 proxy 类别里且凭证可用(mock 上游收到原 key)
+    let proxy_list: Value = app
+        .client()
+        .get(format!("{}/api/providers?category=proxy", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(proxy_list["total"], 1, "{proxy_list}");
+    let new_pid = proxy_list["items"][0]["id"].as_str().unwrap().to_string();
+    mock.push_json(200, json!({"data": [{"id": "GLM-5.3"}]}));
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/{new_pid}/tests", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let reqs = mock.requests();
+    let sent = reqs
+        .iter()
+        .rev()
+        .find(|q| q.path.contains("billing/balance"))
+        .expect("健康探测打了 mock");
+    assert!(
+        sent.authorization.as_deref() == Some("Bearer rt-jwt-secret-token")
+            || sent
+                .headers
+                .iter()
+                .any(|(k, v)| k == "x-api-key" && v == "rt-jwt-secret-token"),
+        "恢复后的凭证照常使用: auth={:?}",
+        sent.authorization
+    );
+
+    // 再导入一遍:同 key → skipped
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/import", app.base))
+        .bearer_auth(&admin)
+        .json(&export)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["skipped"], 1, "同 key 跳过: {body}");
+    assert_eq!(body["imported"], 0);
+}
+
+/// ZCode 在线登录:mock OAuth 端点走完整 init → poll(pending ×2 →
+/// ready)→ 渠道自动创建(JWT 入库、zcode kind、anthropic 协议)。
+#[tokio::test]
+async fn zcode_oauth_login_flow() {
+    let oauth = MockUpstream::start().await;
+    let app = TestApp::spawn_with_env(&[
+        (
+            "AIKUN_ZCODE_OAUTH_BASE",
+            &format!("http://{}", oauth.base.trim_start_matches("http://")),
+        ),
+        ("AIKUN_HEALTH_CHECK_INTERVAL", "3600"),
+    ])
+    .await;
+    let admin = app.admin_token().await;
+
+    // 脚本:init 响应 → poll pending → pending → ready
+    oauth.push_json(
+        200,
+        json!({"data": {"flow_id": "flow-1", "authorize_url": "https://zcode.z.ai/authorize?flow=flow-1"}}),
+    );
+    oauth.push_json(200, json!({"data": {"status": "pending"}}));
+    oauth.push_json(200, json!({"data": {"status": "pending"}}));
+    oauth.push_json(
+        200,
+        json!({"data": {"status": "ready", "token": "jwt-from-oauth-flow", "user": {"email": "dev@example.com"}}}),
+    );
+
+    // init
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-init", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "login-init");
+    let init: Value = r.json().await.unwrap();
+    assert_eq!(init["flow_id"], "flow-1");
+    assert!(
+        init["authorize_url"]
+            .as_str()
+            .unwrap()
+            .contains("authorize")
+    );
+    let poll_token = init["poll_token"].as_str().unwrap().to_string();
+    assert!(!poll_token.is_empty());
+
+    // poll ×2 → pending
+    for _ in 0..2 {
+        let r = app
+            .client()
+            .post(format!("{}/api/providers/zcode/login-poll", app.base))
+            .bearer_auth(&admin)
+            .json(&json!({"flow_id": "flow-1", "poll_token": poll_token}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body: Value = r.json().await.unwrap();
+        assert_eq!(body["status"], "pending", "{body}");
+    }
+
+    // poll → ready:渠道自动创建
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-poll", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"flow_id": "flow-1", "poll_token": poll_token}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["status"], "ready", "{body}");
+    assert_eq!(body["email"], "dev@example.com");
+    let provider = &body["provider"];
+    assert_eq!(provider["channel_kind"], "zcode");
+    assert_eq!(provider["name"], "dev@example.com", "name 默认授权邮箱");
+    assert_eq!(provider["default_protocol"], "anthropic");
+    assert!(
+        provider["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m == "GLM-5.3-Flash")
+    );
+
+    // 上游收到 init(poll_token Bearer)与 poll
+    let reqs = oauth.requests();
+    let init_req = reqs
+        .iter()
+        .find(|q| q.path.ends_with("/oauth/cli/init"))
+        .expect("init 打到 mock");
+    assert!(
+        init_req
+            .authorization
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("Bearer "),
+        "init 带 poll_token Bearer"
+    );
+    assert!(
+        reqs.iter()
+            .any(|q| q.path.contains("/oauth/cli/poll/flow-1")),
+        "poll 打到 mock"
+    );
+}

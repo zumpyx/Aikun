@@ -16,12 +16,6 @@ import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table'
 // ---- 预设(providers.js PROVIDER_PRESETS 原样迁移)----
 const PRESETS = [
   {
-    id: 'zcode', name: 'ZCode(GLM)', website_url: 'https://zcode.z.ai',
-    docs_url: 'https://zcode.z.ai/cn/docs', protocols: ['anthropic'],
-    default_protocol: 'anthropic', openai_base_url: 'https://zcode.z.ai',
-    anthropic_base_url: 'https://zcode.z.ai', key_placeholder: 'ZCode 客户端 JWT(登录后从客户端复制)',
-  },
-  {
     id: 'orcarouter', name: 'OrcaRouter', website_url: 'https://www.orcarouter.ai',
     docs_url: 'https://docs.orcarouter.ai', protocols: ['openai', 'anthropic', 'responses'],
     default_protocol: 'openai', openai_base_url: 'https://api.orcarouter.ai',
@@ -48,7 +42,7 @@ const PRESETS = [
   },
 ] as const
 
-interface ProviderDetail {
+export interface ProviderDetail {
   id: string
   name: string
   note?: string | null
@@ -72,7 +66,7 @@ interface ProviderDetail {
   disabled_reason?: string | null
   latency_ms: number
 }
-interface KindRow { kind: string; label: string; description?: string; experimental?: boolean }
+export interface KindRow { kind: string; label: string; description?: string; experimental?: boolean }
 
 const norm = (u: string | null | undefined) => (u ?? '').trim().replace(/\/+$/, '').toLowerCase()
 const presetByUrls = (o?: string | null, a?: string | null) =>
@@ -517,7 +511,7 @@ export default function Providers() {
 
   const list = useQuery({
     queryKey: ['providers'],
-    queryFn: async () => (await api<Page<ProviderDetail>>('GET', '/api/providers')).data.items ?? [],
+    queryFn: async () => (await api<Page<ProviderDetail>>('GET', '/api/providers?category=standard')).data.items ?? [],
   })
   const invalidate = () => qc.invalidateQueries({ queryKey: ['providers'] })
 
@@ -566,7 +560,7 @@ export default function Providers() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold">渠道管理</h2>
+          <h2 className="text-xl font-bold">渠道管理(标准协议)</h2>
           <p className="text-sm text-muted-foreground">点选预设渠道后只填 API Key，模型列表向官方实时拉取</p>
         </div>
         <div className="flex gap-2">

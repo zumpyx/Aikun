@@ -9,6 +9,7 @@ import { Loader2 } from 'lucide-react'
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const Wallet = lazy(() => import('./pages/Wallet'))
 const Providers = lazy(() => import('./pages/Providers'))
+const ProxyProviders = lazy(() => import('./pages/ProxyProviders'))
 const Users = lazy(() => import('./pages/Users'))
 const Billing = lazy(() => import('./pages/Billing'))
 const Keys = lazy(() => import('./pages/Keys'))
@@ -51,6 +52,7 @@ function LoginGate() {
           <Route path="/logs" element={<Logs />} />
           <Route path="/docs" element={<Docs />} />
           <Route path="/providers" element={<AdminRoute><Providers /></AdminRoute>} />
+          <Route path="/proxies" element={<AdminRoute><ProxyProviders /></AdminRoute>} />
           <Route path="/users" element={<AdminRoute><Users /></AdminRoute>} />
           <Route path="/billing" element={<AdminRoute><Billing /></AdminRoute>} />
           <Route path="/models" element={<AdminRoute><Models /></AdminRoute>} />

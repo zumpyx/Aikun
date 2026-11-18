@@ -6,6 +6,22 @@
 use super::super::types::*;
 use super::errors::*;
 #[derive(Debug, Clone, PartialEq, Eq, ::serde::Deserialize, ::serde::Serialize, Default)]
+pub enum AdminListProvidersCategory {
+    #[default]
+    #[serde(rename = "standard")]
+    Standard,
+    #[serde(rename = "proxy")]
+    Proxy,
+}
+#[derive(Debug, Clone, PartialEq, Eq, ::serde::Deserialize, ::serde::Serialize, Default)]
+pub enum AdminExportProvidersCategory {
+    #[default]
+    #[serde(rename = "standard")]
+    Standard,
+    #[serde(rename = "proxy")]
+    Proxy,
+}
+#[derive(Debug, Clone, PartialEq, Eq, ::serde::Deserialize, ::serde::Serialize, Default)]
 pub enum AdminListRedemptionCodesStatus {
     #[default]
     #[serde(rename = "unused")]
@@ -95,6 +111,7 @@ pub trait AdminApi: Send + Sync + 'static {
         &self,
         limit: ::std::option::Option<i64>,
         offset: ::std::option::Option<i64>,
+        category: ::std::option::Option<AdminListProvidersCategory>,
     ) -> AdminListProvidersResponse;
     /// 创建渠道(上游配置 + 加密 key)
     ///
@@ -110,6 +127,35 @@ pub trait AdminApi: Send + Sync + 'static {
         &self,
         body: CreateProvidersBatchRequest,
     ) -> AdminCreateProvidersBatchResponse;
+    /// 批量启停/删除渠道
+    ///
+    /// `POST /api/providers/bulk`
+    async fn admin_bulk_providers(&self, body: ProvidersBulkRequest) -> AdminBulkProvidersResponse;
+    /// 导出渠道配置(含明文凭证)
+    ///
+    /// `GET /api/providers/export`
+    async fn admin_export_providers(
+        &self,
+        category: ::std::option::Option<AdminExportProvidersCategory>,
+    ) -> AdminExportProvidersServerResponse;
+    /// 导入渠道配置
+    ///
+    /// `POST /api/providers/import`
+    async fn admin_import_providers(
+        &self,
+        body: AdminImportProvidersRequest,
+    ) -> AdminImportProvidersResponse;
+    /// ZCode 在线登录——发起 OAuth 授权流
+    ///
+    /// `POST /api/providers/zcode/login-init`
+    async fn admin_zcode_login_init(&self) -> AdminZcodeLoginInitResponse;
+    /// ZCode 在线登录——轮询授权结果,ready 即建渠道
+    ///
+    /// `POST /api/providers/zcode/login-poll`
+    async fn admin_zcode_login_poll(
+        &self,
+        body: ZcodeLoginPollRequest,
+    ) -> AdminZcodeLoginPollResponse;
     /// 为(尚未保存的)渠道配置拉取上游模型列表
     ///
     /// `POST /api/providers/fetch-models`

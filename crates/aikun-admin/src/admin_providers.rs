@@ -52,19 +52,24 @@ use aikun_channels::{
     pick_base_url, valid_default_protocol, valid_protocol_list,
 };
 use aikun_openapi::openapi::server::errors::{
-    AdminCreateProviderResponse, AdminCreateProvidersBatchResponse, AdminDeleteProviderResponse,
-    AdminDuplicateProviderResponse, AdminFetchUpstreamModelsResponse, AdminGetProviderResponse,
-    AdminListChannelKindsResponse, AdminListModelHealthResponse, AdminListProvidersResponse,
-    AdminTestProviderModelResponse, AdminTestProviderResponse, AdminUpdateProviderResponse,
+    AdminBulkProvidersResponse, AdminCreateProviderResponse, AdminCreateProvidersBatchResponse,
+    AdminDeleteProviderResponse, AdminDuplicateProviderResponse,
+    AdminExportProvidersServerResponse, AdminFetchUpstreamModelsResponse, AdminGetProviderResponse,
+    AdminImportProvidersResponse, AdminListChannelKindsResponse, AdminListModelHealthResponse,
+    AdminListProvidersResponse, AdminTestProviderModelResponse, AdminTestProviderResponse,
+    AdminUpdateProviderResponse, AdminZcodeLoginInitResponse, AdminZcodeLoginPollResponse,
     ServerEventStream,
 };
 use aikun_openapi::openapi::types::{
-    BatchFailureItem, ChannelKind as ApiChannelKind, ChannelKindPage, CreateProviderRequest,
-    CreateProvidersBatchRequest, FetchModelsRequest, FetchedModels, ModelHealth as ApiModelHealth,
-    ModelHealthPage, ModelHealthStatus, ModelTestRequest, ModelTestResult, Problem,
-    Provider as ApiProvider, ProviderBatchResult, ProviderDefaultProtocol, ProviderHealthStatus,
-    ProviderModelMapping, ProviderPage, ProviderProtocolsItem, ProviderProviderType,
-    ProviderTestResult, ProviderTestResultStatus, UpdateProviderRequest,
+    AdminImportProvidersRequest, BatchFailureItem, ChannelKind as ApiChannelKind, ChannelKindPage,
+    CreateProviderRequest, CreateProvidersBatchRequest, FetchModelsRequest, FetchedModels,
+    ModelHealth as ApiModelHealth, ModelHealthPage, ModelHealthStatus, ModelTestRequest,
+    ModelTestResult, Problem, Provider as ApiProvider, ProviderBatchResult,
+    ProviderDefaultProtocol, ProviderExportItem, ProviderExportItemModelMapping,
+    ProviderHealthStatus, ProviderModelMapping, ProviderPage, ProviderProtocolsItem,
+    ProviderProviderType, ProviderTestResult, ProviderTestResultStatus, ProvidersBulkRequest,
+    ProvidersBulkRequestAction, ProvidersBulkResult, ProvidersImportResult, UpdateProviderRequest,
+    ZcodeLoginInitResult, ZcodeLoginPollRequest, ZcodeLoginPollResult, ZcodeLoginPollResultStatus,
 };
 
 use crate::problem;
@@ -200,7 +205,13 @@ pub trait ProviderStore: Send + Sync + 'static {
     fn hash_key(&self, key: &str) -> String;
 
     /// 渠道列表页:`ORDER BY priority DESC, name ASC` + 总数(未分页)。
-    async fn list_providers(&self, limit: i64, offset: i64) -> Result<(Vec<ChannelRow>, i64), ()>;
+    /// category = Some(standard|proxy) 按管理视图分类过滤(渠道拆分)。
+    async fn list_providers(
+        &self,
+        category: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<ChannelRow>, i64), ()>;
     /// 单行(完整列;api_key 为库内原文——密文或历史明文)。
     async fn find_provider(&self, id: &str) -> Result<Option<ChannelRow>, ()>;
     /// 复制源:读回建行所需的全部配置列(密文 key 与 key_hash 原样)。
@@ -237,6 +248,33 @@ pub trait ProviderStore: Send + Sync + 'static {
     ) -> Result<(Vec<ModelHealthRow>, i64), ()>;
     /// 编辑态回退用:库存 (api_key 原文, proxy_url)。
     async fn find_provider_credentials(&self, id: &str) -> Result<Option<(String, String)>, ()>;
+}
+
+/// ZCode OAuth 在线登录端口(HTTP 经装配层注入;aikun-admin 无 reqwest
+/// 的纯净度约束)。流程移植自 Zcode2Api internal/gateway/login.go:
+/// init(随机 poll_token 作 Bearer)→ 浏览器 authorize → poll 轮询。
+pub struct ZcodeOAuthInit {
+    pub flow_id: String,
+    pub authorize_url: String,
+}
+
+pub enum ZcodePollStatus {
+    Pending,
+    Ready { token: String, email: String },
+    Expired,
+    Failed(String),
+}
+
+#[async_trait]
+pub trait ZcodeOAuth: Send + Sync + 'static {
+    /// 发起授权流:生成 poll_token(随机)→ POST {base}/oauth/cli/init
+    /// (Bearer poll_token,body {"provider":"zai"})。成功返回
+    /// (init 结果, poll_token)——poll_token 原样返还前端供 poll 回传,
+    /// 服务端无状态。Err 为网络/上游失败描述。
+    async fn init(&self) -> Result<(ZcodeOAuthInit, String), String>;
+    /// 轮询:GET {base}/oauth/cli/poll/{flow_id}。网络错误按 Pending
+    /// (调用方持续轮询;上游口径)。
+    async fn poll(&self, flow_id: &str, poll_token: &str) -> ZcodePollStatus;
 }
 
 /// 一次连通性探测的输入(base_url 已按协议选定;api_key 为明文)。
@@ -334,6 +372,8 @@ pub trait ProviderProbes: Send + Sync + 'static {
 pub struct AdminProvidersService {
     store: Arc<dyn ProviderStore>,
     probes: Arc<dyn ProviderProbes>,
+    /// ZCode OAuth 在线登录端口(HTTP 经装配层注入,crate 纯净度)。
+    zcode_oauth: Arc<dyn ZcodeOAuth>,
     /// PATCH 读-改-写串行锁(见文件头):并发 PATCH 经同一服务实例排队,
     /// 恢复旧实现"持锁全程读→校验→写"对管理端写的互斥。`Arc` 共享——
     /// clone 出的服务副本(路由工厂会克隆)必须落在同一把锁上。tokio
@@ -343,10 +383,15 @@ pub struct AdminProvidersService {
 }
 
 impl AdminProvidersService {
-    pub fn new(store: Arc<dyn ProviderStore>, probes: Arc<dyn ProviderProbes>) -> Self {
+    pub fn new(
+        store: Arc<dyn ProviderStore>,
+        probes: Arc<dyn ProviderProbes>,
+        zcode_oauth: Arc<dyn ZcodeOAuth>,
+    ) -> Self {
         Self {
             store,
             probes,
+            zcode_oauth,
             patch_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -357,6 +402,7 @@ impl Clone for AdminProvidersService {
         Self {
             store: Arc::clone(&self.store),
             probes: Arc::clone(&self.probes),
+            zcode_oauth: Arc::clone(&self.zcode_oauth),
             patch_lock: Arc::clone(&self.patch_lock),
         }
     }
@@ -479,6 +525,15 @@ fn api_protocols_item(s: &str) -> ProviderProtocolsItem {
 
 /// 渠道行 → spec Provider 出参。api_key 永不出参;proxy_url 脱敏;
 /// 时间统一 RFC3339(库内 SQLite datetime / RFC3339 双兼容)。
+/// 空串 → None(导出项的 Option 字段)。
+fn opt_str(v: &str) -> Option<String> {
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.to_string())
+    }
+}
+
 fn to_api_provider(row: &ChannelRow) -> ApiProvider {
     let models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
     let mapping: BTreeMap<String, String> =
@@ -866,11 +921,12 @@ impl AdminProvidersService {
     /// `GET /api/providers`
     pub async fn admin_list_providers(
         &self,
+        category: Option<&str>,
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> AdminListProvidersResponse {
         let (limit, offset) = page_args(limit, offset);
-        match self.store.list_providers(limit, offset).await {
+        match self.store.list_providers(category, limit, offset).await {
             Ok((rows, total)) => AdminListProvidersResponse::Ok(ProviderPage {
                 items: rows.iter().map(to_api_provider).collect(),
                 total,
@@ -1274,6 +1330,303 @@ impl AdminProvidersService {
                 // 枚举无 5xx(spec 缺口,见文件头):fail-closed 404
                 //(删除幂等语义下"当作已不存在"最不误导)。
                 AdminDeleteProviderResponse::NotFound(problem(404, "not_found", "资源不存在"))
+            }
+        }
+    }
+
+    /// 批量启停/删除:逐项执行,200 + 逐项结果(部分失败不回滚);
+    /// 每项成功即失效拓扑快照。
+    ///
+    /// `POST /api/providers/bulk`
+    pub async fn admin_bulk_providers(
+        &self,
+        body: ProvidersBulkRequest,
+    ) -> AdminBulkProvidersResponse {
+        if body.ids.is_empty() || body.ids.len() > 200 {
+            return AdminBulkProvidersResponse::BadRequest(problem(
+                400,
+                "invalid_ids",
+                "ids 须为 1..=200 个渠道",
+            ));
+        }
+        let active = matches!(body.action, ProvidersBulkRequestAction::Enable);
+        let mut succeeded = 0i64;
+        let mut failed: Vec<BatchFailureItem> = Vec::new();
+        for (i, id) in body.ids.iter().enumerate() {
+            let result = match body.action {
+                ProvidersBulkRequestAction::Enable | ProvidersBulkRequestAction::Disable => {
+                    let patch = ProviderPatch {
+                        is_active: Some(active),
+                        ..Default::default()
+                    };
+                    self.store.update_provider(id, &patch).await
+                }
+                ProvidersBulkRequestAction::Delete => self.store.delete_provider(id).await,
+            };
+            match result {
+                Ok(n) if n > 0 => {
+                    succeeded += 1;
+                    bump_topology_epoch();
+                }
+                Ok(_) => failed.push(BatchFailureItem {
+                    index: i as i64,
+                    status: 404,
+                    code: "not_found".into(),
+                    message: Some("渠道不存在".into()),
+                }),
+                Err(()) => failed.push(BatchFailureItem {
+                    index: i as i64,
+                    status: 500,
+                    code: "query_failed".into(),
+                    message: Some("执行失败".into()),
+                }),
+            }
+        }
+        AdminBulkProvidersResponse::Ok(ProvidersBulkResult {
+            requested: Some(body.ids.len() as i64),
+            succeeded: Some(succeeded),
+            failed: if failed.is_empty() {
+                None
+            } else {
+                Some(failed)
+            },
+        })
+    }
+
+    /// 导出渠道配置(**含明文 api_key**;spec 已警示仅可信环境使用)。
+    /// 与列表同源同序(含分类过滤),一页 200(导出面暂无分页需求)。
+    ///
+    /// `GET /api/providers/export`
+    pub async fn admin_export_providers(
+        &self,
+        category: Option<&str>,
+    ) -> AdminExportProvidersServerResponse {
+        let (rows, _) = self
+            .store
+            .list_providers(category, 200, 0)
+            .await
+            .unwrap_or_default();
+        let providers: Vec<ProviderExportItem> = rows
+            .iter()
+            .map(|row| ProviderExportItem {
+                name: row.name.clone(),
+                note: opt_str(&row.note),
+                website_url: opt_str(&row.website_url),
+                channel_kind: opt_str(&row.channel_kind),
+                provider_type: Some(row.provider_type.clone()),
+                protocols: Some(channel_protocols(row)),
+                default_protocol: Some(row.default_protocol.clone()),
+                openai_base_url: opt_str(&row.openai_base_url),
+                anthropic_base_url: opt_str(&row.anthropic_base_url),
+                api_key: self.store.decrypt_key(&row.api_key),
+                proxy_url: opt_str(&row.proxy_url),
+                models: serde_json::from_str(&row.models).unwrap_or_default(),
+                model_mapping: Some(ProviderExportItemModelMapping {
+                    additional_properties: serde_json::from_str(&row.model_mapping)
+                        .unwrap_or_default(),
+                }),
+                priority: Some(i64::from(row.priority)),
+                weight: Some(row.weight),
+                max_retries: Some(i64::from(row.max_retries)),
+                timeout_secs: Some(i64::from(row.timeout_secs)),
+            })
+            .collect();
+        AdminExportProvidersServerResponse::Ok(serde_json::json!({
+            "version": 1,
+            "exported_at": chrono::Utc::now().to_rfc3339(),
+            "providers": providers,
+        }))
+    }
+
+    /// 导入:逐项走创建同校验/加密路径(validate_candidate → insert_checked);
+    /// **同 api_key 已存在 → skipped**(不覆盖,v1 无 overwrite)。
+    ///
+    /// `POST /api/providers/import`
+    pub async fn admin_import_providers(
+        &self,
+        body: AdminImportProvidersRequest,
+    ) -> AdminImportProvidersResponse {
+        let items = match body {
+            AdminImportProvidersRequest::ProvidersImportFile(f) => f.providers.unwrap_or_default(),
+            AdminImportProvidersRequest::ProviderExportArray(items) => items,
+        };
+        if items.is_empty() {
+            return AdminImportProvidersResponse::BadRequest(problem(
+                400,
+                "empty_import",
+                "导入列表为空",
+            ));
+        }
+        if items.len() > 200 {
+            return AdminImportProvidersResponse::BadRequest(problem(
+                400,
+                "too_many",
+                "单次导入至多 200 条",
+            ));
+        }
+        let mut imported = 0i64;
+        let mut skipped = 0i64;
+        let mut failed: Vec<BatchFailureItem> = Vec::new();
+        for (i, item) in items.iter().enumerate() {
+            let cand = ProviderCandidate {
+                name: item.name.clone(),
+                provider_type: item.provider_type.clone(),
+                openai_base_url: item.openai_base_url.clone(),
+                anthropic_base_url: item.anthropic_base_url.clone(),
+                api_key: item.api_key.clone(),
+                models: item.models.clone(),
+                priority: item.priority,
+                weight: item.weight,
+                max_retries: item.max_retries,
+                timeout_secs: item.timeout_secs,
+                proxy_url: item.proxy_url.clone(),
+                model_mapping: item
+                    .model_mapping
+                    .as_ref()
+                    .map(|m| m.additional_properties.clone())
+                    .unwrap_or_default(),
+                protocols: item.protocols.clone(),
+                default_protocol: item.default_protocol.clone(),
+                note: item.note.clone(),
+                website_url: item.website_url.clone(),
+                channel_kind: item.channel_kind.clone(),
+            };
+            let fail = |i: i64, p: &Problem| BatchFailureItem {
+                index: i,
+                status: p.status,
+                code: p.code.clone(),
+                message: p.detail.clone(),
+            };
+            // 同 key 已存在 → skip(insert_checked 的 409 转为 skipped 计数)
+            let key_hash = if cand.api_key.is_empty() {
+                String::new()
+            } else {
+                self.store.hash_key(&cand.api_key)
+            };
+            if !key_hash.is_empty()
+                && matches!(self.store.find_key_owner(&key_hash, "").await, Ok(Some(_)))
+            {
+                skipped += 1;
+                continue;
+            }
+            match validate_candidate(&cand) {
+                Ok(config) => match insert_checked(self.store.as_ref(), &cand, config).await {
+                    Ok(_) => imported += 1,
+                    Err(p) => failed.push(fail(i as i64, &p)),
+                },
+                Err(p) => failed.push(fail(i as i64, &p)),
+            }
+        }
+        AdminImportProvidersResponse::Ok(ProvidersImportResult {
+            imported: Some(imported),
+            skipped: Some(skipped),
+            failed: if failed.is_empty() {
+                None
+            } else {
+                Some(failed)
+            },
+        })
+    }
+
+    /// ZCode 在线登录:发起 OAuth 授权流(poll_token 由端口侧生成)。
+    ///
+    /// `POST /api/providers/zcode/login-init`
+    pub async fn admin_zcode_login_init(&self) -> AdminZcodeLoginInitResponse {
+        match self.zcode_oauth.init().await {
+            Ok((init, poll_token)) => AdminZcodeLoginInitResponse::Ok(ZcodeLoginInitResult {
+                flow_id: init.flow_id,
+                authorize_url: init.authorize_url,
+                poll_token,
+            }),
+            Err(e) => {
+                AdminZcodeLoginInitResponse::BadGateway(problem(502, "oauth_init_failed", &e))
+            }
+        }
+    }
+
+    /// ZCode 在线登录:轮询;ready → 用 Coding Plan JWT 自动建渠道
+    /// (kind=zcode / anthropic / 官方 base / 模型 GLM-5.3 系列 /
+    /// name 默认授权邮箱)。
+    ///
+    /// `POST /api/providers/zcode/login-poll`
+    pub async fn admin_zcode_login_poll(
+        &self,
+        body: ZcodeLoginPollRequest,
+    ) -> AdminZcodeLoginPollResponse {
+        if body.flow_id.trim().is_empty() || body.poll_token.trim().is_empty() {
+            return AdminZcodeLoginPollResponse::BadRequest(problem(
+                400,
+                "invalid_request",
+                "flow_id 与 poll_token 必填",
+            ));
+        }
+        let status = self
+            .zcode_oauth
+            .poll(body.flow_id.trim(), body.poll_token.trim())
+            .await;
+        match status {
+            ZcodePollStatus::Pending => AdminZcodeLoginPollResponse::Ok(ZcodeLoginPollResult {
+                status: ZcodeLoginPollResultStatus::Pending,
+                email: None,
+                provider: None,
+            }),
+            ZcodePollStatus::Expired => AdminZcodeLoginPollResponse::Ok(ZcodeLoginPollResult {
+                status: ZcodeLoginPollResultStatus::Expired,
+                email: None,
+                provider: None,
+            }),
+            ZcodePollStatus::Failed(msg) => {
+                tracing::warn!("zcode oauth poll failed: {msg}");
+                AdminZcodeLoginPollResponse::Ok(ZcodeLoginPollResult {
+                    status: ZcodeLoginPollResultStatus::Failed,
+                    email: None,
+                    provider: None,
+                })
+            }
+            ZcodePollStatus::Ready { token, email } => {
+                let name = body
+                    .name
+                    .clone()
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| email.clone());
+                let cand = ProviderCandidate {
+                    name,
+                    provider_type: Some("anthropic".into()),
+                    openai_base_url: Some("https://zcode.z.ai".into()),
+                    anthropic_base_url: Some("https://zcode.z.ai".into()),
+                    api_key: token,
+                    models: vec!["GLM-5.3".into(), "GLM-5.3-Flash".into()],
+                    priority: body.priority,
+                    weight: body.weight,
+                    max_retries: None,
+                    timeout_secs: None,
+                    proxy_url: None,
+                    model_mapping: Default::default(),
+                    protocols: Some(vec!["anthropic".into()]),
+                    default_protocol: Some("anthropic".into()),
+                    note: Some(format!("ZCode 在线登录自动创建({email})")),
+                    website_url: Some("https://zcode.z.ai".into()),
+                    channel_kind: Some("zcode".into()),
+                };
+                match validate_candidate(&cand) {
+                    Ok(config) => match insert_checked(self.store.as_ref(), &cand, config).await {
+                        Ok(row) => AdminZcodeLoginPollResponse::Ok(ZcodeLoginPollResult {
+                            status: ZcodeLoginPollResultStatus::Ready,
+                            email: Some(email),
+                            provider: Some(to_api_provider(&row)),
+                        }),
+                        Err(p) => AdminZcodeLoginPollResponse::BadRequest(problem(
+                            p.status as u16,
+                            &p.code,
+                            &p.detail.unwrap_or_default(),
+                        )),
+                    },
+                    Err(p) => AdminZcodeLoginPollResponse::BadRequest(problem(
+                        p.status as u16,
+                        &p.code,
+                        &p.detail.unwrap_or_default(),
+                    )),
+                }
             }
         }
     }

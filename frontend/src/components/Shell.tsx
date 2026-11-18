@@ -16,6 +16,7 @@ const NAV = [
   { to: '/logs', label: '日志', icon: ScrollText, admin: false },
   { to: '/docs', label: '文档', icon: BookOpen, admin: false },
   { to: '/providers', label: '渠道', icon: Boxes, admin: true },
+  { to: '/proxies', label: '反代', icon: Zap, admin: true },
   { to: '/models', label: '模型', icon: Zap, admin: true },
   { to: '/test', label: '测试', icon: FlaskConical, admin: true },
   { to: '/users', label: '用户', icon: Users, admin: true },
