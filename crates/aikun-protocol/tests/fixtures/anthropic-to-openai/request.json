@@ -1,0 +1,30 @@
+{
+  "model": "claude-3-5-sonnet",
+  "max_tokens": 512,
+  "temperature": 0.5,
+  "top_k": 40,
+  "stop_sequences": ["END"],
+  "stream": false,
+  "system": "你是翻译助手",
+  "tools": [
+    {
+      "name": "lookup_term",
+      "description": "查术语库",
+      "input_schema": {
+        "type": "object",
+        "properties": { "term": { "type": "string" } },
+        "required": ["term"]
+      }
+    }
+  ],
+  "tool_choice": { "type": "auto" },
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "把『gateway』翻译成中文" },
+        { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "aGVsbG8=" } }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+[package]
+name = "aikun-store"
+version = "0.5.0"
+edition = "2024"
+description = "仓储层:按能力定义的存储 trait(无 SQL 方言)+ SurrealDB 实现(连接/schema/三域);SQLite 读能力已收口进 aikun-migrate(阶段 S 默认切换,docs/surreal-migration.md)"
+publish = false
+
+[dependencies]
+# 渠道域类型(Provider 行模型;纯描述 crate,无 I/O)
+aikun-channels = { path = "../aikun-channels" }
+
+# 静态加密(providers.api_key AES-256-GCM)与口令/密钥哈希(sha2/argon2):
+# 均为"落库形态"的存储关注,随 db 层一并吸收
+aes-gcm = "0.10"
+base64 = "0.22"
+sha2 = "0.10"
+argon2 = "0.5"
+rand = "0.9"
+
+# 默认价格快照(JSON)与渠道 models/model_mapping 列解析
+serde_json = "1"
+# 时间
+chrono = "0.4"
+# 日志门面
+tracing = "0.1"
+
+# ---- SurrealDB 第二实现(阶段 S,docs/surreal-migration.md)----
+# 选型钉版:4.0.1 = crates.io 2026-11 实查最新稳定线(max_stable_version,
+# 2026-11-09 发布)。features:默认面(protocol-ws + rustls)保留远程 WS;
+# kv-surrealkv = 嵌入式 SurrealKV(4.0 起取代 kv-rocksdb/kv-indxdb,
+# docs.rs 4.0.1 features 页实证);protocol-http = 远程 HTTP 备用通道。
+# Any 引擎按地址字符串运行期选引擎:surrealkv://<dir> 嵌入式、ws*/http*
+# 远程(docs.rs 4.0.1 源码 engine/any/mod.rs 的 IntoEndpoint 实证)。
+surrealdb = { version = "4.0.1", features = ["kv-surrealkv", "kv-mem", "protocol-http"] }
+# async trait:桩文件的能力 trait 用 async_trait(与 aikun-openapi /
+# aikun-admin 生成面同款,Send + dyn 兼容)
+async-trait = "0.1"
+# 新记录的 record id key(可排序不透明 ID,docs/surreal-migration.md §ID)
+ulid = "1"
+
+[dev-dependencies]
+# surreal/mod.rs 连通性测试(mem:// + ensure_schema + 版本闸门)
+tokio = { version = "1", features = ["rt", "macros"] }

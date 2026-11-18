@@ -1,0 +1,8 @@
+// 黄金样本(由实现生成,勿手改):文本增量 + usage 缓存拆分 + stop→end_turn + [DONE] 收尾
+{"data":{"message":{"content":[],"id":"chatcmpl-oa1","model":"gpt-4o","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":0,"output_tokens":0}},"type":"message_start"},"event":"message_start"}
+{"data":{"content_block":{"text":"","type":"text"},"index":0,"type":"content_block_start"},"event":"content_block_start"}
+{"data":{"delta":{"text":"Hel","type":"text_delta"},"index":0,"type":"content_block_delta"},"event":"content_block_delta"}
+{"data":{"delta":{"text":"lo!","type":"text_delta"},"index":0,"type":"content_block_delta"},"event":"content_block_delta"}
+{"data":{"index":0,"type":"content_block_stop"},"event":"content_block_stop"}
+{"data":{"delta":{"stop_reason":"end_turn","stop_sequence":null},"type":"message_delta","usage":{"cache_read_input_tokens":60,"input_tokens":40,"output_tokens":7}},"event":"message_delta"}
+{"data":{"type":"message_stop"},"event":"message_stop"}

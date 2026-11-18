@@ -1,0 +1,37 @@
+# =============================================================================
+# openapi-to-rust 生成配置(由 scripts/gen-api.sh 消费)
+# =============================================================================
+# 纪律(出处:openapi.yaml 文件头与 Proxy tag、docs/architecture-v0.5.md):
+#   * **全量生成,无手工白名单**(2026-11-18):openapi.yaml 的全部
+#     operationId 都生成 —— 生成器 0.24.0 的 [server].operations 是必填项
+#     且不支持通配,故由 gen-api.sh 在生成前从 spec 机械提取全部
+#     operationId 注入临时 config(target/,不进 git)。本文件不出现
+#     operations 清单,新增端点零配置遗漏;
+#   * Proxy(/v1)端点用混合宽松 schema:核心字段 optional 类型化,未知字段经
+#     生成器的 #[serde(flatten)] 原样透传(additionalProperties: true 是
+#     每个 object 层的硬性要求,漏写 = 该层静默丢字段);
+#   * 代理面响应由管线动态产出(SSE/headers/错误体),生成枚举装不下:
+#     gen-api.sh wrapper 为每个 Proxy 响应枚举注入 Raw(Response) 透传
+#     变体,impl 只走 Raw;生成校验链的 problem+json 错误体经装配层
+#     中间件改写为厂商格式;
+#   * /v1/{*path} 通配兜底不进生成(OpenAPI 无通配语法),保留手写;
+#   * 纯服务端生成:enable_async_client = false,不引入 reqwest 客户端。
+#
+# spec 变更流程:改 openapi.yaml → `bash scripts/gen-api.sh` 重新生成
+# crates/aikun-openapi 并提交(无需改任何生成配置)。
+# generator.output_dir 是生成器原始输出的暂存目录(target/,不进 git),
+# 由 wrapper 组装成独立 crate,不是最终产物位置。
+# =============================================================================
+
+[generator]
+spec_path = "openapi.yaml"
+output_dir = "target/openapi-to-rust"
+module_name = "openapi"
+
+[features]
+enable_async_client = false
+
+[server]
+framework = "axum"
+# operations(必填项)由 gen-api.sh 从 openapi.yaml 全量注入临时 config,
+# 此处不出现手工清单。

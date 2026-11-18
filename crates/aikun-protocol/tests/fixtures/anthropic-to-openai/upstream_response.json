@@ -1,0 +1,17 @@
+{
+  "id": "msg_01XYZ",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-3-5-sonnet-20241022",
+  "content": [
+    { "type": "text", "text": "查一下术语库。" },
+    { "type": "tool_use", "id": "toolu_01A", "name": "lookup_term", "input": { "term": "gateway" } }
+  ],
+  "stop_reason": "tool_use",
+  "usage": {
+    "input_tokens": 400,
+    "output_tokens": 25,
+    "cache_read_input_tokens": 300,
+    "cache_creation_input_tokens": 100
+  }
+}

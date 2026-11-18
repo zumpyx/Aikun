@@ -1,0 +1,3954 @@
+# 文档顺序:/v1 代理端点在前(网关最终用户使用的接口),管理面在后。
+# =============================================================================
+# Aikun Gateway API — 系统 API 全景图(手写 spec,仓库根,单一真相)
+# =============================================================================
+# 定位与纪律(出处:docs/architecture-v0.5.md 决策 2/3/4):
+#   * **全量生成**(2026-11-18):spec 的全部 operationId 都经 openapi-to-rust
+#     生成(无手工白名单,gen-api.sh 从本文件机械提取注入;代理面八端点
+#     同日纳入,见决策 4);/v1 用混合宽松 schema(核心字段 optional 类型化,
+#     未知字段 flatten 透传),不镜像厂商契约;
+#   * /v1/{*path} 通配兜底(白名单外路径 404)不进生成(OpenAPI 无通配语法),
+#     保留手写;
+#   * /api/health 不进本 spec(全系统唯一无鉴权 JSON 接口,运维探针,非资源 API)。
+#
+# 关键决策(为什么长这样,YAML 写给人读):
+#   1. 管理面保留 /api 前缀、去掉 /admin 路径段。sk- API key 仅对非 /api/ 路径
+#      生效(src/auth/mod.rs:316-323,344-360),/api 前缀是现成的"管理面只收
+#      JWT"安全边界;而 admin 角色边界由装配层承担(Auth 裸挂 / User 包
+#      auth_middleware / Admin 包 auth_middleware + require_admin,
+#      docs/architecture-v0.5.md §三.3),不需要路径段重复表达。
+#   2. ID 统一不透明 string(2026-11-16 拍板弃 int64:JS 53 位精度 + SurrealDB 兼容),
+#      现网 UUID 直接沿用,零数据迁移(src/models/*.rs),
+#      这是 spec-first 重设计的迁移项,见 docs/api-mapping.md「全局语义变化」。
+#   3. 列表统一 {items, total} 信封 + limit/offset 分页;现网裸数组是待迁移项。
+#   4. 删除统一 204 No Content、创建统一 201;现网 200 + {message} 是待迁移项。
+#   5. 统一错误信封 = RFC 9457 problem+json(components.schemas.Problem),
+#      管理面所有非 2xx 引用它;/v1 代理端点例外 —— 其错误体按客户端协议
+#      (OpenAI/Anthropic 厂商格式)原样返回,spec 里用 loose 的 ProxyError
+#      描述,不套 Problem(否则破坏字节级透传)。
+#   6. 金额单位:元(number/double);价格表单位:每 1M tokens(元)。
+#      库内整数微元的换算属于 impl 细节,不出现在契约里。
+#   7. 时间出参统一 RFC3339(date-time)。现网部分表落 SQLite datetime
+#      ('YYYY-MM-DD HH:MM:SS'),impl 迁移时归一化。
+# =============================================================================
+
+openapi: 3.2.1
+
+info:
+  title: Aikun Gateway API
+  version: 0.7.0
+  license:
+    name: AGPL-3.0
+    url: https://www.gnu.org/licenses/agpl-3.0.html
+  summary: Aikun 网关系统 API 全景图(全部 operationId 经 openapi-to-rust 生成)
+  description: |
+    Aikun 是多渠道聚合的 AI 网关。本 spec 覆盖两块平面,**全部 operationId
+    都进 openapi-to-rust 生成**(2026-11-18 起无手工白名单):
+
+    * **管理面**(`/api/**`,tag `Auth` / `User` / `Admin`):登录、用户自助、
+      管理员三层,JWT 鉴权。
+    * **代理面**(`/v1/**`,tag `Proxy`):OpenAI / Anthropic 兼容端点,
+      API key(`sk-`)鉴权。混合宽松 schema:核心字段类型化,未知字段经
+      flatten 原样透传;契约属各厂商,不镜像进本 spec。
+
+    `/api/health` 刻意不进本 spec。
+
+    版本号说明:`0.5.0` 是 architecture-v0.5 的目标态口径(当前二进制为
+    0.4.4,见 Cargo.toml);存量端点向本 spec 迁移的映射见 docs/api-mapping.md。
+
+    **版本门禁(消费者必读)**:0.4.4 现网的管理面与本 spec **完全不兼容**
+    —— 路径不同(`/api/admin/**`)、列表是裸数组、错误体是 `{error,message}`
+    扁平体;最危险的坑是 `GET /api/prices` 语义翻转(0.4.4 = 用户只读价目,
+    本 spec = Admin CRUD,打错版本会静默拿到裸数组或 403 而不是报错)。
+    按 spec 0.5.0 生成的客户端**不得**指向 0.4.x 实例;已迁移部署上应以
+    `GET /api/system/version` 返回的主次版本(≥ 0.5)做前置门禁
+    (无鉴权探测:建议 impl 迁移时在 `/api/health`(不入 spec)响应中
+    带上同一 version 字段,见 api-mapping.md 备注 11)。
+
+servers:
+  - url: /
+    description: |
+      同源部署。管理面挂在 /api 前缀,代理面挂在 /v1 前缀,前端与静态资产在根路径。
+      paths 里写全路径,不拆 base URL —— 两个平面前缀不同,拆开反而要维护两份。
+
+# 全局默认:管理面 JWT。代理端点(Proxy tag)逐个覆写为 apiKeyAuth(或 JWT);
+# 公开端点(Auth tag 的前端/静态/登录)显式置空。
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Proxy
+    description: |
+      /v1 代理端点。**进全量生成**(2026-11-18 决策:推翻此前"仅作文档"裁决)。
+      生成用**混合宽松 schema**:核心字段 optional 类型化,未知字段经
+      #[serde(flatten)] 原样透传;**每个 object 层必须显式
+      additionalProperties: true**——漏写的层不生成 flatten,会静默丢字段。
+      鉴权:Bearer sk-<key>(或 JWT,或 Anthropic 客户端的 x-api-key 头),
+      装配层 auth_middleware 与手写时代一致。
+      错误体按客户端协议(OpenAI/Anthropic 格式)返回,不用 problem+json
+      (生成校验链的 problem+json 输出经装配层中间件改写为厂商格式)。
+      /v1/{*path} 通配兜底(白名单外 404)不进生成(OpenAPI 无通配语法),保留手写。
+
+  - name: Auth
+    description: |
+      公开层:内嵌前端、静态资产、登录。装配时裸挂(无 auth_middleware)。
+      **不含 /api/health**(唯一无鉴权 JSON 接口,不进 spec)。
+      进全量生成。
+  - name: User
+    description: |
+      用户自助层:本人信息、API key、日志、钱包、兑换、在售价目。
+      装配时包 auth_middleware(JWT);跨用户查询参数(user_id)仅 admin 生效。
+      进全量生成。
+  - name: Admin
+    description: |
+      管理面:用户/渠道/价格/兑换码/流水/统计的完整管理。
+      装配时包 auth_middleware + require_admin(JWT 且 role=admin)。
+      进全量生成;路径上不再有 /admin 段(角色由中间件承担)。
+
+paths:
+  # ===========================================================================
+  /v1/chat/completions:
+    post:
+      tags: [Proxy]
+      operationId: createChatCompletion
+      summary: OpenAI 兼容对话补全(统一代理管道)
+      description: |
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
+        统一代理管道(Protocol::OpenAi):按渠道声明协议转换或原生转发;
+        stream:true 走 SSE。支持响应缓存(默认 off,命中按配置计费)。
+      security:
+        - apiKeyAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+            examples:
+              minimal:
+                value:
+                  model: gpt-4o-mini
+                  messages:
+                    - role: user
+                      content: Say OK
+                  stream: false
+      responses:
+        '200':
+          description: |
+            成功。非流式:application/json(厂商格式);
+            流式(stream:true):text/event-stream,SSE 事件为通用 Event,不类型化。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyJsonObject'
+            text/event-stream:
+              schema:
+                type: string
+                description: 'SSE 流(data: {…} 逐事件推送,以 data: [DONE] 结束)'
+        '400':
+          description: 请求非法(厂商格式,如缺 model)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '401':
+          description: |
+            鉴权失败:**网关扁平体** {error:"<code>", message}(error 是字符串,
+            不是对象 —— 厂商 SDK 的 error.message / error.code 解析路径对 401
+            不适用)。非厂商格式;/v1 冻结面现行为,见 GatewayAuthError。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayAuthError'
+        '402':
+          description: 余额不足(insufficient_quota,厂商格式错误体)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '403':
+          description: 模型不在该 key 白名单内(model_not_allowed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '429':
+          description: key 限额(RPM / 日 token 额度 / 并发上限;rate_limit_error;内存窗口,尽力而为)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '502':
+          description: 上游失败且转移耗尽(上游 401/403 刻意改写,防泄露渠道凭证状态)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '503':
+          description: 无可用渠道(provider_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+
+  /v1/messages:
+    post:
+      tags: [Proxy]
+      operationId: createMessage
+      summary: Anthropic Messages 端点(同管道,协议转换)
+      description: |
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
+        接受 Anthropic 格式,按渠道声明协议转换或原生转发;
+        Anthropic 客户端可用 x-api-key 头鉴权。
+        错误体为 Anthropic 格式;准入与 402/429/403 语义同 chat/completions。
+      security:
+        - apiKeyAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessagesRequest'
+            examples:
+              minimal:
+                value:
+                  model: claude-3-5-sonnet-20241022
+                  max_tokens: 64
+                  messages:
+                    - role: user
+                      content: Say OK
+      responses:
+        '200':
+          description: 成功(非流式 JSON;stream:true 时 text/event-stream)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyJsonObject'
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE 流(Anthropic 事件类型:message_start / content_block_delta / …)
+        '400':
+          description: 请求非法(Anthropic 格式)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '401':
+          description: |
+            鉴权失败:**网关扁平体** {error:"<code>", message}(error 是字符串,
+            不是对象 —— 厂商 SDK 的 error.message / error.code 解析路径对 401
+            不适用)。非厂商格式;/v1 冻结面现行为,见 GatewayAuthError。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayAuthError'
+        '402':
+          description: 余额不足(insufficient_quota)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '403':
+          description: 模型不在白名单(model_not_allowed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '429':
+          description: key 限额(rate_limit_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '502':
+          description: 上游失败且转移耗尽
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '503':
+          description: 无可用渠道(provider_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+
+  /v1/responses:
+    post:
+      tags: [Proxy]
+      operationId: createResponse
+      summary: OpenAI Responses API 端点
+      description: |
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
+        声明 responses 协议的渠道原样转发;其余渠道转换到其原生协议
+        (chat/completions 或 Anthropic 组合)。注意:渠道侧 responses
+        只能作为附加协议(必须同时勾选 openai 或 anthropic)。
+      security:
+        - apiKeyAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResponsesRequest'
+            examples:
+              minimal:
+                value:
+                  model: gpt-4o
+                  input: Say OK
+      responses:
+        '200':
+          description: 成功(非流式 JSON;流式时 text/event-stream)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyJsonObject'
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE 流
+        '400':
+          description: 请求非法
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '401':
+          description: |
+            鉴权失败:**网关扁平体** {error:"<code>", message}(error 是字符串,
+            不是对象 —— 厂商 SDK 的 error.message / error.code 解析路径对 401
+            不适用)。非厂商格式;/v1 冻结面现行为,见 GatewayAuthError。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayAuthError'
+        '402':
+          description: 余额不足(insufficient_quota)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '403':
+          description: 模型不在白名单(model_not_allowed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '429':
+          description: key 限额(rate_limit_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '502':
+          description: 上游失败且转移耗尽
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '503':
+          description: 无可用渠道(provider_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+
+  /v1/models:
+    get:
+      tags: [Proxy]
+      operationId: listModels
+      summary: 可用模型列表(聚合健康渠道)
+      description: |
+        **代理端点;经 openapi-to-rust 生成(见 Proxy tag)。**
+        聚合自健康渠道;受限 key 只返回白名单内模型(精确名或 * 前缀匹配)。
+        响应为 OpenAI list 格式(本端点由网关聚合产出,给轻量类型)。
+      security:
+        - apiKeyAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 模型列表(OpenAI 格式,owned_by 恒为 'aikun')
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelList'
+        '401':
+          description: |
+            鉴权失败:**网关扁平体** {error:"<code>", message}(error 是字符串,
+            不是对象 —— 厂商 SDK 的 error.message / error.code 解析路径对 401
+            不适用)。非厂商格式;/v1 冻结面现行为,见 GatewayAuthError。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayAuthError'
+
+  /v1/embeddings:
+    post:
+      tags: [Proxy]
+      operationId: createEmbedding
+      summary: OpenAI embeddings 字节级透传
+      description: |
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
+        显式路由(不再经 POST /v1/{*path} 通配);白名单外路径由保留的
+        手写通配兜底 404。请求体必须有 model 字段。字节级透传:只走声明
+        openai 协议的渠道,无协议转换;应用渠道模型映射后原样转发。
+        有 usage 则按价格表计费,无 usage 按 0 元记账但日志照落。
+      security:
+        - apiKeyAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmbeddingsRequest'
+            examples:
+              minimal:
+                value:
+                  model: text-embedding-3-small
+                  input: hello
+      responses:
+        '200':
+          description: 成功(厂商格式,原样透传)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyJsonObject'
+        '400':
+          description: 请求非法(如缺 model;厂商格式 invalid_request_error;上游 400 fail fast 原样回传)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '401':
+          description: |
+            鉴权失败:**网关扁平体** {error:"<code>", message}(error 是字符串,
+            不是对象 —— 厂商 SDK 的 error.message / error.code 解析路径对 401
+            不适用)。非厂商格式;/v1 冻结面现行为,见 GatewayAuthError。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayAuthError'
+        '402':
+          description: 余额不足(insufficient_quota)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '403':
+          description: 模型不在白名单(model_not_allowed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '429':
+          description: key 限额(rate_limit_error;可重试类)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '502':
+          description: 上游失败且转移耗尽(上游 401/403 刻意改写)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '503':
+          description: 无可用渠道(provider_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+
+  /v1/moderations:
+    post:
+      tags: [Proxy]
+      operationId: createModeration
+      summary: OpenAI moderations 字节级透传(0 元记账)
+      description: |
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
+        白名单透传端点;响应通常无 usage,按 0 元记账(日志照落)。
+        同样要求 body 带 model。
+      security:
+        - apiKeyAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModerationsRequest'
+            examples:
+              minimal:
+                value:
+                  model: text-moderation-latest
+                  input: hello
+      responses:
+        '200':
+          description: 成功(厂商格式,原样透传)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyJsonObject'
+        '400':
+          description: 请求非法(缺 model / 上游 400 fail fast)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '401':
+          description: |
+            鉴权失败:**网关扁平体** {error:"<code>", message}(error 是字符串,
+            不是对象 —— 厂商 SDK 的 error.message / error.code 解析路径对 401
+            不适用)。非厂商格式;/v1 冻结面现行为,见 GatewayAuthError。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayAuthError'
+        '402':
+          description: 余额不足(insufficient_quota)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '403':
+          description: 模型不在白名单(model_not_allowed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '429':
+          description: key 限额(rate_limit_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '502':
+          description: 上游失败且转移耗尽
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '503':
+          description: 无可用渠道(provider_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+
+  /v1/images/generations:
+    post:
+      tags: [Proxy]
+      operationId: createImage
+      summary: OpenAI 图片生成字节级透传(0 元记账)
+      description: |
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
+        白名单透传端点;无 usage 按 0 元记账,日志照落。
+        注意:multipart 端点(audio/*)与无 model 的 files/batches
+        刻意不在白名单(无法按 model 选路,且会暴露渠道账号级接口)。
+      security:
+        - apiKeyAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImagesRequest'
+            examples:
+              minimal:
+                value:
+                  model: gpt-image-1
+                  prompt: a cat
+      responses:
+        '200':
+          description: 成功(厂商格式,原样透传)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyJsonObject'
+        '400':
+          description: 请求非法(缺 model / 上游 400 fail fast)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '401':
+          description: |
+            鉴权失败:**网关扁平体** {error:"<code>", message}(error 是字符串,
+            不是对象 —— 厂商 SDK 的 error.message / error.code 解析路径对 401
+            不适用)。非厂商格式;/v1 冻结面现行为,见 GatewayAuthError。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayAuthError'
+        '402':
+          description: 余额不足(insufficient_quota)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '403':
+          description: 模型不在白名单(model_not_allowed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '429':
+          description: key 限额(rate_limit_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '502':
+          description: 上游失败且转移耗尽
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '503':
+          description: 无可用渠道(provider_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+
+  /v1/rerank:
+    post:
+      tags: [Proxy]
+      operationId: createRerank
+      summary: rerank 端点字节级透传(白名单第 4 项)
+      description: |
+        **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
+        非 OpenAI 官方端点(部分供应商兼容)。若响应含 usage 则计费,
+        否则 0 元记账。
+      security:
+        - apiKeyAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RerankRequest'
+            examples:
+              minimal:
+                value:
+                  model: rerank-v2
+                  query: hello
+                  documents: [hello world, goodbye]
+      responses:
+        '200':
+          description: 成功(厂商格式,原样透传)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyJsonObject'
+        '400':
+          description: 请求非法(缺 model / 上游 400 fail fast)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '401':
+          description: |
+            鉴权失败:**网关扁平体** {error:"<code>", message}(error 是字符串,
+            不是对象 —— 厂商 SDK 的 error.message / error.code 解析路径对 401
+            不适用)。非厂商格式;/v1 冻结面现行为,见 GatewayAuthError。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayAuthError'
+        '402':
+          description: 余额不足(insufficient_quota)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '403':
+          description: 模型不在白名单(model_not_allowed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '429':
+          description: key 限额(rate_limit_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '502':
+          description: 上游失败且转移耗尽
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '503':
+          description: 无可用渠道(provider_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+
+# =============================================================================
+# components
+# =============================================================================
+
+  # ===========================================================================
+  # Auth tag — 公开层
+  # ===========================================================================
+  /:
+    get:
+      tags: [Auth]
+      operationId: serveFrontend
+      summary: 返回内嵌的管理前端单页应用
+      description: |
+        编译期内嵌的前端 HTML(vanilla JS)。响应带 CSP 头(default-src 'self' …)
+        与 no-cache。非 JSON API,仅为全景图完整性收录。
+      security: []
+      responses:
+        '200':
+          description: 前端 SPA HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /static/{path}:
+    get:
+      tags: [Auth]
+      operationId: serveStaticAsset
+      summary: 内嵌静态资产(css/js)
+      description: |
+        按 /static/ 路径返回编译期内嵌的静态资产,不触文件系统。
+        实现是 {*path} 通配路由(允许嵌套路径);白名单之外的路径一律
+        404,响应体为纯文本 'not found'(非 JSON)。
+      security: []
+      parameters:
+        - name: path
+          in: path
+          required: true
+          description: 资产相对路径,可含斜杠分段
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 资产内容(css/js,Content-Type 按扩展名)
+          content:
+            text/css:
+              schema:
+                type: string
+            application/javascript:
+              schema:
+                type: string
+        '404':
+          description: 白名单外路径;纯文本 'not found',不是 JSON
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: 用户名密码登录,签发 JWT
+      description: |
+        签发的 JWT 携带 token_version;改密/改角色会递增 token_version 使
+        已签发 JWT 全部失效。
+
+        防护语义(必须保留到迁移实现):
+        * 账号枚举防护:未知用户名也跑一次 Argon2 dummy hash 均衡时序
+          (src/api/auth.rs:171-177);
+        * 账户禁用:密码通过后才返回 403 account_disabled,防探测
+          (src/api/auth.rs:205-213);
+        * 限流(内存滑动窗口,重启清零,尽力而为):10 分钟窗口内
+          按用户名 5 次 / 按 IP 30 次失败即 429。客户端 IP 取
+          X-Forwarded-For 首个值仅当 trust_x_forwarded_for 开启;
+        * 凭证错误统一 401 invalid_credentials,不区分"用户不存在"与"密码错误"。
+
+        语义变化:限流错误码由旧 too_many_attempts 统一为 rate_limited
+        (与兑换、/v1 限额共用一套短码词汇)。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              login:
+                value: { username: admin, password: 's3cret-password' }
+      responses:
+        '200':
+          description: 登录成功,返回 JWT 与用户信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          description: 请求体不是合法 JSON 或缺字段
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                malformed:
+                  value:
+                    type: about:blank
+                    title: Bad Request
+                    status: 400
+                    detail: 请求体缺少 username 或 password
+                    code: invalid_body
+        '401':
+          description: 用户名或密码错误(统一口径,不细分)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                invalid_credentials:
+                  value:
+                    type: about:blank
+                    title: Unauthorized
+                    status: 401
+                    detail: Invalid username or password
+                    code: invalid_credentials
+        '403':
+          description: 密码正确但账户已禁用(仅在凭证通过后返回,防探测)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                account_disabled:
+                  value:
+                    type: about:blank
+                    title: Forbidden
+                    status: 403
+                    detail: This account has been disabled
+                    code: account_disabled
+        '429':
+          description: 失败次数过多(按用户名 5 次 / 按 IP 30 次 / 10 分钟;内存窗口,尽力而为)
+          headers:
+            Retry-After:
+              description: |
+                建议重试等待秒数。**目标态新增**:现实现 429 分支未发送该头
+                (见 api-mapping.md 全局语义变化 #12)。
+              schema:
+                type: integer
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                rate_limited:
+                  value:
+                    type: about:blank
+                    title: Too Many Requests
+                    status: 429
+                    detail: Too many failed login attempts, try again later
+                    code: rate_limited
+
+  # ===========================================================================
+  # User tag — 用户自助(JWT)
+  # ===========================================================================
+  /api/users/me:
+    get:
+      tags: [User]
+      operationId: getCurrentUser
+      summary: 当前登录用户信息 + 余额
+      description: |
+        余额对本人只读可见(元)。旧路径 GET /api/me;404 场景为 JWT 有效但
+        用户行已不存在(旧码 user_not_found 统一为 not_found)。
+      responses:
+        '200':
+          description: 当前用户(含 balance,单位元)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserWithBalance'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/system/version:
+    get:
+      tags: [User]
+      operationId: getVersion
+      summary: 服务版本号
+      description: |
+        刻意放在鉴权后(除 /api/health 外一律需授权,避免给匿名探测者版本指纹)。
+        旧路径 GET /api/version。
+      responses:
+        '200':
+          description: 版本信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/api-keys:
+    get:
+      tags: [User]
+      operationId: listApiKeys
+      summary: 列出本人(或 admin 指定用户)的 API key
+      description: |
+        key 字段永不出全量明文:列表恒为掩码 `sk-****` + 后 4 位。
+        权限分叉:admin 传 user_id 可跨用户查看;普通用户强制只看自己
+        (忽略该参数,不报错)。
+        语义变化:响应由裸数组改为 {items, total} 并新增分页参数。
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - name: user_id
+          in: query
+          description: 仅 admin 生效:查看指定用户的 key;普通用户忽略
+          schema:
+            type: string
+      responses:
+        '200':
+          description: API key 列表(key 为掩码)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [User]
+      operationId: createApiKey
+      summary: 创建 API key
+      description: |
+        **完整明文 key 仅在本响应返回一次**;库中只存 sha256(key) 与后 4 位。
+        expires_at 必须是可解析的未来时间;空串/缺省 = 永不过期。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKeyRequest'
+      responses:
+        '201':
+          description: 创建成功;key 为完整明文(sk-<hex><hex>),仅此一次返回
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreated'
+        '400':
+          description: expires_at 不可解析或不在未来
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                invalid_expires_at:
+                  value:
+                    type: about:blank
+                    title: Bad Request
+                    status: 400
+                    detail: expires_at is not a valid future timestamp
+                    code: invalid_expires_at
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/api-keys/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    patch:
+      tags: [User]
+      operationId: updateApiKey
+      summary: 部分更新 API key
+      description: |
+        可更新 name / is_active / expires_at / models / rate_limit_rpm /
+        quota_daily_tokens / max_concurrent;expires_at 传空串 = 清除过期时间。
+        权限分叉:key 属主可改;admin 不受属主限制;非 admin 改他人 key
+        **一律 404**(不暴露存在性)。
+        语义变化:成功响应由 {message:'updated'} 改为返回更新后的资源。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateApiKeyRequest'
+      responses:
+        '200':
+          description: 更新后的 API key(key 为掩码)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKey'
+        '400':
+          description: 无任何可更新字段,或 expires_at 非法
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                no_fields_to_update:
+                  value:
+                    type: about:blank
+                    title: Bad Request
+                    status: 400
+                    detail: 请求未携带任何可更新字段
+                    code: no_fields_to_update
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [User]
+      operationId: deleteApiKey
+      summary: 删除 API key
+      description: |
+        admin 可删任意用户的 key,非 admin 仅自己的,否则 404。
+        删除时同步清理内存 RPM 滑动窗口死条目。
+        语义变化:成功响应由 200 {message:'deleted'} 改为 204。
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/logs:
+    get:
+      tags: [User]
+      operationId: listLogs
+      summary: 请求日志列表
+      description: |
+        admin 看全部,普通用户强制只看自己(user_id 参数仅 admin 生效)。
+        行内 username / provider_name 由 LEFT JOIN 带出,对应用户或渠道
+        已删除时为 null(前端显示"已删除")。
+        cost 出参为元。语义变化:响应由裸数组改为 {items, total}。
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - name: model
+          in: query
+          description: 精确等值过滤
+          schema:
+            type: string
+        - name: success
+          in: query
+          description: 仅接受 '0' 或 '1',其余值 400
+          schema:
+            type: string
+            enum: ['0', '1']
+        - name: user_id
+          in: query
+          description: 仅 admin 生效;普通用户强制过滤为自己
+          schema:
+            type: string
+        - name: since
+          in: query
+          description: |
+            created_at >= 该值:与库内 RFC3339 字符串做**词法比较**,不做时间解析
+            (src/api/logs.rs:74-79)。发与库同构的 UTC RFC3339(+00:00、带亚秒)
+            才精确;发 `Z` 后缀会漏掉同秒的全部行('Z' > '.'),发非 UTC 偏移
+            (如 +08:00)会静默漏数小时。刻意不加 format: date-time,避免生成
+            客户端"规范化"成 Z 后缀反而踩坑。
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 日志页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogPage'
+        '400':
+          description: success 不是 0/1
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                invalid_success:
+                  value:
+                    type: about:blank
+                    title: Bad Request
+                    status: 400
+                    detail: success 仅接受 0 或 1
+                    code: invalid_success
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/logs/stats:
+    get:
+      tags: [User]
+      operationId: getLogStats
+      summary: 日志统计(与列表共用筛选条件)
+      description: |
+        过滤参数与 GET /api/logs 完全一致(build_log_filters 复用),
+        保证统计数与列表口径一致。success_rate 为两位小数的百分数(如 98.75)。
+      parameters:
+        - name: model
+          in: query
+          schema:
+            type: string
+        - name: success
+          in: query
+          schema:
+            type: string
+            enum: ['0', '1']
+        - name: user_id
+          in: query
+          description: 仅 admin 生效
+          schema:
+            type: string
+        - name: since
+          in: query
+          description: |
+            同 GET /api/logs 的 since:与库内 RFC3339 字符串词法比较,
+            非 UTC +00:00 形态会静默漏数(详见该端点说明)。
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 统计汇总
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogStats'
+        '400':
+          description: success 不是 0/1
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/users/me/wallet:
+    get:
+      tags: [User]
+      operationId: getWalletStats
+      summary: 钱包:本人余额 + 近 30 天消费分析
+      description: |
+        固定查本人,无查询参数;窗口固定近 30 天(UTC 日期)。
+        每日序列合并 request_logs(未过保留期)与 usage_daily(已聚合)两表,
+        不重复计数。金额均元。旧路径 GET /api/wallet。
+      responses:
+        '200':
+          description: 钱包统计
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Wallet'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/users/me/redemptions:
+    post:
+      tags: [User]
+      operationId: redeemCode
+      summary: 兑换充值码
+      description: |
+        用 code 创建一条本人的兑换记录:核销 + 加余额 + 记流水,
+        三步同一事务;并发兑换同一码只有一方生效。
+        code 归一化:去空白 + 转大写。
+        防爆破:同用户 10 分钟 5 次失败即 429(内存窗口,尽力而为);
+        无效/已用/已禁用/已过期统一 400 invalid_code 不细分(防枚举)。
+        旧路径 POST /api/wallet/redeem。语义变化:200 → 201(创建语义),
+        动作端点转为"我的兑换记录"子资源。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedeemRequest'
+      responses:
+        '201':
+          description: 兑换成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedemptionResult'
+        '400':
+          description: 兑换码无效、已使用、已禁用或已过期(统一口径,不细分)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                invalid_code:
+                  value:
+                    type: about:blank
+                    title: Bad Request
+                    status: 400
+                    detail: 兑换码无效、已使用或已过期
+                    code: invalid_code
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/models/prices:
+    get:
+      tags: [User]
+      operationId: listPublicPrices
+      summary: 在售模型价目(登录用户只读)
+      description: |
+        只列健康渠道正在提供的模型,按 find_price 展开通配价为具体单价。
+        未定价模型三个价格均为 null(请求按 0 元记账)。
+        不按 key 白名单过滤 —— 这是网关级目录。
+        价格单位:每 1M tokens(元)。旧路径 GET /api/prices。
+        语义变化:响应由裸数组改为 {items, total} 并新增分页参数。
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: 在售价目页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvailablePricePage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ===========================================================================
+  # Admin tag — 管理面(JWT + role=admin;路径无 /admin 段,见文件头决策 1)
+  # ===========================================================================
+  /api/users:
+    get:
+      tags: [Admin]
+      operationId: adminListUsers
+      summary: 用户列表
+      description: |
+        每项含 balance(元);不含密码哈希。
+        语义变化:新增 limit/offset 分页(旧版全量返回),响应改 {items, total}。
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: 用户页(含余额)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserWithBalancePage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Admin]
+      operationId: adminCreateUser
+      summary: 创建用户
+      description: |
+        校验:username trim 后 1-64 字符;password 8-256 字节非全空白;
+        display_name ≤64;role 仅 'admin'/'user'。用户名冲突 409。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: 校验失败(invalid_username / invalid_password / invalid_display_name / invalid_role)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                invalid_role:
+                  value:
+                    type: about:blank
+                    title: Bad Request
+                    status: 400
+                    detail: role must be 'admin' or 'user'
+                    code: invalid_role
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/users/batch:
+    post:
+      tags: [Admin]
+      operationId: adminCreateUsersBatch
+      summary: 批量创建用户(逐项独立成功/失败)
+      description: |
+        保留 batch 动作子资源:x-action 标注;单项失败不影响其余,
+        整体 200,成败在 per-item 结果里(password 省略时随机生成且仅在
+        per-item 结果中返回一次)。上限 100 项,校验规则与单个创建一致。
+      x-action: batch-create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchCreateUsersRequest'
+      responses:
+        '200':
+          description: 逐项结果 + created/failed 计数摘要(部分失败也是 200)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchUsersResult'
+        '400':
+          description: 请求整体不可用(空批次 / 超过 100 项上限)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                empty_batch:
+                  value:
+                    type: about:blank
+                    title: Bad Request
+                    status: 400
+                    detail: users must not be empty
+                    code: empty_batch
+                batch_too_large:
+                  value:
+                    type: about:blank
+                    title: Bad Request
+                    status: 400
+                    detail: at most 100 users per batch
+                    code: batch_too_large
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/users/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Admin]
+      operationId: adminGetUser
+      summary: 查单个用户(含余额)
+      responses:
+        '200':
+          description: 用户详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserWithBalance'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Admin]
+      operationId: adminUpdateUser
+      summary: 部分更新用户(改密/启停/改角色)
+      description: |
+        可更新 display_name / password / is_active / role;无字段 400。
+        改密后 token_version+1,该用户已签发 JWT 全部失效。
+        语义变化:last_admin 保护由 400 改为 409(状态冲突语义更准)。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+      responses:
+        '200':
+          description: 更新后的用户
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: 无任何可更新字段,或字段校验失败
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 最后活跃 admin 保护(降级或禁用唯一活跃 admin 被拒)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                last_admin:
+                  value:
+                    type: about:blank
+                    title: Conflict
+                    status: 409
+                    detail: 不能禁用或降级最后一个活跃管理员
+                    code: last_admin
+    delete:
+      tags: [Admin]
+      operationId: adminDeleteUser
+      summary: 禁用用户(软删除)
+      description: |
+        **软禁用**:实际执行 UPDATE users SET is_active=0,保留全部数据,
+        不提供物理删除(日志/流水外键与审计依赖存续)。
+        同样受 last_admin 保护(409)。operationId 保留 adminDeleteUser,
+        但语义是 disable —— 诚实标注,避免读者误以为可恢复地"删了"。
+        语义变化:成功响应由 200 {message:'disabled'} 改为 204。
+      responses:
+        '204':
+          description: 已禁用(is_active=0)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 最后活跃 admin 保护
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /api/balance-transactions:
+    get:
+      tags: [Admin]
+      operationId: adminListBillingTransactions
+      summary: 调账/充值流水查询
+      description: |
+        user_id 为空 = 全部用户。amount / balance_after 出参为元。
+        旧路径 GET /api/admin/billing/transactions。
+        语义变化:limit 由固定 200 改为可传(默认 50,clamp 1..=200),
+        响应改 {items, total}。
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - name: user_id
+          in: query
+          description: 按用户过滤;缺省 = 全部
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 流水页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BalanceTransactionPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/users/{id}/balance-transactions:
+    post:
+      tags: [Admin]
+      operationId: adminAdjustUserBalance
+      summary: 管理员手工调账(创建一条余额流水)
+      description: |
+        amount(元)必须非零有限且 ≥1 微元:正数 kind='recharge',
+        负数 kind='adjust'。UPDATE 余额与 INSERT 流水同一事务。
+        旧路径 POST /api/admin/users/{id}/balance(动作端点转子资源)。
+        语义变化:200 → 201(创建流水语义)。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdjustBalanceRequest'
+      responses:
+        '201':
+          description: 调账成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdjustBalanceResult'
+        '400':
+          description: amount 非零有限且 ≥1 微元校验失败
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                invalid_amount:
+                  value:
+                    type: about:blank
+                    title: Bad Request
+                    status: 400
+                    detail: amount 必须是非零有限数(元),且不低于最小记账单位
+                    code: invalid_amount
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/providers:
+    get:
+      tags: [Admin]
+      operationId: adminListProviders
+      summary: 渠道列表
+      description: |
+        按 priority DESC, name ASC。proxy_url 出参脱敏(可能内嵌凭证);
+        api_key 永不出参(库中 enc:v1: 静态加密)。查询失败 500 而非空列表
+        (DB 故障不能伪装成"没有渠道")。
+        语义变化:新增分页,响应改 {items, total}。
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: 渠道页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Admin]
+      operationId: adminCreateProvider
+      summary: 创建渠道(上游配置 + 加密 key)
+      description: |
+        跨字段约束(创建与更新共用同一口径):
+        * openai_base_url / anthropic_base_url 按勾选协议必填对应地址,
+          空则回退另一路(base_url_for 回退口径);
+        * protocols 仅 openai/anthropic/responses,且 responses 必须伴随
+          openai 或 anthropic(不能单独成渠道);
+        * default_protocol 必须已勾选且属于 openai/anthropic;
+        * provider_type 白名单 openai/anthropic/custom —— **刻意不含 azure**
+          (apply_auth 不支持 api-key 头,放开会建出必然 401 的渠道);
+        * channel_kind 须为已注册适配器(见 GET /api/channel-kinds)。
+        数值界:priority 0..=100;weight 0.1..=1000(有限);
+        max_retries 0..=10;timeout_secs 1..=600(0 = 无超时会卡死探针,拒绝)。
+        api_key 静态加密落库(enc:v1:),key_hash 用于重复检测;
+        同 key 重复创建 409 duplicate_key 并指出已用渠道名。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProviderRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '400':
+          description: |
+            校验失败。code 枚举:invalid_name / invalid_base_url /
+            invalid_provider_type / invalid_protocols / invalid_default_protocol /
+            invalid_priority / invalid_weight / invalid_max_retries /
+            invalid_timeout / invalid_channel_kind / invalid_models
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 同 api_key 已被其他渠道使用
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                duplicate_key:
+                  value:
+                    type: about:blank
+                    title: Conflict
+                    status: 409
+                    detail: 该 API key 已被渠道 X 使用
+                    code: duplicate_key
+
+  /api/providers/batch:
+    post:
+      tags: [Admin]
+      operationId: adminCreateProvidersBatch
+      summary: 同配置多 key 批量建渠道(key ↔ 账号 1:1)
+      description: |
+        请求 = shared(单个创建的扁平字段,name 为基础名,api_key 被忽略)+
+        api_keys[](1..=100 个非空 key)。渠道名自动编号 -01..-N;
+        批内重复 key 归入失败组(保持 key↔账号 1:1)。
+        语义变化:状态码统一为 200(旧版全败 400 / 部分 201 不一致),
+        成败完全由 body 表达 —— 批量端点都是"提交一批,收一份逐项报告"。
+      x-action: batch-create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProvidersBatchRequest'
+      responses:
+        '200':
+          description: 逐项结果(created/failed/providers)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderBatchResult'
+        '400':
+          description: 请求整体不可用(api_keys 空/超上限/name 空)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/providers/fetch-models:
+    post:
+      tags: [Admin]
+      operationId: adminFetchUpstreamModels
+      summary: 为(尚未保存的)渠道配置拉取上游模型列表
+      description: |
+        保留 POST 动作端点:x-action 标注。理由:这是"带凭据的查询",
+        api_key 不能进 query string(会落访问日志),只能走请求体;
+        且不落库,没有可寻址资源,子资源化没有收益。
+        编辑态回退:api_key / proxy_url 留空且带 provider_id 时取库存值
+        (密文先解密);provider_id 不存在则 404。
+        上游非 200 → 502 upstream_error(附 status);无模型列表 → 502 no_models;
+        连接失败 502 只回显 host 防泄露完整 URL。响应体 8MB 上限。
+        protocol 仅 openai/anthropic。
+      x-action: fetch-upstream-models
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FetchModelsRequest'
+      responses:
+        '200':
+          description: 上游模型列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FetchedModels'
+        '400':
+          description: |
+            protocol 非法(invalid_protocol),或 **base_url / api_key 任一为空**
+            (经 provider_id 库存回退后仍空 → missing_config)—— 注意不是
+            "双空才拒":免密上游探测不支持,api_key 为空即 400。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          description: 上游错误(upstream_error / no_models;错误消息只回显 host)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /api/providers/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Admin]
+      operationId: adminGetProvider
+      summary: 渠道详情
+      responses:
+        '200':
+          description: 渠道详情(proxy_url 脱敏)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Admin]
+      operationId: adminUpdateProvider
+      summary: 部分更新渠道
+      description: |
+        可更新字段极多(name / provider_type / 两路 base_url / note /
+        website_url / channel_kind / api_key / models / priority / weight /
+        is_active / max_retries / timeout_secs / proxy_url(空串=清除代理)/
+        model_mapping / protocols / default_protocol)。
+        换 key 时排除自身做重复检测,冲突 409。
+        is_active=true 顺带清自动禁用状态(disabled_reason='',
+        consecutive_failures=0)。
+        protocols / default_protocol 联动校验:对库存值解析后按**最终状态**
+        校验,防止造出必失败渠道(跨字段约束,不是单字段枚举)。
+        语义变化:成功响应由 {message:'updated'} 改为返回更新后的资源。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProviderRequest'
+      responses:
+        '200':
+          description: 更新后的渠道
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '400':
+          description: 无任何可更新字段,或跨字段校验失败(见创建端点 code 枚举)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 新 api_key 与其他渠道重复
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+    delete:
+      tags: [Admin]
+      operationId: adminDeleteProvider
+      summary: 物理删除渠道
+      description: |
+        物理删除(DELETE FROM providers)。关联请求日志的 provider_id
+        置 NULL(ON DELETE SET NULL),日志保留。
+        语义变化:成功响应由 200 {message:'deleted'} 改为 204。
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/providers/{id}/tests:
+    post:
+      tags: [Admin]
+      operationId: adminTestProvider
+      summary: 渠道连通性测试(创建一次探测)
+      description: |
+        动作端点转子资源:一次"测试"是一份可创建的结果(无请求体)。
+        跑一次健康探测并更新 health_status / last_health_check;
+        **刻意不更新 latency_ms**(ping 延迟不代表真实请求延迟,
+        覆盖会污染选路 EMA,与后台健康检查循环一致)。
+        语义变化:200 → 201(创建测试结果语义)。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '201':
+          description: 探测结果(已落库)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderTestResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/providers/{id}/model-tests:
+    post:
+      tags: [Admin]
+      operationId: adminTestProviderModel
+      summary: 对渠道 + 模型发真实对话请求(端到端验证,可流式)
+      description: |
+        旧路径 POST /api/admin/providers/{id}/test-model(动作端点转子资源)。
+        messages 提供时覆盖 message;stream=true 走 SSE 路径。
+        protocol 必须是渠道已声明协议,否则 400 unsupported_protocol。
+        每次结果持久化到 model_health。**业务失败也是成功响应**:
+        HTTP 层只表达"测试已执行",ok:false / status / error 在 body 里
+        (否则前端拿不到失败详情)。
+        语义变化:200 → 201(创建测试记录语义)。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelTestRequest'
+      responses:
+        '201':
+          description: |
+            测试结果(已落 model_health)。stream=true 时响应为 SSE 流,
+            事件内容为通用 Event,不做类型化(spec 边界见
+            architecture-v0.5.md §三.4)。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelTestResult'
+            text/event-stream:
+              schema:
+                type: string
+                description: 'SSE 流(data: … 事件逐条推送)'
+        '400':
+          description: model 为空,或 protocol 不在渠道已声明协议内
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                unsupported_protocol:
+                  value:
+                    type: about:blank
+                    title: Bad Request
+                    status: 400
+                    detail: 该渠道不支持指定协议
+                    code: unsupported_protocol
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/providers/{id}/duplicates:
+    post:
+      tags: [Admin]
+      operationId: adminDuplicateProvider
+      summary: 复制渠道(创建一个副本)
+      description: |
+        动作端点转子资源(GitHub fork 模式:POST /repos/{r}/forks)。
+        复制配置(api_key 密文一并复制),运行态重置(health unknown、
+        延迟/错误率清零、启用);新名 '{} (副本)'。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '201':
+          description: 新建的副本渠道
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/model-health:
+    get:
+      tags: [Admin]
+      operationId: adminListModelHealth
+      summary: 每(渠道, 模型)对的最近实测健康
+      description: |
+        model_health 表最新探测,每 (provider_id, model) 一行。
+        查询失败 500 不静默空列表。
+        语义变化:新增分页与 total。
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - name: provider_id
+          in: query
+          description: 按渠道过滤
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 模型健康页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelHealthPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/channel-kinds:
+    get:
+      tags: [Admin]
+      operationId: adminListChannelKinds
+      summary: 渠道适配器类型下拉(目录)
+      description: |
+        来自 channel::registry() 的静态注册表(generic / qoder / workbuddy …,
+        编译期注册,非插件系统)。
+        刻意不设分页参数:目录极小且随发版变化,分页是纯噪音
+        (见 api-mapping.md 备注);响应仍用 {items, total} 信封保持统一。
+      responses:
+        '200':
+          description: 适配器目录
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelKindPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/prices:
+    get:
+      tags: [Admin]
+      operationId: adminListPrices
+      summary: 模型价格表(管理端全量,含通配条目)
+      description: |
+        价格单位:每 1M tokens(元);条目含 cached_price(可 null = 缓存按输入价)。
+        in_use=1:只返回会被渠道已添加模型命中的条目(精确名或通配前缀覆盖,
+        单独的 * 恒命中)。
+        **版本陷阱**:0.4.x 的同名路径 `GET /api/prices` 是用户只读价目
+        (本 spec 中该角色移至 `GET /api/models/prices`);消费者必须先过
+        版本门禁(info.description),不可同路径混用两代语义。
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - name: in_use
+          in: query
+          description: |
+            传 '1' 时只返回在用条目(会被渠道已添加模型命中)。
+            **其他值静默忽略、等同缺省**(与现实现一致,刻意不严格化为 400;
+            对比 logs 的 success 参数是真实 400)。
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 价格页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PricePage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Admin]
+      operationId: adminCreatePrice
+      summary: 新建价格条目
+      description: |
+        通配只允许末尾单个 * 且前缀非空(如 gpt-*),否则 400 ——
+        更宽的通配永远不命中,属于配置错误。
+        价格须非负有限。同 model 唯一约束冲突 409 duplicate_model。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertPriceRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Price'
+        '400':
+          description: invalid_model(空/非法通配)或 invalid_price(负/非有限)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/prices/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    patch:
+      tags: [Admin]
+      operationId: adminUpdatePrice
+      summary: 部分更新价格条目
+      description: |
+        **cached_price 三态 PATCH**(schema 用 optional + nullable 双层表达):
+        字段缺省 = 不改动;显式 null = 清回 NULL(缓存按输入价);数值 = 更新。
+        改 model 撞唯一约束 409。无字段 400。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertPriceRequest'
+      responses:
+        '200':
+          description: 更新后的价格条目
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Price'
+        '400':
+          description: 无任何可更新字段,或校验失败
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [Admin]
+      operationId: adminDeletePrice
+      summary: 删除价格条目
+      description: 语义变化:成功响应由 200 {message:'deleted'} 改为 204。
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/redemption-codes:
+    get:
+      tags: [Admin]
+      operationId: adminListRedemptionCodes
+      summary: 兑换码列表(掩码)
+      description: |
+        **永不出库明文/哈希**,只有 code_masked 掩码(AK-****-****-****-XXXX)。
+        status 过滤枚举 unused / used / disabled / expired,其余 400;
+        'expired' 是**显示态**:库中 status 仍为 unused,按
+        expires_at <= now 计算,响应另有布尔 expired 字段。
+        旧版已是 {total, items} 信封,保留;limit 默认 50 clamp 1..=200。
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - name: batch
+          in: query
+          description: 按批次名精确过滤
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [unused, used, disabled, expired]
+      responses:
+        '200':
+          description: 兑换码页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedemptionCodePage'
+        '400':
+          description: status 不在枚举内
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                invalid_status:
+                  value:
+                    type: about:blank
+                    title: Bad Request
+                    status: 400
+                    detail: status 只支持 unused/used/disabled/expired
+                    code: invalid_status
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Admin]
+      operationId: adminCreateRedemptionCodes
+      summary: 批量生成兑换码
+      description: |
+        count 1..=500;amount(元)≤1,000,000 且 ≥1 微元;batch ≤64 字符必填;
+        整批一个事务,部分失败整体回滚(避免"哈希已落库而明文从未送达")。
+        **明文码(AK-XXXX-XXXX-XXXX-XXXX)只在 201 响应返回一次**,
+        库中只存 sha256 与后缀。
+        expires_at 只接受 'YYYY-MM-DD'(补 23:59:59)或
+        'YYYY-MM-DD HH:MM:SS',**拒绝 RFC3339 'T' 格式**(与 SQLite
+        datetime('now') 的字符串比较语义有关,刻意收紧)。
+        碰撞(2^80 空间,几乎不可能)→ 500 code_collision,管理员重试即可。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRedemptionCodesRequest'
+      responses:
+        '201':
+          description: 生成成功;codes 为完整明文,仅此一次返回
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedRedemptionCodes'
+        '400':
+          description: invalid_count / invalid_amount / invalid_batch / invalid_expires_at
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          description: 码生成碰撞(重试即可)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                code_collision:
+                  value:
+                    type: about:blank
+                    title: Internal Server Error
+                    status: 500
+                    detail: 码生成碰撞,请重试
+                    code: code_collision
+
+  /api/redemption-codes/{id}:
+    delete:
+      tags: [Admin]
+      operationId: adminDisableRedemptionCode
+      summary: 禁用未使用的兑换码
+      description: |
+        动作端点转 DELETE(ask 指定语义:兑换码生命周期只有
+        unused → used / disabled,禁用即终结,DELETE 表达"使其不可用")。
+        只有 unused 可禁用;used / disabled 返回 409 not_unused。
+        operationId 保留 adminDisableRedemptionCode,如实表达"禁用"而非删除。
+        语义变化:成功响应由 200 {message:'disabled'} 改为 204。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '204':
+          description: 已禁用
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 只有未使用的兑换码可以禁用
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                not_unused:
+                  value:
+                    type: about:blank
+                    title: Conflict
+                    status: 409
+                    detail: 只有未使用的兑换码可以禁用
+                    code: not_unused
+
+  /api/usage-stats:
+    get:
+      tags: [Admin]
+      operationId: adminGetUsageStats
+      summary: 仪表盘用量聚合
+      description: |
+        今日/近7天/近30天、30 天日序列(补零)、Top 模型(按请求数,最多 8 个)。
+        日期口径 substr(created_at,1,10) UTC。旧路径 GET /api/admin/usage-stats。
+      responses:
+        '200':
+          description: 用量聚合
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageStats'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/system/stats:
+    get:
+      tags: [Admin]
+      operationId: adminGetGlobalStats
+      summary: 全局计数快照
+      description: |
+        api_keys / users / providers 总数与今日请求数。
+        旧路径 GET /api/admin/stats;归入 /api/system/* 单例命名空间
+        (与 GET /api/system/version 同族)。
+      responses:
+        '200':
+          description: 全局计数
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalStats'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ===========================================================================
+  # Proxy tag — /v1 代理端点(2026-11-18 起进全量生成,混合宽松 schema)
+  # ===========================================================================
+  # 通用说明(每个端点 description 只写差异):
+  #   * 鉴权三选一:Authorization: Bearer sk-<key>(推荐)/ JWT /
+  #     x-api-key 头(Anthropic 客户端);sk- key 仅对 /v1 生效。
+  #   * 准入顺序:模型白名单 403 model_not_allowed → 余额 402
+  #     insufficient_quota → key 限额 429 rate_limit_error。
+  #   * 余额预检只查 >0 不预留,并发请求可能把余额扣成负数(有意取舍)。
+#   * 错误体按客户端协议原样返回(OpenAI/Anthropic 格式),非 problem+json;
+#     例外:401 由 auth 中间件在进入代理管线之前自产,是网关扁平体
+#     {error:"<code>", message}(error 为字符串),不是厂商格式(见 GatewayAuthError);
+#     上游 401/403 一律改写 502 upstream_error,绝不透传(防泄露渠道凭证状态)。
+  #   * 无可用渠道 503 provider_unavailable;多渠道 failover。
+  #   * 请求/响应 schema 一律 loose object:代理契约属各厂商,不镜像。
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        管理面(JWT)。签发于 POST /api/auth/login,携带 token_version;
+        改密/改角色后旧 JWT 全部失效。sk- API key 对 /api/** 一律无效。
+    apiKeyAuth:
+      # 建模为 http/bearer 而非 apiKey:服务端只认 "Bearer " 前缀
+      # (src/auth/mod.rs:303),apiKey 类型会让机械实现的客户端把裸 sk-key
+      # 放进 Authorization 头而吃 401 —— 类型必须与 wire 格式一致。
+      type: http
+      scheme: bearer
+      bearerFormat: sk-
+      description: |
+        仅 /v1 代理端点:`Authorization: Bearer sk-<key>`。wire 上与 JWT 同为
+        Bearer(凭证是网签发的 sk- key 而非 JWT;实现上 JWT 校验失败且路径
+        非 /api/ 时回退 key 查询)。**必须带 "Bearer " 前缀,裸 sk-key 会 401。**
+        Anthropic 客户端亦可用 `x-api-key: sk-<key>`(备选通道,本 scheme 不表达)。
+
+  parameters:
+    limit:
+      name: limit
+      in: query
+      description: |
+        分页大小;默认 50。**越界由服务端静默截断(clamp)到 1..=200,不报 400**
+        —— 刻意不在 schema 上放 minimum/maximum:生成客户端的运行时校验若把
+        越界拦成 400,与手写客户端被服务端 clamp 的行为互斥;两者必须同一口径,
+        这里取 0.4.x 现行为(clamp)。
+      schema:
+        type: integer
+        default: 50
+    offset:
+      name: offset
+      in: query
+      description: 分页偏移;默认 0
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      description: |
+        资源 ID:不透明字符串(2026-11-16 拍板,弃 int64——JS Number 仅 53 位
+        安全整数,int64 ID 会在浏览器/Node 客户端静默丢精度;Google AIP-140
+        亦要求 int64 JSON 序列化为 string。且 SurrealDB record ID 天生字符串,
+        两边兼容)。现网为 UUID;客户端不得解析其内部结构。
+      schema:
+        type: string
+
+  responses:
+    Unauthorized:
+      description: 未携带或无效凭证
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            invalid_token:
+              value:
+                type: about:blank
+                title: Unauthorized
+                status: 401
+                detail: Invalid or expired token
+                code: invalid_token
+    Forbidden:
+      description: 已认证但无权限(非 admin 访问管理面)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            forbidden:
+              value:
+                type: about:blank
+                title: Forbidden
+                status: 403
+                detail: 需要管理员权限
+                code: forbidden
+    NotFound:
+      description: 资源不存在;越权访问他人资源时也返回 404(不暴露存在性)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            not_found:
+              value:
+                type: about:blank
+                title: Not Found
+                status: 404
+                detail: 资源不存在
+                code: not_found
+    Conflict:
+      description: 唯一性冲突(username_exists / duplicate_key / duplicate_model)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            username_exists:
+              value:
+                type: about:blank
+                title: Conflict
+                status: 409
+                detail: 用户名已存在
+                code: username_exists
+    RateLimited:
+      description: 限流(内存滑动窗口,重启清零,尽力而为)
+      headers:
+        Retry-After:
+          description: |
+            建议重试等待秒数。目标态新增能力:现实现的登录/兑换 429 分支
+            不发送该头,impl 迁移时补上(见 api-mapping.md 全局语义变化 #12)。
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            rate_limited:
+              value:
+                type: about:blank
+                title: Too Many Requests
+                status: 429
+                detail: 失败次数过多,请稍后再试
+                code: rate_limited
+    InternalError:
+      description: 服务器内部错误(查询失败不静默返回空列表)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            internal_error:
+              value:
+                type: about:blank
+                title: Internal Server Error
+                status: 500
+                detail: 内部错误
+                code: internal_error
+
+  schemas:
+    # -------------------------------------------------------------------------
+    # 统一错误信封(管理面;定义一次,所有非 2xx 引用)
+    # -------------------------------------------------------------------------
+    Problem:
+      type: object
+      description: |
+        RFC 9457 problem+json 统一错误信封。`code` 是机器可读短码
+        (snake_case),管理面词表:
+
+        | 状态 | code |
+        |---|---|
+        | 400 | invalid_body, invalid_username, invalid_password, invalid_display_name, invalid_role, invalid_expires_at, invalid_success, invalid_amount, invalid_count, invalid_batch, invalid_status, invalid_code, invalid_model, invalid_price, invalid_name, invalid_base_url, invalid_provider_type, invalid_protocols, invalid_default_protocol, invalid_priority, invalid_weight, invalid_max_retries, invalid_timeout, invalid_channel_kind, invalid_api_keys, invalid_protocol, missing_config, missing_model, unsupported_protocol, no_fields_to_update, empty_batch, batch_too_large |
+        | 401 | invalid_token, unauthorized, invalid_credentials |
+        | 402 | insufficient_quota(仅 /v1,厂商格式) |
+        | 403 | forbidden, account_disabled, model_not_allowed(仅 /v1) |
+        | 404 | not_found |
+        | 409 | username_exists, duplicate_key, duplicate_model, not_unused, last_admin |
+        | 429 | rate_limited(/v1 厂商格式为 rate_limit_error,同义) |
+        | 500 | internal_error, query_failed, create_failed, update_failed, delete_failed, code_collision, hash_failed, token_creation_failed, duplicate_failed, redeem_failed |
+        | 502/503 | upstream_error, no_models, provider_unavailable |
+
+        /v1 代理端点**不**使用本信封(错误体按客户端协议原样返回),
+        见 ProxyError。
+      properties:
+        type:
+          type: string
+          format: uri
+          default: about:blank
+          description: 问题类型 URI;预留,当前恒为 about:blank
+        title:
+          type: string
+          description: 简短人类可读标题(HTTP 状态短语)
+        status:
+          type: integer
+          description: HTTP 状态码(与响应状态一致,便于日志聚合)
+        detail:
+          type: string
+          description: 人类可读详情(中文,面向管理员/前端用户)
+        code:
+          type: string
+          description: 机器可读短码(见上方词表)
+        instance:
+          type: string
+          description: 出现问题的请求 URI(可选)
+      required: [status, code]
+
+    ProxyError:
+      type: object
+      description: |
+        /v1 代理端点的错误体(**厂商格式,非 problem+json**,刻意不统一):
+        OpenAI 客户端收到 {error:{message,type,code}},Anthropic 客户端收到
+        {type:'error', error:{type, message}}。本 schema 仅声明"是个 JSON
+        对象",不镜像厂商契约(第二份真相必漂移)。
+        网关自产错误的短码(在厂商格式的 code/type 字段里):
+        model_not_allowed(403)/ insufficient_quota(402)/
+        rate_limit_error(429)/ provider_unavailable(503)/
+        upstream_error(502)。上游 401/403 绝不透传(统一改写 502)。
+        **例外:401 不走本形状** —— 由 auth 中间件在进入代理管线之前自产,
+        是网关扁平体(见 GatewayAuthError)。
+      additionalProperties: true
+
+    GatewayAuthError:
+      type: object
+      description: |
+        /v1 端点 401 的错误体:**网关扁平体,非厂商格式**(auth 中间件在
+        进入代理管线之前产生,src/auth/mod.rs:332-339、367-384)。
+        `error` 是**字符串短码,不是对象** —— 按厂商 SDK 的
+        error.message / error.code 解析路径会失败,消费者需对 401 单独分支。
+        短码取值:
+        * invalid_token —— Authorization: Bearer 路径:JWT 与 sk- key 均未通过;
+        * unauthorized —— 缺 Authorization 头,或 x-api-key 通道的 key 无效。
+      properties:
+        error:
+          type: string
+          enum: [invalid_token, unauthorized]
+          description: 机器可读短码(字符串)
+        message:
+          type: string
+      required: [error, message]
+      additionalProperties: false
+
+    # --------- Proxy 请求(混合宽松:核心字段 optional 类型化 + flatten)---------
+    # 纪律(见 Proxy tag):本组每个 schema 与所有嵌套 object 层必须显式
+    # additionalProperties: true——漏写的层不生成 #[serde(flatten)],
+    # 未知字段会在生成类型的反序列化中被静默丢弃。类型开放的字段
+    # (如 messages[].content 的 string|array 双态、Responses 的 input)
+    # 刻意不进核心字段,经 flatten 原样透传。
+    ChatCompletionRequest:
+      type: object
+      description: OpenAI chat/completions 请求(混合宽松;字段全 optional,
+        缺 model 等校验留在网关管线以保持厂商格式错误体)。
+      properties:
+        model:
+          type: string
+        stream:
+          type: boolean
+        messages:
+          type: array
+          description: 元素形态开放(role/content 双态与厂商扩展字段),不类型化。
+          items: {}
+      additionalProperties: true
+
+    MessagesRequest:
+      type: object
+      description: Anthropic Messages 请求(混合宽松;字段全 optional)。
+      properties:
+        model:
+          type: string
+        stream:
+          type: boolean
+        max_tokens:
+          type: integer
+        messages:
+          type: array
+          description: 元素形态开放(content block 数组含厂商扩展),不类型化。
+          items: {}
+      additionalProperties: true
+
+    ResponsesRequest:
+      type: object
+      description: OpenAI Responses 请求(混合宽松;input 为 string|array
+        双态,刻意经 flatten 透传,不类型化)。
+      properties:
+        model:
+          type: string
+        stream:
+          type: boolean
+        instructions:
+          type: string
+      additionalProperties: true
+
+    EmbeddingsRequest:
+      type: object
+      description: embeddings 请求(混合宽松;input 为 string|array 双态,
+        经 flatten 透传)。
+      properties:
+        model:
+          type: string
+      additionalProperties: true
+
+    ModerationsRequest:
+      type: object
+      description: moderations 请求(混合宽松;input 双态,经 flatten 透传)。
+      properties:
+        model:
+          type: string
+      additionalProperties: true
+
+    ImagesRequest:
+      type: object
+      description: images/generations 请求(混合宽松)。
+      properties:
+        model:
+          type: string
+        prompt:
+          type: string
+        size:
+          type: string
+        n:
+          type: integer
+      additionalProperties: true
+
+    RerankRequest:
+      type: object
+      description: rerank 请求(混合宽松)。
+      properties:
+        model:
+          type: string
+        query:
+          type: string
+        documents:
+          type: array
+          items: {}
+      additionalProperties: true
+
+    ProxyJsonObject:
+      type: object
+      description: |
+        厂商契约的请求/响应体,loose 通用对象(代理端点不镜像 schema;
+        生成器白名单排除 Proxy tag,不会对其启用运行时校验)。
+      additionalProperties: true
+
+    # -------------------------------------------------------------------------
+    # 通用小件
+    # -------------------------------------------------------------------------
+    VersionInfo:
+      type: object
+      properties:
+        version:
+          type: string
+      required: [version]
+
+    # 用户 -------------------------------------------------------------------
+    User:
+      type: object
+      description: 用户资源(不含密码哈希;token_version 不出参)
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        display_name:
+          type: string
+        role:
+          type: string
+          enum: [admin, user]
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, username, display_name, role, is_active, created_at, updated_at]
+
+    UserWithBalance:
+      allOf:
+        - $ref: '#/components/schemas/User'
+        - type: object
+          properties:
+            balance:
+              type: number
+              format: double
+              description: 余额(元)
+          required: [balance]
+
+    UserWithBalancePage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserWithBalance'
+        total:
+          type: integer
+          format: int64
+      required: [items, total]
+
+    LoginRequest:
+      type: object
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+      required: [username, password]
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: JWT(含 token_version)
+        user:
+          $ref: '#/components/schemas/User'
+      required: [token, user]
+
+    CreateUserRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: trim 后 1-64 字符
+        password:
+          type: string
+          description: 8-256 字节,非全空白
+        display_name:
+          type: string
+          maxLength: 64
+        role:
+          type: string
+          enum: [admin, user]
+          default: user
+      required: [username, password]
+
+    UpdateUserRequest:
+      type: object
+      description: 部分更新;空对象(无任何字段)→ 400 no_fields_to_update
+      minProperties: 1
+      properties:
+        display_name:
+          type: string
+          maxLength: 64
+        password:
+          type: string
+          description: 改密后 token_version+1,该用户已签发 JWT 全部失效
+        is_active:
+          type: boolean
+        role:
+          type: string
+          enum: [admin, user]
+
+    BatchCreateUsersRequest:
+      type: object
+      properties:
+        users:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/BatchCreateUserItem'
+      required: [users]
+
+    BatchCreateUserItem:
+      type: object
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          description: 可省略;随机生成且仅在 per-item 结果返回一次
+        display_name:
+          type: string
+        role:
+          type: string
+          enum: [admin, user]
+      required: [username]
+
+    BatchUsersResult:
+      type: object
+      description: |
+        批量创建的逐项报告 + 计数摘要(与 ProviderBatchResult 口径对称);
+        整体 200,部分失败不影响其余项。前端用 created/failed 做 toast 汇总,
+        用 results 逐项渲染。
+      properties:
+        created:
+          type: integer
+          description: 成功创建数
+        failed:
+          type: integer
+          description: 失败数
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchUserItemResult'
+      required: [created, failed, results]
+
+    BatchUserItemResult:
+      type: object
+      properties:
+        username:
+          type: string
+        ok:
+          type: boolean
+        id:
+          type: string
+          description: 成功时的用户 ID
+        role:
+          type: string
+          description: 成功时回显实际生效角色
+        password:
+          type: string
+          description: 仅在密码为随机生成时返回一次
+        code:
+          type: string
+          description: 失败短码(如 invalid_username / invalid_role / username_exists / hash_failed)
+        message:
+          type: string
+      required: [username, ok]
+
+    # API key ------------------------------------------------------------------
+    ApiKey:
+      type: object
+      description: 列表/更新视角的 API key;key 恒为掩码 sk-**** + 后 4 位
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        key:
+          type: string
+          description: 掩码(如 sk-****a1b2);完整明文仅创建响应返回一次
+        name:
+          type: string
+        is_active:
+          type: boolean
+        last_used_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        expires_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: null = 永不过期
+        models:
+          type: array
+          items:
+            type: string
+          description: 模型白名单;空数组 = 不限
+        rate_limit_rpm:
+          type: integer
+          format: int64
+          description: 每分钟请求上限;0 = 不限
+        quota_daily_tokens:
+          type: integer
+          format: int64
+          description: 每日 token 额度;0 = 不限
+        max_concurrent:
+          type: integer
+          format: int64
+          description: 并发在途请求上限;0 = 不限
+        created_at:
+          type: string
+          format: date-time
+      required: [id, user_id, key, name, is_active, models, created_at]
+
+    ApiKeyCreated:
+      allOf:
+        - $ref: '#/components/schemas/ApiKey'
+        - type: object
+          description: 创建响应:key 为完整明文(sk-&lt;hex&gt;&lt;hex&gt;),仅此一次返回
+          properties:
+            key:
+              type: string
+              description: 完整明文 key,仅创建响应返回一次;此后仅可见掩码
+
+    ApiKeyPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiKey'
+        total:
+          type: integer
+          format: int64
+      required: [items, total]
+
+    CreateApiKeyRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        expires_at:
+          # 不加 format: date-time —— 空串(= 永不过期)不满足 date-time,
+          # 生成器自带的 jsonschema 运行时校验会拒发;与 UpdateApiKeyRequest 同构。
+          type: string
+          description: |
+            过期时间;**空串/缺省 = 永不过期**。非空值必须可解析且在未来,
+            否则 400 invalid_expires_at。解析口径宽松(parse_expiry):
+            RFC3339,或 YYYY-MM-DD[ HH:MM[:SS]]、YYYY-MM-DDTHH:MM。
+        models:
+          type: array
+          items:
+            type: string
+        rate_limit_rpm:
+          type: integer
+          format: int64
+          minimum: 0
+        quota_daily_tokens:
+          type: integer
+          format: int64
+          minimum: 0
+        max_concurrent:
+          type: integer
+          format: int64
+          minimum: 0
+
+    UpdateApiKeyRequest:
+      type: object
+      description: 部分更新;expires_at 传空串 = 清除过期时间;无字段 400
+      minProperties: 1
+      properties:
+        name:
+          type: string
+        is_active:
+          type: boolean
+        expires_at:
+          type: string
+          description: |
+            未来时间(解析口径同创建:RFC3339 或宽松格式);**空串 = 清除**
+            (永不过期)。不加 format: date-time 的理由见创建请求同字段。
+        models:
+          type: array
+          items:
+            type: string
+        rate_limit_rpm:
+          type: integer
+          format: int64
+          minimum: 0
+        quota_daily_tokens:
+          type: integer
+          format: int64
+          minimum: 0
+        max_concurrent:
+          type: integer
+          format: int64
+          minimum: 0
+
+    # 日志 ----------------------------------------------------------------------
+    RequestLog:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type:
+            - integer
+            - 'null'
+          format: int64
+        api_key_id:
+          type:
+            - integer
+            - 'null'
+          format: int64
+        provider_id:
+          type:
+            - integer
+            - 'null'
+          format: int64
+        username:
+          type:
+            - string
+            - 'null'
+          description: LEFT JOIN users;用户已删除时 null(前端显示"已删除")
+        provider_name:
+          type:
+            - string
+            - 'null'
+          description: LEFT JOIN providers;渠道已删除时 null
+        model:
+          type: string
+        request_type:
+          type: string
+          description: 协议(openai / anthropic / responses / passthrough)
+        prompt_tokens:
+          type: integer
+          format: int64
+        completion_tokens:
+          type: integer
+          format: int64
+        total_tokens:
+          type: integer
+          format: int64
+        cached_tokens:
+          type: integer
+          format: int64
+        latency_ms:
+          type: integer
+          format: int32
+        status_code:
+          type: integer
+          format: int32
+        success:
+          type: boolean
+        error_message:
+          type:
+            - string
+            - 'null'
+        cost:
+          type: number
+          format: double
+          description: 费用(元);库内微元换算属 impl 细节
+        created_at:
+          type: string
+          format: date-time
+      required: [id, model, request_type, success, cost, created_at]
+
+    LogPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RequestLog'
+        total:
+          type: integer
+          format: int64
+      required: [items, total]
+
+    LogStats:
+      type: object
+      properties:
+        total_requests:
+          type: integer
+          format: int64
+        total_tokens:
+          type: integer
+          format: int64
+        avg_latency_ms:
+          type: integer
+          format: int64
+        success_rate:
+          type: number
+          description: 成功率百分数,两位小数(如 98.75)
+        total_cost:
+          type: number
+          format: double
+          description: 合计费用(元)
+      required: [total_requests, total_tokens, avg_latency_ms, success_rate, total_cost]
+
+    Wallet:
+      type: object
+      description: 本人钱包(金额均元;日序列合并明细表与日聚合表,不重复计数)
+      properties:
+        balance:
+          type: number
+          format: double
+        today:
+          type: object
+          properties:
+            cost:
+              type: number
+              format: double
+            requests:
+              type: integer
+              format: int64
+        week:
+          type: object
+          properties:
+            cost:
+              type: number
+              format: double
+            requests:
+              type: integer
+              format: int64
+        month:
+          type: object
+          properties:
+            cost:
+              type: number
+              format: double
+            requests:
+              type: integer
+              format: int64
+            tokens:
+              type: integer
+              format: int64
+        daily:
+          type: array
+          maxItems: 30
+          description: 近 30 天日序列(缺日补零)
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              cost:
+                type: number
+                format: double
+              tokens:
+                type: integer
+                format: int64
+              requests:
+                type: integer
+                format: int64
+        top_models:
+          type: array
+          maxItems: 8
+          description: 近 30 天按费用排序的模型分布
+          items:
+            type: object
+            properties:
+              model:
+                type: string
+              cost:
+                type: number
+                format: double
+              requests:
+                type: integer
+                format: int64
+      required: [balance, today, week, month, daily, top_models]
+
+    UsageStats:
+      type: object
+      description: 管理仪表盘用量聚合(UTC 日期口径)
+      properties:
+        today:
+          type: object
+          properties:
+            requests:
+              type: integer
+              format: int64
+            tokens:
+              type: integer
+              format: int64
+        week:
+          type: object
+          properties:
+            requests:
+              type: integer
+              format: int64
+            tokens:
+              type: integer
+              format: int64
+        month:
+          type: object
+          properties:
+            requests:
+              type: integer
+              format: int64
+            tokens:
+              type: integer
+              format: int64
+        daily:
+          type: array
+          maxItems: 30
+          description: 30 天日序列(缺日补零)
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              requests:
+                type: integer
+                format: int64
+              tokens:
+                type: integer
+                format: int64
+              avg_latency_ms:
+                type: integer
+                format: int64
+              success_rate:
+                type: number
+        top_models:
+          type: array
+          maxItems: 8
+          description: 近 30 天按请求数排序
+          items:
+            type: object
+            properties:
+              model:
+                type: string
+              requests:
+                type: integer
+                format: int64
+              tokens:
+                type: integer
+                format: int64
+      required: [today, week, month, daily, top_models]
+
+    GlobalStats:
+      type: object
+      properties:
+        api_keys:
+          type: integer
+          format: int64
+        users:
+          type: integer
+          format: int64
+        providers:
+          type: integer
+          format: int64
+        requests_today:
+          type: integer
+          format: int64
+      required: [api_keys, users, providers, requests_today]
+
+    # 价格 ----------------------------------------------------------------------
+    Price:
+      type: object
+      description: 价格条目;单位:每 1M tokens(元)
+      properties:
+        id:
+          type: string
+        model:
+          type: string
+          description: 精确模型名或末尾通配(如 gpt-*;只允许末尾单个 * 且前缀非空)
+        prompt_price:
+          type: number
+          format: double
+        completion_price:
+          type: number
+          format: double
+        cached_price:
+          type:
+            - number
+            - 'null'
+          format: double
+          description: null = 缓存 token 按输入价计
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, model, prompt_price, completion_price, created_at, updated_at]
+
+    PricePage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Price'
+        total:
+          type: integer
+          format: int64
+      required: [items, total]
+
+    UpsertPriceRequest:
+      type: object
+      description: |
+        创建:model 必填;价格缺省为 0。
+        更新:部分语义;cached_price 三态 —— 字段缺省 = 不改动,
+        显式 null = 清回 NULL,数值 = 更新(optional + nullable 双层表达)。
+      properties:
+        model:
+          type: string
+        prompt_price:
+          type: number
+          format: double
+          minimum: 0
+        completion_price:
+          type: number
+          format: double
+          minimum: 0
+        cached_price:
+          type:
+            - number
+            - 'null'
+          format: double
+          minimum: 0
+          description: 三态字段(缺省/显式 null/数值),见 schema 描述
+
+    AvailablePrice:
+      type: object
+      description: 在售模型的具体单价(健康渠道 + find_price 展开通配);未定价三价全 null
+      properties:
+        model:
+          type: string
+        prompt_price:
+          type:
+            - number
+            - 'null'
+          format: double
+        completion_price:
+          type:
+            - number
+            - 'null'
+          format: double
+        cached_price:
+          type:
+            - number
+            - 'null'
+          format: double
+      required: [model]
+
+    AvailablePricePage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AvailablePrice'
+        total:
+          type: integer
+          format: int64
+      required: [items, total]
+
+    # 余额流水 ------------------------------------------------------------------
+    BalanceTransaction:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        username:
+          type:
+            - string
+            - 'null'
+          description: LEFT JOIN;用户已删除时 null
+        amount:
+          type: number
+          format: double
+          description: 正=入账,负=扣减(元)
+        balance_after:
+          type: number
+          format: double
+          description: 交易后余额(元)
+        kind:
+          type: string
+          enum: [recharge, adjust]
+          description: recharge=充值/兑换;adjust=管理员负向调账
+        note:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      required: [id, user_id, amount, balance_after, kind, created_at]
+
+    BalanceTransactionPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BalanceTransaction'
+        total:
+          type: integer
+          format: int64
+      required: [items, total]
+
+    AdjustBalanceRequest:
+      type: object
+      properties:
+        amount:
+          type: number
+          format: double
+          description: 正=充值,负=扣减(元);必须非零有限且 ≥1 微元
+        note:
+          type: string
+      required: [amount]
+
+    AdjustBalanceResult:
+      type: object
+      properties:
+        balance:
+          type: number
+          format: double
+          description: 调账后余额(元)
+        kind:
+          type: string
+          enum: [recharge, adjust]
+      required: [balance, kind]
+
+    # 兑换码 --------------------------------------------------------------------
+    RedemptionCode:
+      type: object
+      description: 永不出库明文/哈希;expired 是按时间计算的显示态(status 本身保持 unused)
+      properties:
+        id:
+          type: string
+        code_masked:
+          type: string
+          description: AK-****-****-****-XXXX 形式掩码
+        amount:
+          type: number
+          format: double
+          description: 面值(元)
+        batch:
+          type: string
+        status:
+          type: string
+          enum: [unused, used, disabled]
+        used_by:
+          type:
+            - string
+            - 'null'
+          description: 兑换者用户名(LEFT JOIN;已删除为 null)
+        used_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        expires_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: null = 永不过期
+        note:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expired:
+          type: boolean
+          description: 计算态:status=unused 且 expires_at <= now
+      required: [id, code_masked, amount, batch, status, expired, created_at]
+
+    RedemptionCodePage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RedemptionCode'
+        total:
+          type: integer
+          format: int64
+      required: [items, total]
+
+    CreateRedemptionCodesRequest:
+      type: object
+      properties:
+        count:
+          type: integer
+          minimum: 1
+          maximum: 500
+        amount:
+          type: number
+          format: double
+          description: 单张面值(元),≤1,000,000 且 ≥1 微元
+        batch:
+          type: string
+          maxLength: 64
+          description: 批次名(必填,trim 后非空)
+        expires_at:
+          type: string
+          description: |
+            只接受 'YYYY-MM-DD'(补 23:59:59)或 'YYYY-MM-DD HH:MM:SS'(UTC);
+            拒绝 RFC3339 'T' 格式(与 SQLite datetime 字符串比较语义有关)。
+            空/缺省 = 永不过期。
+        note:
+          type: string
+      required: [count, amount, batch]
+
+    CreatedRedemptionCodes:
+      type: object
+      description: codes 为完整明文,仅此一次返回;库中只存 sha256 与后缀
+      properties:
+        batch:
+          type: string
+        amount:
+          type: number
+          format: double
+        count:
+          type: integer
+        codes:
+          type: array
+          items:
+            type: string
+          description: 明文码(AK-XXXX-XXXX-XXXX-XXXX)
+      required: [batch, amount, count, codes]
+
+    RedeemRequest:
+      type: object
+      properties:
+        code:
+          type: string
+          description: 输入允许小写/多空格;服务端去空白 + 转大写
+      required: [code]
+
+    RedemptionResult:
+      type: object
+      properties:
+        amount:
+          type: number
+          format: double
+          description: 本次兑换面值(元)
+        balance:
+          type: number
+          format: double
+          description: 兑换后余额(元)
+      required: [amount, balance]
+
+    # 渠道 ----------------------------------------------------------------------
+    Provider:
+      type: object
+      description: |
+        渠道配置 + 运行态。api_key 永不出参(库中 enc:v1: 静态加密);
+        proxy_url 出参脱敏(可能内嵌凭证,只回显 host:port)。
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        provider_type:
+          type: string
+          enum: [openai, anthropic, custom]
+          description: 刻意不含 azure(apply_auth 不支持 api-key 头)
+        openai_base_url:
+          type: string
+          format: uri
+        anthropic_base_url:
+          type: string
+          description: 空 = 回退 openai_base_url(协议专属地址为空时互为回退)
+        models:
+          type: array
+          items:
+            type: string
+        priority:
+          type: integer
+          description: 0..=100,大者优先
+        weight:
+          type: number
+          format: double
+          description: 同优先级内的加权随机,0.1..=1000
+        is_active:
+          type: boolean
+        health_status:
+          type: string
+          enum: [healthy, degraded, down, unknown]
+        latency_ms:
+          type: number
+          format: double
+          description: 选路 EMA 延迟(健康探测刻意不写入)
+        error_rate:
+          type: number
+          format: double
+        last_health_check:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        max_retries:
+          type: integer
+          description: 0..=10
+        timeout_secs:
+          type: integer
+          description: 1..=600(0 = 无超时会卡死探针,拒绝)
+        proxy_url:
+          type: string
+          description: 出参脱敏(只回显 host:port);入参空串(PATCH)= 清除代理
+        model_mapping:
+          type: object
+          additionalProperties:
+            type: string
+          description: '{"请求模型": "上游模型"}'
+        disabled_reason:
+          type: string
+          description: 自动禁用原因;is_active=true 时清空
+        protocols:
+          type: array
+          items:
+            type: string
+            enum: [openai, anthropic, responses]
+          description: 声明协议;responses 必须伴随 openai 或 anthropic(跨字段约束)
+        default_protocol:
+          type: string
+          enum: [openai, anthropic]
+          description: 上行流量协议;必须已在 protocols 内(responses 不可作默认)
+        note:
+          type: string
+        website_url:
+          type: string
+        channel_kind:
+          type: string
+          description: 适配器 kind(见 GET /api/channel-kinds);空 = generic
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, name, provider_type, openai_base_url, models, priority, weight, is_active, health_status, created_at, updated_at]
+
+    ProviderPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Provider'
+        total:
+          type: integer
+          format: int64
+      required: [items, total]
+
+    CreateProviderRequest:
+      type: object
+      description: |
+        跨字段约束见 POST /api/providers 的 description(协议/base_url 联动、
+        provider_type 白名单、channel_kind 注册表校验)。
+      properties:
+        name:
+          type: string
+        provider_type:
+          type: string
+          enum: [openai, anthropic, custom]
+        openai_base_url:
+          type: string
+        anthropic_base_url:
+          type: string
+        api_key:
+          type: string
+          description: 入库静态加密(enc:v1:);key_hash 用于重复检测
+        models:
+          type: array
+          items:
+            type: string
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 100
+        weight:
+          type: number
+          format: double
+        max_retries:
+          type: integer
+          minimum: 0
+          maximum: 10
+        timeout_secs:
+          type: integer
+          minimum: 1
+          maximum: 600
+        proxy_url:
+          type: string
+        model_mapping:
+          type: object
+          additionalProperties:
+            type: string
+        protocols:
+          type: array
+          items:
+            type: string
+            enum: [openai, anthropic, responses]
+        default_protocol:
+          type: string
+          enum: [openai, anthropic]
+        note:
+          type: string
+        website_url:
+          type: string
+        channel_kind:
+          type: string
+      required: [name, api_key, models]
+
+    UpdateProviderRequest:
+      type: object
+      description: |
+        部分更新;跨字段约束按"库存值 + 本次改动"的最终状态校验
+        (防止造出必失败渠道)。proxy_url 传空串 = 清除代理。
+        无任何字段 → 400 no_fields_to_update。
+      minProperties: 1
+      properties:
+        name:
+          type: string
+        provider_type:
+          type: string
+          enum: [openai, anthropic, custom]
+        openai_base_url:
+          type: string
+        anthropic_base_url:
+          type: string
+        api_key:
+          type: string
+          description: 换 key 时排除自身做重复检测,冲突 409
+        models:
+          type: array
+          items:
+            type: string
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 100
+        weight:
+          type: number
+          format: double
+        is_active:
+          type: boolean
+          description: true 顺带清自动禁用状态(disabled_reason、consecutive_failures)
+        max_retries:
+          type: integer
+          minimum: 0
+          maximum: 10
+        timeout_secs:
+          type: integer
+          minimum: 1
+          maximum: 600
+        proxy_url:
+          type: string
+          description: 空串 = 清除代理
+        model_mapping:
+          type: object
+          additionalProperties:
+            type: string
+        protocols:
+          type: array
+          items:
+            type: string
+            enum: [openai, anthropic, responses]
+        default_protocol:
+          type: string
+          enum: [openai, anthropic]
+        note:
+          type: string
+        website_url:
+          type: string
+        channel_kind:
+          type: string
+
+    CreateProvidersBatchRequest:
+      type: object
+      description: |
+        shared 为单个创建请求的扁平展开(name 为基础名,自动编号 -01..-N;
+        shared.api_key 被忽略,逐 key 覆盖)+ api_keys。
+      properties:
+        name:
+          type: string
+        provider_type:
+          type: string
+          enum: [openai, anthropic, custom]
+        openai_base_url:
+          type: string
+        anthropic_base_url:
+          type: string
+        models:
+          type: array
+          items:
+            type: string
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 100
+        weight:
+          type: number
+          format: double
+        max_retries:
+          type: integer
+          minimum: 0
+          maximum: 10
+        timeout_secs:
+          type: integer
+          minimum: 1
+          maximum: 600
+        proxy_url:
+          type: string
+        model_mapping:
+          type: object
+          additionalProperties:
+            type: string
+        protocols:
+          type: array
+          items:
+            type: string
+            enum: [openai, anthropic, responses]
+        default_protocol:
+          type: string
+          enum: [openai, anthropic]
+        note:
+          type: string
+        website_url:
+          type: string
+        channel_kind:
+          type: string
+        api_keys:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: string
+            minLength: 1
+          description: 1..=100 个非空 key;批内重复归入失败组
+      required: [name, models, api_keys]
+
+    ProviderBatchResult:
+      type: object
+      properties:
+        created:
+          type: integer
+          description: 成功创建数
+        failed:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchFailureItem'
+        providers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Provider'
+      required: [created, failed, providers]
+
+    BatchFailureItem:
+      type: object
+      description: 批量操作中的单项失败(字段名由旧 error 统一为 code,与 Problem 对齐)
+      properties:
+        index:
+          type: integer
+          description: 在提交数组中的下标(0 起)
+        status:
+          type: integer
+          description: 该项若是独立请求会得到的状态码
+        code:
+          type: string
+          description: 失败短码(如 duplicate_key)
+        message:
+          type: string
+      required: [index, status, code]
+
+    ProviderTestResult:
+      type: object
+      description: 健康探测结果(已更新 health_status / last_health_check;不更新 EMA 延迟)
+      properties:
+        provider_id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [healthy, degraded, down, unknown]
+        latency_ms:
+          type: number
+          format: double
+        message:
+          type: string
+      required: [provider_id, name, status, latency_ms, message]
+
+    FetchModelsRequest:
+      type: object
+      description: 编辑态回退:api_key / proxy_url 留空且带 provider_id 时取库存值
+      properties:
+        base_url:
+          type: string
+        api_key:
+          type: string
+        protocol:
+          type: string
+          enum: [openai, anthropic]
+        provider_type:
+          type: string
+          description: 旧客户端回退字段,protocol 缺省时使用
+        proxy_url:
+          type: string
+        provider_id:
+          type: string
+          description: 编辑已有渠道时传入,用于回退库存密钥/代理
+        channel_kind:
+          type: string
+      required: [base_url]
+
+    FetchedModels:
+      type: object
+      properties:
+        models:
+          type: array
+          items:
+            type: string
+      required: [models]
+
+    ModelTestRequest:
+      type: object
+      properties:
+        model:
+          type: string
+        message:
+          type: string
+          description: 单条用户消息(缺省 'Say OK');messages 提供时被覆盖
+        protocol:
+          type: string
+          enum: [openai, anthropic, responses]
+          description: 必须是渠道已声明协议,否则 400 unsupported_protocol;缺省用渠道默认
+        messages:
+          type: array
+          items:
+            type: object
+            properties:
+              role:
+                type: string
+              content:
+                type: string
+            required: [role, content]
+        stream:
+          type: boolean
+          default: false
+          description: true 走 SSE 路径(text/event-stream)
+      required: [model]
+
+    ModelTestResult:
+      type: object
+      description: |
+        业务失败也是成功响应:ok=false 时错误信息在 status / error 字段里
+        (HTTP 层只表达"测试已执行")。结果已持久化到 model_health。
+      properties:
+        ok:
+          type: boolean
+        latency_ms:
+          type: number
+          format: double
+        protocol:
+          type: string
+        stream:
+          type: boolean
+        snippet:
+          type: string
+          description: 流式模式下截取的响应片段
+        response:
+          type: string
+          description: 非流式模式下的模型回复
+        status:
+          type:
+            - integer
+            - 'null'
+          description: 失败时的上游 HTTP 状态
+        error:
+          type:
+            - string
+            - 'null'
+          description: 失败原因
+      required: [ok, latency_ms, protocol, stream]
+
+    ModelHealth:
+      type: object
+      description: 每 (provider_id, model) 对的最近一次实测
+      properties:
+        provider_id:
+          type: string
+        model:
+          type: string
+        status:
+          type: string
+          enum: [healthy, unhealthy]
+          description: 最近一次实测结果
+        latency_ms:
+          type: number
+          format: double
+        error:
+          type: string
+          description: 失败原因;成功为空串
+        checked_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+      required: [provider_id, model, status, latency_ms, checked_at]
+
+    ModelHealthPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelHealth'
+        total:
+          type: integer
+          format: int64
+      required: [items, total]
+
+    ChannelKind:
+      type: object
+      description: 渠道适配器描述(编译期静态注册,非插件)
+      properties:
+        kind:
+          type: string
+          description: 写入 providers.channel_kind 的稳定标识(不可改名)
+        label:
+          type: string
+          description: 管理端展示名
+        description:
+          type: string
+        experimental:
+          type: boolean
+          description: 占位/实验性实现,管理端会加提示
+      required: [kind, label, experimental]
+
+    ChannelKindPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChannelKind'
+        total:
+          type: integer
+          format: int64
+      required: [items, total]
+
+    # /v1 models(网关聚合产出,轻量类型)------------------------------------
+    ModelList:
+      type: object
+      description: OpenAI list 格式;owned_by 恒为 'aikun'(网关聚合)
+      properties:
+        object:
+          type: string
+          enum: [list]
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              object:
+                type: string
+                enum: [model]
+              created:
+                type: integer
+                format: int64
+              owned_by:
+                type: string
+            required: [id, object]
+      required: [object, data]

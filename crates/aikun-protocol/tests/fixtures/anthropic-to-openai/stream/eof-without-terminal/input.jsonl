@@ -1,0 +1,12 @@
+// 构造依据:手写样本(非抓包),按 Anthropic Messages 流式线协议形状撰写。
+// 输入 = 上游 SSE 事件序列(每行一个 {event, data})。
+// 本用例覆盖:thinking 块增量(thinking_delta → reasoning_content)、
+// signature_delta 与 ping 无 OpenAI 对应而被丢弃,以及 EOF 无
+// message_delta / message_stop 的收尾——不伪造 finish_reason/usage,
+// 仅由 finish() 补 [DONE]。
+{"event": "message_start", "data": {"type": "message_start", "message": {"id": "msg_an3", "type": "message", "role": "assistant", "model": "claude-3-5-sonnet-20241022", "content": [], "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 9, "output_tokens": 1}}}}
+{"event": "content_block_start", "data": {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}}
+{"event": "content_block_delta", "data": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "hmm"}}}
+{"event": "content_block_delta", "data": {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}}
+{"event": "content_block_stop", "data": {"type": "content_block_stop", "index": 0}}
+{"event": "ping", "data": {"type": "ping"}}

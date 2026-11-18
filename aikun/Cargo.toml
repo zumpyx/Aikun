@@ -1,0 +1,77 @@
+[package]
+name = "aikun"
+# 0.5.0:管理面 API spec-first 迁移全部批次完成(plan 步骤 6 验收末条:
+# GET /api/system/version 主次版本 ≥ 0.5,按 spec 生成的客户端门禁才
+# 不会拒绝本二进制;api-mapping 备注 11)。发布整理仍是 roadmap 阶段 4。
+version = "0.7.0"
+edition = "2024"
+description = "A lightweight AI gateway with multi-provider aggregation, failover, and routing optimization"
+# 二进制 crate:装配与运行时(pipeline/channel/billing/api/db);结构见 docs/architecture-v0.5.md
+
+[dependencies]
+# 协议转换 crate(本仓库)
+aikun-protocol = { path = "../crates/aikun-protocol" }
+aikun-channels = { path = "../crates/aikun-channels" }
+# 管理面 API(Auth/User/Admin tag):生成脚手架 + 业务实现;装配见 main.rs
+aikun-openapi = { path = "../crates/aikun-openapi" }
+aikun-admin = { path = "../crates/aikun-admin" }
+# 仓储层(能力 trait + SQLite 实现):连接池/schema/行映射/静态加密/
+# 口令哈希/默认价格播种,plan 步骤 8 起 src/db 与 src/models 逐步吸收
+aikun-store = { path = "../crates/aikun-store" }
+# Web framework
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+# main.rs 的端口适配器实现 aikun-admin 的 async_trait 端口,与 aikun-admin
+# 同版本;阶段 S 起 Surreal 域 trait 也用 async_trait
+async-trait = "0.1"
+
+# 新记录 record id(渠道等;迁移旧行沿用旧 uuid,docs/surreal-migration.md §三)
+ulid = "1"
+
+# 响应缓存键哈希(src/cache)
+sha2 = "0.10"
+
+# Auth
+jsonwebtoken = "9"
+rand = "0.9"
+
+# HTTP client(rustls 替代系统 OpenSSL,便于静态构建)
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "socks", "rustls-tls"] }
+
+# Streaming (SSE)
+futures-util = "0.3"
+async-stream = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+# CancellationToken:关停时主动收尾在途流式请求(先记账再退出)
+tokio-util = "0.7"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 管线统一错误形状(pipeline/error.rs,GatewayError)
+thiserror = "2"
+
+# Config
+dotenvy = "0.15"
+
+[dev-dependencies]
+# E2E:拉起真实二进制 + axum mock 上游(tests/);检查通道为管理面 API,
+# 不含数据库直连依赖(阶段 S,docs/surreal-migration.md §七)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+axum = { version = "0.8", features = ["macros"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+tempfile = "3"
+jsonwebtoken = "9"
+

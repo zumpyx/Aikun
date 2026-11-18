@@ -25,9 +25,10 @@ services:
       AIKUN_JWT_SECRET: ${AIKUN_JWT_SECRET:?请在 .env 中设置 AIKUN_JWT_SECRET}
       # 容器内网络/存储拓扑固定,不能沿用 .env 里的本地开发值
       # (environment 优先级高于 env_file,这里强制覆盖):
-      # 必须监听 0.0.0.0 才能接受宿主机端口转发;库文件必须落在 /data 卷中。
+      # 必须监听 0.0.0.0 才能接受宿主机端口转发;嵌入式 SurrealKV 数据
+      # 目录必须落在 /data 卷中(阶段 S 默认切换)。
       AIKUN_HOST: 0.0.0.0:3000
-      AIKUN_DATABASE_URL: sqlite:///data/aikun.db?mode=rwc
+      AIKUN_SURREAL_URL: surrealkv:///data/aikun.surreal
       # 其余配置项见 env.example(全部 AIKUN_ 前缀),写进 .env 即生效,
       # 也可在这里直接取消注释覆盖:
       # AIKUN_LOG_RETENTION_DAYS: "30"
@@ -35,7 +36,8 @@ services:
       # AIKUN_CORS_ALLOWED_ORIGINS: https://your-domain.example
       # AIKUN_TRUST_X_FORWARDED_FOR: "1"   # 仅当位于反向代理之后
     volumes:
-      # SQLite 数据库直接落在项目目录 ./data/aikun.db,备份即复制该文件
+      # 嵌入式 SurrealKV 数据目录落在项目目录 ./data/aikun.surreal/
+      # 备份:停机后整目录拷贝,或用 surreal export(见 README 数据与备份)
       - ./data:/data
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]

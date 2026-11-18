@@ -20,7 +20,9 @@
 - **计费与兑换码**:按模型价格表实时计费(整数微元记账,无浮点漂移);余额不足即 402 拒绝请求;管理员可批量生成兑换码,用户在钱包页自助充值,并查看当前在售模型的只读价格
 - **Key 限额**:每把 API Key 可独立配置每分钟请求数、每日 Token 额度与并发请求上限
 - **健康观测**:渠道健康检查(默认每 30 秒 ping 一次)+ 模型级测试矩阵(每 30 分钟自动探测,绿/红/灰小方格一目了然),也可手动单点测试或一键全测
-- **轻量稳定**:Rust 编写,单二进制内嵌管理前端与 SQLite,无外部服务依赖;musl 静态编译,解压即跑
+- **渠道适配器**:每种上游是一个渠道适配器(`ChannelAdapter`),URL、鉴权、请求/响应修补都在适配器里;兼容 OpenAI/Anthropic 的上游直接用「通用」类型,特殊上游(如 WorkBuddy、Qoder,目前为占位实现)新增一个文件即可接入,详见 [docs/refactor-plan.md](docs/refactor-plan.md)
+- **响应缓存(可选)**:非流式请求的网关侧响应缓存,默认关闭;进程内内存后端(零外部依赖),按用户隔离、命中照常计费
+- **轻量稳定**:Rust 编写,单二进制内嵌管理前端与数据库(嵌入式 SurrealDB/SurrealKV),无外部服务依赖;musl 静态编译,解压即跑
 - **安全默认**:API Key 哈希存储(明文仅在创建时展示一次)、JWT 改密即失效、登录限流、CSP / CORS 白名单、渠道凭证脱敏回显
 
 ## 预设渠道
@@ -82,7 +84,7 @@ docker run -d --name aikun --restart unless-stopped \
   ghcr.io/zumpyx/aikun:latest
 ```
 
-容器内配置通过 `AIKUN_*` 环境变量注入(见下方配置表),SQLite 数据库直接落在 `./data/aikun.db`(bind 挂载,备份即复制该文件),容器默认监听 `0.0.0.0:3000`,宿主机端口改 `docker-compose.yml` 端口映射左侧即可。`--user`/compose 的 `user:` 用于让容器以宿主机用户身份写入 `./data`,uid 非 1000 时请对应修改。本地构建镜像:`docker compose build`。
+容器内配置通过 `AIKUN_*` 环境变量注入(见下方配置表),嵌入式 SurrealDB 数据目录直接落在 `./data/aikun.surreal/`(bind 挂载;备份=停机后整目录拷贝,详见「数据与升级」),容器默认监听 `0.0.0.0:3000`,宿主机端口改 `docker-compose.yml` 端口映射左侧即可。`--user`/compose 的 `user:` 用于让容器以宿主机用户身份写入 `./data`,uid 非 1000 时请对应修改。本地构建镜像:`docker compose build`(镜像同时内置 `aikun-migrate` 存量迁移工具)。
 
 配置加载口径:**裸机启动自动加载工作目录的 `.env`;Docker 部署经 compose 的 `env_file: .env` 注入容器**(也可直接写在 compose 的 `environment` 里,同名项 `environment` 优先)。
 
@@ -121,7 +123,8 @@ export AIKUN_JWT_SECRET=$(openssl rand -hex 32)
 | `--jwt-secret` | `AIKUN_JWT_SECRET` | (公开默认值,**必须修改**) | JWT 签名密钥 |
 | `--encryption-key` | `AIKUN_ENCRYPTION_KEY` | (空,派生自 JWT secret) | 渠道 key 静态加密密钥 |
 | `--jwt-expires-in` | `AIKUN_JWT_EXPIRES_IN` | `604800` | JWT 有效期(秒) |
-| `--database-url` | `AIKUN_DATABASE_URL` | `sqlite://aikun.db?mode=rwc` | 数据库 URL |
+| `--surreal-url` | `AIKUN_SURREAL_URL` | `surrealkv://./aikun.surreal` | SurrealDB 端点:嵌入式 `surrealkv://<目录>` / 远程 `ws://` `wss://` `http://` `https://`(可带 `?ns=&db=&user=&pass=`) |
+| `--database-url` | `AIKUN_DATABASE_URL` | (过渡期) | 旧 SQLite 库位置:迁移工具 `aikun-migrate` 读取;且 `AIKUN_SURREAL_URL` 未显式设置时,主程序据此推导嵌入式数据目录(旧库同目录)。**显式配置 `AIKUN_SURREAL_URL` 后方可删除本变量**(见「数据与升级」) |
 | `--health-check-interval` | `AIKUN_HEALTH_CHECK_INTERVAL` | `30` | 健康检查间隔(秒) |
 | `--max-retries` | `AIKUN_MAX_RETRIES` | `3` | 单请求最大渠道尝试次数 |
 | `--auto-disable-threshold` | `AIKUN_AUTO_DISABLE_THRESHOLD` | `5` | 连续失败自动禁用阈值 |
@@ -129,6 +132,12 @@ export AIKUN_JWT_SECRET=$(openssl rand -hex 32)
 | `--log-retention-days` | `AIKUN_LOG_RETENTION_DAYS` | `30` | 请求日志保留天数 |
 | `--cors-allowed-origins` | `AIKUN_CORS_ALLOWED_ORIGINS` | (空,仅同源) | CORS 白名单,逗号分隔 |
 | `--trust-x-forwarded-for` | `AIKUN_TRUST_X_FORWARDED_FOR` | (关) | 置 `1` 信任 X-Forwarded-For,仅限可信反代之后 |
+| `--cache-mode` | `AIKUN_CACHE_MODE` | `off` | 响应缓存:`off` / `deterministic`(仅 temperature=0)/ `always` |
+| `--cache-ttl-secs` | `AIKUN_CACHE_TTL_SECS` | `300` | 缓存有效期(秒) |
+| `--cache-max-entries` | `AIKUN_CACHE_MAX_ENTRIES` | `10000` | 内存缓存最大条目数 |
+| `--cache-max-entry-bytes` | `AIKUN_CACHE_MAX_ENTRY_BYTES` | `1048576` | 单条缓存响应大小上限 |
+| `--cache-scope` | `AIKUN_CACHE_SCOPE` | `user` | `user`(按用户隔离)/ `global`(仅单租户建议) |
+| `--cache-hit-billing` | `AIKUN_CACHE_HIT_BILLING` | `full` | 命中缓存是否计费:`full` / `free` |
 | (仅环境变量) | `AIKUN_RESET_ADMIN_PASSWORD` | (空) | 置为新密码重启即重置 admin,用完立即移除(见上文) |
 
 也可将 `AIKUN_*` 变量写入工作目录的 `.env` 文件(参考 [env.example](env.example)),启动时自动加载,效果等同于 shell 环境变量(shell 中已存在的同名变量优先,不会被 `.env` 覆盖)。`.env` 已被 `.gitignore` 排除,不会被提交。
@@ -177,10 +186,39 @@ API Key 的 `expires_at` 建议传带时区的 RFC3339;无时区的输入(如 `2
 
 管理端功能:渠道管理(预设渠道点选名称、只填 Key，模型列表向官方实时拉取；也可自定义 Base URL；一键获取模型列表、创建副本、按 key 批量添加)、模型健康矩阵、请求测试(流式/非流式)、API Key 管理(每分钟限流 / 每日额度 / 并发上限)、日志统计、用户管理(仅管理员创建,支持批量)、计费(价格表、余额调账)、兑换码批量生成。
 
+## 架构与扩展
+
+多 crate workspace(0.5 结构迁移已完成;结构定稿见 [docs/architecture-v0.5.md](docs/architecture-v0.5.md),阶段与纪律见 [docs/roadmap-v0.5.md](docs/roadmap-v0.5.md)):
+
+```
+aikun/src/            二进制 crate:装配与运行时(main.rs)
+├── api/proxy/        薄 HTTP 层:/v1/* 代理端点(chat / messages / responses / passthrough)
+├── pipeline/         请求管线:准入(白名单/余额/限额)→ 缓存 → 选路 → 转换 → 发送 → 故障转移 → 流式 → 记账
+│                     mod.rs 编排 · dispatch.rs 重试/故障转移 · stream.rs 流式转发 · admission.rs 准入
+├── channel/          渠道运行时:transport(client 复用 / 代理 / 超时)、selector(亲和 + 加权评分)、
+│                     registry(拓扑快照缓存)、health、model_test
+├── cache/            响应缓存:CacheBackend trait + 进程内 memory 后端(默认关闭)
+├── billing/          价格表与记账(日志 + 扣费同事务)
+└── auth/ crypto.rs db/ models/ frontend/
+
+crates/
+├── aikun-protocol/   协议层(纯数据变换,无网络无 DB):enum Protocol + 穷举 match;sse / usage /
+│                     stream / error,openai/ anthropic/ responses/ 各含 request / response / stream 转换
+├── aikun-channels/   渠道适配器:adapters/(ChannelAdapter 编译期静态注册,generic / workbuddy / qoder)、
+│                     provider、url
+├── aikun-openapi/    管理面 API 脚手架(openapi.yaml 经 scripts/gen-api.sh 生成,勿手改)
+├── aikun-admin/      管理面 API 业务实现(impl 生成的 AuthApi / UserApi / AdminApi trait)
+└── aikun-store/      仓储层:连接池 / schema / 行映射 / 静态加密 / 口令哈希 / 默认价格播种
+```
+
+**新增一种渠道**:上游兼容 OpenAI / Anthropic 时无需写代码,选「通用」即可。特殊上游在 `crates/aikun-channels/src/adapters/` 新建 `xxx.rs` 实现 `ChannelAdapter`(只覆写与标准协议不同的钩子:`chat_url` / `auth_headers` / `prepare_request` / `normalize_response` / `normalize_stream_event`),在 `adapters/mod.rs` 声明模块并在 `ChannelRegistry::builtin()` 注册一行,管理端「渠道类型(适配器)」下拉即可选择。适配器在编译期注册,不是运行时插件系统。完整设计与各阶段进度见 [docs/refactor-plan.md](docs/refactor-plan.md)。
+
+**响应缓存**:设置 `AIKUN_CACHE_MODE=deterministic` 开启。只缓存非流式成功响应;准入检查先于缓存(余额/限额不会被绕过);命中时响应头带 `x-aikun-cache: HIT`,请求日志照常记录(`provider_id` 为空);请求头 `Cache-Control: no-cache` 可跳过缓存。
+
 ## 计费
 
 - 在「计费」页维护模型价格(元/1M tokens),模型名支持 `*` 前缀通配(如 `gpt-*`);精确命中优先,其次取最长通配前缀,单独的 `*` 为兜底价(匹配一切、优先级最低)
-- 价格表为空时(全新部署)启动会自动导入一份内置默认价格:源自 [LiteLLM 价格表](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) 的 210 个主流 chat 模型官方刊例价(快照见 `src/default_prices.json`),按汇率 7.2 折算为元;另含一条 `*` 兜底条目(输入 3 / 输出 7 元),快照未收录的模型按此计费。它们是售价基准而非渠道成本价,导入后可在「计费」页修改;只要表中已有任意条目就不会再导入
+- 价格表为空时(全新部署)启动会自动导入一份内置默认价格:源自 [LiteLLM 价格表](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) 的 210 个主流 chat 模型官方刊例价(快照见 `crates/aikun-store/src/default_prices.json`),按汇率 7.2 折算为元;另含一条 `*` 兜底条目(输入 3 / 输出 7 元),快照未收录的模型按此计费。它们是售价基准而非渠道成本价,导入后可在「计费」页修改;只要表中已有任意条目就不会再导入
 - 成功的请求按用量折算费用记入 `request_logs.cost`,并从用户余额中同步扣除(日志与扣费同一事务);无任何价格匹配(兜底条目也被删除)的模型按 0 元记账。金额在库中一律为**整数微元**(1 元 = 1,000,000 微元,单请求费用常小于 1 分,按分取整会让大量请求免费),累加/扣减无浮点漂移;对外 API 与前端展示仍为元
 - 缓存 token 单独计价:每条价格可设可空的缓存价(`cached_price`,元/1M tokens),留空时缓存 token 按输入价计。OpenAI 的 `prompt_tokens` 含命中缓存部分,会按 `prompt_tokens_details.cached_tokens` 拆出;Anthropic 的 `cache_read_input_tokens` 按缓存价、`cache_creation_input_tokens`(写缓存)按输入价计。缓存用量记入 `request_logs.cached_tokens`
 - 余额为用户级。**余额 ≤ 0 时请求在入口被拒绝**(HTTP 402,`insufficient_quota`),充值后自动恢复;在途请求不预留余额,单个请求可能扣成负数(用量先发生、费用后结算,属有意取舍)。充值/扣减由管理员在「用户」页手工调账,流水在「计费」页可查;用户本人在「钱包」页查看余额、近 30 天消费分析(趋势图、模型消费分布),以及当前在售模型的只读价格(通配价按具体模型展开;密钥的模型白名单不在这张表里过滤)
@@ -189,13 +227,22 @@ API Key 的 `expires_at` 建议传带时区的 RFC3339;无时区的输入(如 `2
 
 ## 性能与容量
 
-单机 SQLite 完全够用,瓶颈在上游渠道而不在网关。本机实测(10 核 i9-12900H,release 二进制,mock 上游零延迟,非流式请求,含完整计费链路):并发 50 时 **≈2,400 QPS**(P50 19ms),并发 200 时约 **700 QPS**——高并发下的吞吐拐点来自 SQLite 单写者计费事务串行(有意取舍:计费随响应落库,不异步丢账)。按真实上游秒级延迟折算,约可支撑 7,000 名重度同时活跃用户(每 10 秒一次请求)或 4 万+ 典型在线用户。复现方法:`cargo build --release` 后 `node scripts/bench.js`(需 sqlite3 CLI);详细测试方法与容量估算见管理端「文档」页。
+单机嵌入式存储完全够用,瓶颈在上游渠道而不在网关。SurrealDB(嵌入式 SurrealKV)后端 bench(2026-11-17,12 核 Apple M6,node v26.13.1,release 二进制,mock 上游零延迟,非流式请求,含完整计费链路):并发 50 时 **≈576 QPS**(P50 78.9ms / P99 202ms);并发 10 / 100 / 200 分别 609 / 569 / 539 QPS(完整数字见 `CHANGELOG.md` [0.6.0] 与 `docs/plan-next-steps.md` 阶段 S)——计费事务随响应落库、不异步丢账的取舍不变。历史 SQLite 基线(≈2,400 QPS @ 50 并发)出自另一台机器(10 核 i9-12900H),非同机对照,不据此判定优劣。复现方法:`cargo build --release` 后 `node scripts/bench.js`;详细测试方法与容量估算见管理端「文档」页。
 
 ## 数据与升级
 
-- 所有数据存放在单个 SQLite 文件中(默认 `./aikun.db`),备份只需复制该文件
-- 数据库迁移在启动时自动完成;**升级前建议先备份数据库文件**
-- 降级保护:库的 schema 版本(`PRAGMA user_version`)比二进制新时拒绝启动,防止旧代码读错新格式数据;但 v0.3.4 及更早的旧二进制不带此检查,降级到它们无法被拦截,务必先备份
+- v0.6 起存储为 **SurrealDB**(默认嵌入式 SurrealKV,数据目录默认 `./aikun.surreal/`;容器内 `/data/aikun.surreal`)。schema 在启动时自动初始化(幂等);**升级前建议先备份数据目录**
+- 备份:嵌入式部署停机后整目录拷贝,或 `surreal export`(远程部署用 `surreal export` / `surreal import`)
+- 降级保护:库的 schema 版本(元数据表 `store_meta:schema.version`,替代旧 `PRAGMA user_version`)比二进制新时拒绝启动,防止旧代码读错新格式数据
+- **从 0.5.x(SQLite)升级**:停旧服务后执行一次迁移工具(幂等可重跑,完成后打印各表行数对照):
+
+  ```bash
+  AIKUN_DATABASE_URL=sqlite:///data/aikun.db \
+  AIKUN_SURREAL_URL=surrealkv:///data/aikun.surreal \
+  aikun-migrate
+  ```
+
+  微元余额、密文渠道 key、日志明细等全量搬运;旧 uuid 等 ID 不变(管理面展示与软引用零翻译)。
 
 ## 发布
 
