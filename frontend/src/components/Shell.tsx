@@ -5,7 +5,6 @@ import {
   Settings2, Users, Zap, FlaskConical, Boxes,
 } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
-import { truncBytes } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { sonnerToast } from '@/lib/toast'
 
@@ -29,15 +28,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const nav = useNavigate()
   return (
     <div className="flex min-h-screen">
-      <aside className="flex w-52 shrink-0 flex-col border-r border-border bg-card">
-        <div className="flex items-center gap-2 px-4 py-4 border-b border-border">
-          <div className="flex size-8 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <Settings2 className="size-4" />
+      <aside className="flex w-[6.5rem] shrink-0 flex-col border-r border-border bg-card">
+        <div className="flex items-center gap-1.5 px-2 py-4 border-b border-border">
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
+            <Settings2 className="size-3.5" />
           </div>
-          <div>
-            <div className="text-sm font-bold leading-tight">Aikun</div>
-            <div className="text-[10px] text-muted-foreground">AI Gateway {version ? `v${version}` : ''}</div>
-          </div>
+          <div className="text-xs font-bold leading-tight">Aikun</div>
         </div>
         <nav className="flex-1 overflow-y-auto p-2 space-y-0.5">
           {NAV.filter((n) => !n.admin || isAdmin).map((n) => (
@@ -46,7 +42,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
               to={n.to}
               end={n.to === '/'}
               className={({ isActive }) =>
-                `flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors ${
+                `flex items-center gap-2 rounded-md px-2.5 py-2 text-sm transition-colors ${
                   isActive ? 'bg-primary/10 text-primary font-medium' : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                 }`
               }
@@ -57,8 +53,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
           ))}
         </nav>
         <div className="border-t border-border p-3">
-          <div className="mb-2 truncate text-xs text-muted-foreground" title={user?.display_name || user?.username}>
-            {truncBytes(user?.display_name || user?.username, 8)} · {user?.role}
+          <div className="mb-2 truncate text-center text-xs text-muted-foreground" title={user?.display_name || user?.username}>
+            {user?.display_name || user?.username}
           </div>
           <Button
             variant="outline"
@@ -72,6 +68,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           >
             退出登录
           </Button>
+          {version && <div className="mt-1.5 text-center text-[10px] text-muted-foreground">v{version}</div>}
         </div>
       </aside>
       <main className="flex-1 overflow-x-hidden p-6">{children}</main>
