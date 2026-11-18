@@ -15,12 +15,12 @@
 //! * 模型:GLM-5.3 / GLM-5.3-Flash(以渠道配置为准,可从 ZCode 客户端
 //!   或账单页抄)。
 //!
-//! **闲时免费**(官方规则,https://zcode.z.ai/cn/docs):每晚 23:00 至
-//! 次日 09:00(北京时间)套餐内 GLM-5.3-Flash 额度消耗为 0;非高峰
-//! 1 倍 / 高峰 3 倍消耗系数只影响上游套餐额度,不改变网关对下游的
-//! 计费口径。网关侧由 [`upstream_free`] 判定:闲时窗口内的 Flash
-//! 请求**对下游用户 0 元记账**(tokens 照记、日志照落;pipeline 在
-//! 选中渠道时写入 RequestCtx,见 pipeline/attempt.rs)。
+//! **免费窗口**(2026-11-19 用户口径):工作日晚 23:00–次日 09:00
+//! 免费额度 **3 亿**;周末窗口周五 23:00 连续至周一 09:00(含周六/
+//! 周日全天)**5 亿**。非高峰 1 倍 / 高峰 3 倍消耗系数只影响上游套餐
+//! 额度,不改变网关对下游的计费口径。网关侧由 [`upstream_free`]
+//! 判定:免费窗口内的 Flash 请求**对下游用户 0 元记账**(tokens 照记、
+//! 日志照落;pipeline 在选中渠道时写入 RequestCtx,见 attempt.rs)。
 //!
 //! 已知裁剪:上游风控验证码(Zcode2Api 的 3007 + Aliyun captcha 流程)
 //! 不做——触发时按上游失败处理,由既有故障转移接管。
@@ -53,6 +53,8 @@ pub const BALANCE_PATH: &str = "/api/v1/zcode-plan/billing/balance";
 /// 伪装客户端版本(与抓包基线一致;上游按此校验 X-ZCode-App-Version)。
 pub const CLIENT_VERSION: &str = "3.16.3";
 
+/// 免费窗口的小时边界(北京时间,含头不含尾):任意日 23:00 起、次日
+/// 09:00 止;周六/周日全天在窗(见 [`is_off_peak`])。
 const OFF_PEAK_START_HOUR: u32 = 23;
 const OFF_PEAK_END_HOUR: u32 = 9;
 
@@ -126,17 +128,25 @@ fn join_absolute(base_url: &str, path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
 }
 
-/// 北京时间(UTC+8)的当前小时。
-fn beijing_hour(unix_now: i64) -> u32 {
-    let secs_into_day = (unix_now + 8 * 3600).rem_euclid(86_400);
-    (secs_into_day / 3600) as u32
+/// 北京时间(UTC+8)的(星期, 小时);星期 1=周一 … 7=周日。
+/// 1970-01-01 是周四:day=0 → (0+3)%7+1 = 4 ✓。
+fn beijing_weekday_hour(unix_now: i64) -> (u32, u32) {
+    let beijing = unix_now + 8 * 3600;
+    let day = beijing.div_euclid(86_400);
+    let secs_into_day = beijing.rem_euclid(86_400);
+    let weekday = (day + 3).rem_euclid(7) + 1;
+    (weekday as u32, (secs_into_day / 3600) as u32)
 }
 
-/// 是否处于官方闲时窗口(北京时间 23:00–09:00,含头不含尾)。
-/// 跨零点区间:`h >= 23 || h < 9`。
+/// 是否处于官方免费窗口(2026-11-19 用户口径,北京时间):
+/// * **工作日窗口**:工作日晚 23:00 – 次日 09:00,免费额度 **3 亿**;
+/// * **周末窗口**:周五 23:00 连续至周一 09:00(含周六/周日全天),**5 亿**。
+///
+/// 归一:h<9 或 h>=23 恒在窗(周一凌晨是周末窗口尾、周一 23 点起是工作日
+/// 窗口);周六/周日全天在窗。
 pub fn is_off_peak(unix_now: i64) -> bool {
-    let h = beijing_hour(unix_now);
-    !(OFF_PEAK_END_HOUR..OFF_PEAK_START_HOUR).contains(&h)
+    let (weekday, h) = beijing_weekday_hour(unix_now);
+    !(OFF_PEAK_END_HOUR..OFF_PEAK_START_HOUR).contains(&h) || weekday >= 6
 }
 
 /// 模型是否为闲时零消耗档(名称含 "flash",大小写与分隔符不敏感)。
@@ -159,27 +169,52 @@ pub fn upstream_free(model: &str, unix_now: i64) -> bool {
 mod tests {
     use super::*;
 
-    // 北京时间整点对应的 unix 秒(2026-11-18 为任意同日锚点即可,只关心小时)
-    fn unix_at_beijing(hour: u32, minute: u32) -> i64 {
-        // 1970-01-01 00:00 北京时间 = 1969-12-31T16:00:00Z(unix = -28800)
-        // 取一个已知的对齐锚:0 = 北京 08:00(1970-01-01 08:00 CST)
-        // 直接构造:任意一天,北京 hour:minute → unix = day*86400 + hour*3600 + minute*60 - 28800
-        let day: i64 = 20_000;
+    // 北京时间指定(星期, 时, 分)的 unix 秒。锚:day 20_000 是周五
+    // ((20000+3)%7+1 = 5),按星期偏移取同刻。
+    fn unix_at_beijing(weekday: u32, hour: u32, minute: u32) -> i64 {
+        assert!((1..=7).contains(&weekday), "weekday 1=周一…7=周日");
+        let day: i64 = 20_000 + i64::from((weekday + 7 - 5) % 7);
         day * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 - 28_800
     }
 
     #[test]
     fn off_peak_window_truth_table() {
-        // 23:00(含)进入窗口
-        assert!(is_off_peak(unix_at_beijing(23, 0)));
-        assert!(is_off_peak(unix_at_beijing(23, 59)));
-        assert!(is_off_peak(unix_at_beijing(0, 0)), "次日 00:00 在窗口内");
-        assert!(is_off_peak(unix_at_beijing(3, 30)));
-        assert!(is_off_peak(unix_at_beijing(8, 59)), "09:00 前最后一分钟");
-        // 09:00(不含)出窗口
-        assert!(!is_off_peak(unix_at_beijing(9, 0)));
-        assert!(!is_off_peak(unix_at_beijing(12, 0)));
-        assert!(!is_off_peak(unix_at_beijing(22, 59)), "23:00 前最后一分钟");
+        // ---- 任意日:23:00(含)入窗、凌晨在窗 ----
+        for wd in 1..=7 {
+            assert!(is_off_peak(unix_at_beijing(wd, 23, 0)), "wd{wd} 23:00 入窗");
+            assert!(is_off_peak(unix_at_beijing(wd, 3, 30)), "wd{wd} 03:30 在窗");
+            assert!(is_off_peak(unix_at_beijing(wd, 8, 59)), "wd{wd} 08:59 在窗");
+        }
+        // ---- 工作日白天出窗(09:00–22:59)----
+        for wd in 1..=5 {
+            assert!(!is_off_peak(unix_at_beijing(wd, 9, 0)), "wd{wd} 09:00 出窗");
+            assert!(
+                !is_off_peak(unix_at_beijing(wd, 12, 0)),
+                "wd{wd} 中午不在窗"
+            );
+            assert!(
+                !is_off_peak(unix_at_beijing(wd, 22, 59)),
+                "wd{wd} 22:59 未入窗"
+            );
+        }
+        // ---- 工作日白天不在窗(工作日窗口 = 晚 23–09,3 亿) ----
+        assert!(!is_off_peak(unix_at_beijing(1, 12, 0)), "周一中午");
+        assert!(!is_off_peak(unix_at_beijing(3, 18, 0)), "周三傍晚");
+        assert!(!is_off_peak(unix_at_beijing(5, 12, 0)), "周五中午");
+        // ---- 周末全天在窗(周五 23 – 周一 09 连续,5 亿) ----
+        assert!(is_off_peak(unix_at_beijing(6, 12, 0)), "周六中午");
+        assert!(is_off_peak(unix_at_beijing(6, 18, 0)), "周六傍晚");
+        assert!(is_off_peak(unix_at_beijing(7, 12, 0)), "周日中午");
+        assert!(
+            is_off_peak(unix_at_beijing(7, 23, 30)),
+            "周日晚(仍在周末窗)"
+        );
+        assert!(is_off_peak(unix_at_beijing(1, 0, 0)), "周一凌晨(周末窗尾)");
+        // 周五 23 点 = 周末窗口起点
+        assert!(
+            is_off_peak(unix_at_beijing(5, 23, 0)),
+            "周五 23:00 周末窗口开始"
+        );
     }
 
     #[test]
@@ -193,8 +228,8 @@ mod tests {
 
     #[test]
     fn upstream_free_combines_window_and_model() {
-        let night = unix_at_beijing(2, 0);
-        let day = unix_at_beijing(14, 0);
+        let night = unix_at_beijing(2, 2, 0);
+        let day = unix_at_beijing(3, 14, 0);
         assert!(upstream_free("GLM-5.3-Flash", night));
         assert!(!upstream_free("GLM-5.3-Flash", day), "白天 Flash 照常计费");
         assert!(!upstream_free("GLM-5.3", night), "闲时仅 Flash 免费");

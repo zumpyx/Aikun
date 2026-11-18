@@ -1,11 +1,13 @@
 //! ZCode 每日自动领取(签到)调度器。
 //!
 //! 官方免费/体验额度每日发放但不自动到账(见 zcode 渠道文档):本调度器
-//! 每天在北京时间 `zcode_claim_hour` 点 10 分(错开整点发放竞态)对全部
-//! 活跃 zcode 渠道串行跑一遍领取序列(渠道间 2s 间隔,降低上游风控/限流
-//! 压力——Zcode2Api 对 mass claim 的警告),结果写 proxy_task 快照
-//! (source=auto),签到面板与管理日志可见。`AIKUN_ZCODE_AUTO_CLAIM=false`
-//! 可整体关闭。
+//! 每天在北京时间 `zcode_claim_hour` 点 10 分(默认 7:工作日早 7 点领取,
+//! 错开整点发放竞态)对全部活跃 zcode 渠道串行跑一遍领取序列(渠道间 2s
+//! 间隔,降低上游风控/限流压力——Zcode2Api 对 mass claim 的警告),结果
+//! 写 proxy_task 快照(source=auto),领取面板与管理日志可见。免费额度
+//! 口径(2026-11-19):工作日窗口(晚 23–09)3 亿,周末窗口(周五 23–
+//! 周一 09,含周末全天)5 亿;领取幂等(1003=已领取),每天跑即可。
+//! `AIKUN_ZCODE_AUTO_CLAIM=false` 可整体关闭。
 //!
 //! 只跑 `channel_kind = zcode`(JWT 订阅形态):zai-plan / bigmodel-plan
 //! 是 API Key 形态,无领取序列可言。

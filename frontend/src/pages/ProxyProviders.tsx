@@ -1,5 +1,5 @@
 // 反代应用中心:每应用一个子页(/proxies/:app),ZCode 子页含
-// 国际/国内 × 订阅JWT/APIKey 四种接入预设与签到(领取)任务面板;
+// 国际/国内 × 订阅JWT/APIKey 四种接入预设与免费额度领取任务面板;
 // WorkBuddy/Qoder 为占位协议子页;Z.AI Chat 待接入。
 // 批量启停/删除、导入导出随应用(kind 过滤);表单复用批量粘贴。
 import { useRef, useState } from 'react'
@@ -30,7 +30,7 @@ const APPS = {
     label: 'ZCode',
     kinds: 'zcode,zai-plan',
     regionFilter: 'intl' as const,
-    desc: 'GLM Coding Plan·国际(z.ai):订阅 JWT(zcode.z.ai)与 API Key(api.z.ai);支持免费额度签到',
+    desc: 'GLM Coding Plan·国际(z.ai):订阅 JWT(zcode.z.ai)与 API Key(api.z.ai);支持免费额度领取',
   },
   workbuddy: {
     region: 'intl',
@@ -95,7 +95,7 @@ function AppPage({ appId }: { appId: AppId }) {
     queryKey: ['proxies', appId],
     queryFn: async () => (await api<Page<ProviderDetail>>('GET', `/api/providers?category=proxy${kindQ}&limit=${PAGE_SIZE}`)).data,
   })
-  // 签到任务面板(仅 zcode 应用拉取)
+  // 领取任务面板(仅 zcode 应用拉取)
   const tasks = useQuery({
     queryKey: ['zcode-tasks'],
     queryFn: async () => (await api<{ tasks: ClaimTask[] }>('GET', '/api/providers/zcode/tasks')).data,
@@ -174,7 +174,7 @@ function AppPage({ appId }: { appId: AppId }) {
     loginTimer.current = window.setTimeout(() => void tick(), 3000)
   }
 
-  // ---- 签到(领取)----
+  // ---- 领取免费额度 ----
   const [claiming, setClaiming] = useState<Set<string>>(new Set())
   const doClaim = async (id: string, name: string) => {
     setClaiming((prev) => new Set(prev).add(id))
@@ -198,8 +198,8 @@ function AppPage({ appId }: { appId: AppId }) {
   }
   const claimAll = async () => {
     const targets = (list.data?.items ?? []).filter((p) => p.channel_kind === 'zcode')
-    if (targets.length === 0) return sonnerToast.info('没有需要签到的 ZCode 订阅渠道')
-    sonnerToast.info(`开始签到 ${targets.length} 个渠道…`)
+    if (targets.length === 0) return sonnerToast.info('没有可领取的 ZCode 订阅渠道')
+    sonnerToast.info(`开始领取 ${targets.length} 个渠道的免费额度…`)
     for (const p of targets) await doClaim(p.id, p.name)
   }
 
@@ -251,7 +251,7 @@ function AppPage({ appId }: { appId: AppId }) {
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => void doExport()}>导出</Button>
             <Button variant="outline" onClick={() => setImportOpen(true)}>导入</Button>
-            {appId === 'zcode' && <Button onClick={() => void claimAll()}>全部签到(领取额度)</Button>}
+            {appId === 'zcode' && <Button onClick={() => void claimAll()}>全部领取免费额度</Button>}
             {appId === 'zcode' && (
               <Button variant="outline" onClick={() => void startLogin()} disabled={login.state === 'waiting'}>
                 {login.state === 'waiting' ? '授权中…' : 'ZCode 在线登录(国际)'}
@@ -303,7 +303,7 @@ function AppPage({ appId }: { appId: AppId }) {
                     <TR>
                       <TH className="w-8"><Checkbox checked={allChecked} onChange={toggleAll} aria-label="全选" /></TH>
                       <TH>名称</TH><TH>类型</TH><TH>模型</TH><TH>状态</TH><TH>延迟</TH><TH>优先级</TH><TH>权重</TH>
-                      {appId === 'zcode' && <TH>上次签到</TH>}
+                      {appId === 'zcode' && <TH>上次领取</TH>}
                       <TH>操作</TH>
                     </TR>
                   </THead>
@@ -337,7 +337,7 @@ function AppPage({ appId }: { appId: AppId }) {
                           <TD>
                             {p.channel_kind === 'zcode' ? (
                               <Button size="sm" variant="outline" disabled={claiming.has(p.id)} onClick={() => void doClaim(p.id, p.name)}>
-                                {claiming.has(p.id) ? '领取中…' : '签到'}
+                                {claiming.has(p.id) ? '领取中…' : '领取'}
                               </Button>
                             ) : <span className="text-xs text-muted-foreground">-</span>}
                           </TD>
@@ -352,8 +352,9 @@ function AppPage({ appId }: { appId: AppId }) {
 
           {appId === 'zcode' && (
             <p className="text-xs text-muted-foreground">
-              签到 = 领取官方免费/体验额度(每日发放,不自动到账)。服务端每日北京时间 09:10 对全部 ZCode 订阅渠道自动签到
-              (AIKUN_ZCODE_AUTO_CLAIM / AIKUN_ZCODE_CLAIM_HOUR 可调);API Key 形态(zai-plan / bigmodel-plan)无签到序列。
+              领取 = 领取官方免费额度(不自动到账):工作日窗口(晚 23:00–次日 09:00)3 亿 tokens,周末窗口(周五 23:00–周一 09:00,含周末全天)5 亿。
+              服务端每日北京时间 07:10 自动领取(工作日早 7 点领当晚额度,周五领周末 5 亿;AIKUN_ZCODE_AUTO_CLAIM / AIKUN_ZCODE_CLAIM_HOUR 可调);
+              API Key 形态(zai-plan / bigmodel-plan)无领取序列。
             </p>
           )}
     </div>

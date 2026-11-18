@@ -32,7 +32,8 @@ pub struct AppConfig {
     /// ZCode 每日自动领取免费额度(签到任务;渠道串行,2s 间隔)。
     pub zcode_auto_claim: bool,
     /// 自动领取时刻(北京时间整点,0..=23;实际在该点后 10 分钟跑,
-    /// 避开整点发放竞态)。
+    /// 避开整点发放竞态)。默认 7:工作日早 7 点领取当晚窗口(3 亿),
+    /// 周五领取周末包(5 亿);每天幂等执行。
     pub zcode_claim_hour: u32,
     /// ZCode OAuth 在线登录端点(渠道拆分批次):默认官方
     /// https://zcode.z.ai/api/v1;e2e 用 mock 覆盖。
@@ -96,7 +97,7 @@ impl Default for AppConfig {
             breaker_failure_threshold: 3,
             breaker_cooldown_secs: 30,
             zcode_auto_claim: true,
-            zcode_claim_hour: 9,
+            zcode_claim_hour: 7,
             zcode_oauth_base: "https://zcode.z.ai/api/v1".to_string(),
             request_timeout_secs: 120,
             connect_timeout_secs: 15,
@@ -173,7 +174,7 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     (
         "zcode-claim-hour",
         "AIKUN_ZCODE_CLAIM_HOUR",
-        "自动领取时刻,北京时间整点 0..=23(默认 9;实际在整点后 10 分钟)",
+        "自动领取时刻,北京时间整点 0..=23(默认 7=工作日早 7 点领取;实际在整点后 10 分钟)",
     ),
     (
         "zcode-oauth-base",
