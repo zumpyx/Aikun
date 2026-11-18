@@ -93,8 +93,12 @@ impl aikun_admin::admin_providers::ZcodeOAuth for ZcodeOAuthImpl {
         match data["status"].as_str().unwrap_or("pending") {
             "ready" => ZcodePollStatus::Ready {
                 token: data["token"].as_str().unwrap_or_default().to_string(),
-                email: data["user"]["email"]
-                    .as_str()
+                // 国内(智谱)账号多为手机号登录,user.email 常是空串而非
+                // null(2026-11-19 实测用户踩坑:name 空 → 400):email →
+                // phone → name/nickname 依次取第一个非空,兜底 zcode-user。
+                email: ["email", "phone", "name", "nickname"]
+                    .iter()
+                    .find_map(|k| data["user"][k].as_str().filter(|v| !v.trim().is_empty()))
                     .unwrap_or("zcode-user")
                     .to_string(),
             },

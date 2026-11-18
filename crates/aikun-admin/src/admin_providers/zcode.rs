@@ -154,11 +154,15 @@ impl AdminProvidersService {
                 })
             }
             ZcodePollStatus::Ready { token, email } => {
+                // name 三级兜底:显式 name → 授权账号标识(email/phone,
+                // 国内手机号登录时 email 常为空串)→ zcode-user。
                 let name = body
                     .name
                     .clone()
-                    .filter(|n| !n.trim().is_empty())
-                    .unwrap_or_else(|| email.clone());
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| Some(email.trim().to_string()).filter(|e| !e.is_empty()))
+                    .unwrap_or_else(|| "zcode-user".to_string());
                 // 建渠道 base 与登录账号体系同环境(凭证互不通用)
                 let (base, origin_note) = if env == "cn" {
                     ("https://zcode.bigmodel.cn", "国内 BigModel 账号")

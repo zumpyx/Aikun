@@ -3069,3 +3069,71 @@ async fn zcode_oauth_login_cn_env() {
     let body: Value = serde_json::from_str(&init.body).unwrap();
     assert_eq!(body["provider"], "bigmodel");
 }
+
+/// 国内手机号登录的 ready 响应:user.email 为空串(智谱账号常无邮箱),
+/// name 兜底到 phone → 渠道正常创建(修复 "name 不能为空" 400)。
+#[tokio::test]
+async fn zcode_oauth_login_cn_empty_email_falls_back() {
+    let oauth = MockUpstream::start().await;
+    let app = TestApp::spawn_with_env(&[
+        (
+            "AIKUN_ZCODE_OAUTH_BASE",
+            &format!("http://{}", oauth.base.trim_start_matches("http://")),
+        ),
+        ("AIKUN_HEALTH_CHECK_INTERVAL", "3600"),
+    ])
+    .await;
+    let admin = app.admin_token().await;
+
+    oauth.push_json(
+        200,
+        json!({"data": {"flow_id": "f2", "authorize_url": "https://bigmodel.cn/login?appId=zcode"}}),
+    );
+    // email 空串 + phone 存在(国内手机号账号形态)
+    oauth.push_json(
+        200,
+        json!({"data": {"status": "ready", "token": "jwt-cn-phone", "user": {"email": "", "phone": "13800001111"}}}),
+    );
+
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-init", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"env": "cn"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-poll", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"flow_id": "f2", "poll_token": "any", "env": "cn"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "空 email 不再 400");
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["status"], "ready");
+    assert_eq!(v["provider"]["name"], "13800001111", "name 兜底取 phone");
+
+    // email/phone 全空:兜底 zcode-user(直接 poll,不再消费 init 响应)
+    oauth.push_json(
+        200,
+        json!({"data": {"status": "ready", "token": "jwt-x", "user": {"email": ""}}}),
+    );
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-poll", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"flow_id": "f3", "poll_token": "any", "env": "intl"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(
+        v["provider"]["name"], "zcode-user",
+        "全空兜底 zcode-user: {v}"
+    );
+}

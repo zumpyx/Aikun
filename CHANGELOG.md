@@ -81,6 +81,14 @@
   `/data/aikun.surreal`);迁移工具默认目标同步。
 
 ## [Unreleased]
+### 修复(在线登录国内账号 "name 不能为空" 400)
+
+- 国内(智谱)账号多为手机号登录,OAuth ready 响应 user.email 常为
+  **空串而非 null**(用户实测踩坑)——原兜底失效致建渠道 400。
+  修复:授权账号标识按 email → phone → name/nickname 依次取第一个
+  非空;name 三级兜底(显式 name → 账号标识 → zcode-user)。
+
+## [Unreleased]
 ### 新增(在线登录支持国内 + 按钮改名)
 
 - **国内(BigModel 账号)在线登录**(2026-11-19 实测:同一 OAuth 端点,
