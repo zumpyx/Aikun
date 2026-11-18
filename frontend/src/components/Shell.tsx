@@ -1,7 +1,7 @@
 // 侧栏布局:导航 + 用户区(core.js renderLayout 迁移;admin 项按角色显隐)
 import { NavLink, useNavigate } from 'react-router-dom'
 import {
-  Activity, BookOpen, Coins, Gauge, KeyRound, ScrollText,
+  Activity, ArrowLeftRight, BookOpen, Coins, Gauge, KeyRound, ScrollText,
   Settings2, Users, Zap, FlaskConical, Boxes,
 } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
@@ -16,7 +16,7 @@ const NAV = [
   { to: '/logs', label: '日志', icon: ScrollText, admin: false },
   { to: '/docs', label: '文档', icon: BookOpen, admin: false },
   { to: '/providers', label: '渠道', icon: Boxes, admin: true },
-  { to: '/proxies', label: '反代', icon: Zap, admin: true },
+  { to: '/proxies', label: '反代', icon: ArrowLeftRight, admin: true },
   { to: '/models', label: '模型', icon: Zap, admin: true },
   { to: '/test', label: '测试', icon: FlaskConical, admin: true },
   { to: '/users', label: '用户', icon: Users, admin: true },
