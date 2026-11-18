@@ -3012,3 +3012,60 @@ async fn proxy_pool_crud_and_channel_pick() {
         .unwrap();
     assert_eq!(r.status(), 404);
 }
+
+/// 国内(BigModel 账号)在线登录:init 的 provider=bigmodel、ready 后
+/// 渠道 base=zcode.bigmodel.cn(与账号体系同环境)。
+#[tokio::test]
+async fn zcode_oauth_login_cn_env() {
+    let oauth = MockUpstream::start().await;
+    let app = TestApp::spawn_with_env(&[
+        (
+            "AIKUN_ZCODE_OAUTH_BASE",
+            &format!("http://{}", oauth.base.trim_start_matches("http://")),
+        ),
+        ("AIKUN_HEALTH_CHECK_INTERVAL", "3600"),
+    ])
+    .await;
+    let admin = app.admin_token().await;
+
+    oauth.push_json(
+        200,
+        json!({"data": {"flow_id": "flow-cn", "authorize_url": "https://bigmodel.cn/login?appId=zcode&state=x"}}),
+    );
+    oauth.push_json(
+        200,
+        json!({"data": {"status": "ready", "token": "jwt-from-cn-oauth", "user": {"email": "cn@example.com"}}}),
+    );
+
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-init", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"env": "cn"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "login-init(env=cn)");
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-poll", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"flow_id": "flow-cn", "poll_token": "any", "env": "cn"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["status"], "ready");
+    let base = v["provider"]["anthropic_base_url"].as_str().unwrap();
+    assert_eq!(base, "https://zcode.bigmodel.cn", "国内登录建国内渠道");
+
+    // init 请求体带 provider=bigmodel
+    let reqs = oauth.requests();
+    let init = reqs
+        .iter()
+        .find(|q| q.path.ends_with("/oauth/cli/init"))
+        .expect("init 打到 mock");
+    let body: Value = serde_json::from_str(&init.body).unwrap();
+    assert_eq!(body["provider"], "bigmodel");
+}

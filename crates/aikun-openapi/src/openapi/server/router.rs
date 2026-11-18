@@ -1178,11 +1178,25 @@ where
 }
 async fn admin_zcode_login_init_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
+    __request: ::axum::extract::Request,
 ) -> ::axum::response::Response
 where
     T: super::api::AdminApi + Clone + Send + Sync + 'static,
 {
-    ::axum::response::IntoResponse::into_response(api.admin_zcode_login_init().await)
+    let body: ::std::option::Option<ZcodeLoginInitRequest> =
+        match super::validation::decode_json_body::<ZcodeLoginInitRequest>(
+            __request,
+            super::validation::VALIDATION_TARGET_54_BODY,
+            "application/json",
+            false,
+            2097152usize,
+        )
+        .await
+        {
+            Ok(body) => body,
+            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+        };
+    ::axum::response::IntoResponse::into_response(api.admin_zcode_login_init(body).await)
 }
 async fn admin_zcode_login_poll_handler<T>(
     ::axum::extract::State(api): ::axum::extract::State<T>,
@@ -1194,7 +1208,7 @@ where
     let body: ZcodeLoginPollRequest =
         match super::validation::decode_json_body::<ZcodeLoginPollRequest>(
             __request,
-            super::validation::VALIDATION_TARGET_54_BODY,
+            super::validation::VALIDATION_TARGET_55_BODY,
             "application/json",
             true,
             2097152usize,
@@ -1228,7 +1242,7 @@ where
 {
     let body: CreateProxyRequest = match super::validation::decode_json_body::<CreateProxyRequest>(
         __request,
-        super::validation::VALIDATION_TARGET_55_BODY,
+        super::validation::VALIDATION_TARGET_56_BODY,
         "application/json",
         true,
         2097152usize,
@@ -1267,7 +1281,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_56_PATH_0,
+                super::validation::VALIDATION_TARGET_57_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1315,7 +1329,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_57_PATH_0,
+                super::validation::VALIDATION_TARGET_58_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1342,7 +1356,7 @@ where
 {
     let body: FetchModelsRequest = match super::validation::decode_json_body::<FetchModelsRequest>(
         __request,
-        super::validation::VALIDATION_TARGET_58_BODY,
+        super::validation::VALIDATION_TARGET_59_BODY,
         "application/json",
         true,
         2097152usize,
@@ -1381,7 +1395,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_59_PATH_0,
+                super::validation::VALIDATION_TARGET_60_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1422,7 +1436,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_61_PATH_0,
+                super::validation::VALIDATION_TARGET_62_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1441,7 +1455,7 @@ where
     let body: UpdateProviderRequest =
         match super::validation::decode_json_body::<UpdateProviderRequest>(
             __request,
-            super::validation::VALIDATION_TARGET_60_BODY,
+            super::validation::VALIDATION_TARGET_61_BODY,
             "application/json",
             true,
             2097152usize,
@@ -1480,7 +1494,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_62_PATH_0,
+                super::validation::VALIDATION_TARGET_63_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1520,7 +1534,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_63_PATH_0,
+                super::validation::VALIDATION_TARGET_64_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1561,7 +1575,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_65_PATH_0,
+                super::validation::VALIDATION_TARGET_66_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1579,7 +1593,7 @@ where
     };
     let body: ModelTestRequest = match super::validation::decode_json_body::<ModelTestRequest>(
         __request,
-        super::validation::VALIDATION_TARGET_64_BODY,
+        super::validation::VALIDATION_TARGET_65_BODY,
         "application/json",
         true,
         2097152usize,
@@ -1618,7 +1632,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_66_PATH_0,
+                super::validation::VALIDATION_TARGET_67_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1653,7 +1667,7 @@ where
     let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
     if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "provider_id") {
         if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_69_QUERY_2,
+            super::validation::VALIDATION_TARGET_70_QUERY_2,
             "/query/provider_id",
             &raw,
         ) {
@@ -1671,7 +1685,7 @@ where
         };
     if let Some(value) = &__q.limit {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_67_QUERY_0,
+            super::validation::VALIDATION_TARGET_68_QUERY_0,
             "/query/limit",
             value,
         ) {
@@ -1680,7 +1694,7 @@ where
     }
     if let Some(value) = &__q.offset {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_68_QUERY_1,
+            super::validation::VALIDATION_TARGET_69_QUERY_1,
             "/query/offset",
             value,
         ) {
@@ -1689,7 +1703,7 @@ where
     }
     if let Some(value) = &__q.provider_id {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_69_QUERY_2,
+            super::validation::VALIDATION_TARGET_70_QUERY_2,
             "/query/provider_id",
             value,
         ) {
@@ -1726,7 +1740,7 @@ where
     let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
     if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "in_use") {
         if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_72_QUERY_2,
+            super::validation::VALIDATION_TARGET_73_QUERY_2,
             "/query/in_use",
             &raw,
         ) {
@@ -1743,7 +1757,7 @@ where
     };
     if let Some(value) = &__q.limit {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_70_QUERY_0,
+            super::validation::VALIDATION_TARGET_71_QUERY_0,
             "/query/limit",
             value,
         ) {
@@ -1752,7 +1766,7 @@ where
     }
     if let Some(value) = &__q.offset {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_71_QUERY_1,
+            super::validation::VALIDATION_TARGET_72_QUERY_1,
             "/query/offset",
             value,
         ) {
@@ -1761,7 +1775,7 @@ where
     }
     if let Some(value) = &__q.in_use {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_72_QUERY_2,
+            super::validation::VALIDATION_TARGET_73_QUERY_2,
             "/query/in_use",
             value,
         ) {
@@ -1782,7 +1796,7 @@ where
 {
     let body: UpsertPriceRequest = match super::validation::decode_json_body::<UpsertPriceRequest>(
         __request,
-        super::validation::VALIDATION_TARGET_73_BODY,
+        super::validation::VALIDATION_TARGET_74_BODY,
         "application/json",
         true,
         2097152usize,
@@ -1822,7 +1836,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_75_PATH_0,
+                super::validation::VALIDATION_TARGET_76_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1840,7 +1854,7 @@ where
     };
     let body: UpsertPriceRequest = match super::validation::decode_json_body::<UpsertPriceRequest>(
         __request,
-        super::validation::VALIDATION_TARGET_74_BODY,
+        super::validation::VALIDATION_TARGET_75_BODY,
         "application/json",
         true,
         2097152usize,
@@ -1879,7 +1893,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_76_PATH_0,
+                super::validation::VALIDATION_TARGET_77_PATH_0,
                 "/path/id",
                 true,
             ) {
@@ -1914,7 +1928,7 @@ where
     let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
     if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "batch") {
         if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_79_QUERY_2,
+            super::validation::VALIDATION_TARGET_80_QUERY_2,
             "/query/batch",
             &raw,
         ) {
@@ -1923,7 +1937,7 @@ where
     }
     if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, "status") {
         if let Err(rejection) = super::validation::validate_string_parameter(
-            super::validation::VALIDATION_TARGET_80_QUERY_3,
+            super::validation::VALIDATION_TARGET_81_QUERY_3,
             "/query/status",
             &raw,
         ) {
@@ -1941,7 +1955,7 @@ where
         };
     if let Some(value) = &__q.limit {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_77_QUERY_0,
+            super::validation::VALIDATION_TARGET_78_QUERY_0,
             "/query/limit",
             value,
         ) {
@@ -1950,7 +1964,7 @@ where
     }
     if let Some(value) = &__q.offset {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_78_QUERY_1,
+            super::validation::VALIDATION_TARGET_79_QUERY_1,
             "/query/offset",
             value,
         ) {
@@ -1959,7 +1973,7 @@ where
     }
     if let Some(value) = &__q.batch {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_79_QUERY_2,
+            super::validation::VALIDATION_TARGET_80_QUERY_2,
             "/query/batch",
             value,
         ) {
@@ -1968,7 +1982,7 @@ where
     }
     if let Some(value) = &__q.status {
         if let Err(rejection) = super::validation::validate_parameter(
-            super::validation::VALIDATION_TARGET_80_QUERY_3,
+            super::validation::VALIDATION_TARGET_81_QUERY_3,
             "/query/status",
             value,
         ) {
@@ -1990,7 +2004,7 @@ where
     let body: CreateRedemptionCodesRequest =
         match super::validation::decode_json_body::<CreateRedemptionCodesRequest>(
             __request,
-            super::validation::VALIDATION_TARGET_81_BODY,
+            super::validation::VALIDATION_TARGET_82_BODY,
             "application/json",
             true,
             2097152usize,
@@ -2029,7 +2043,7 @@ where
         Some(raw) => {
             match super::validation::decode_parameter(
                 &raw,
-                super::validation::VALIDATION_TARGET_82_PATH_0,
+                super::validation::VALIDATION_TARGET_83_PATH_0,
                 "/path/id",
                 true,
             ) {

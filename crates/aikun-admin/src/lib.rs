@@ -215,8 +215,11 @@ impl AdminApi for AdminService {
     }
     async fn admin_zcode_login_init(
         &self,
+        body: ::std::option::Option<aikun_openapi::openapi::types::ZcodeLoginInitRequest>,
     ) -> aikun_openapi::openapi::server::errors::AdminZcodeLoginInitResponse {
-        self.providers.admin_zcode_login_init().await
+        self.providers
+            .admin_zcode_login_init(body.and_then(|b| b.env))
+            .await
     }
     async fn admin_zcode_login_poll(
         &self,

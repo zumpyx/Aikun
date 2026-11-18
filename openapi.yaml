@@ -1869,13 +1869,22 @@ paths:
     post:
       tags: [Admin]
       operationId: adminZcodeLoginInit
-      summary: ZCode 在线登录——发起 OAuth 授权流
+      summary: 在线登录——发起 OAuth 授权流(国际/国内)
       description: |
-        服务端生成 poll_token(随机),转发 z.ai OAuth CLI init,返回
+        服务端生成 poll_token(随机),转发 OAuth CLI init,返回
         authorize_url(交给浏览器授权)与 flow_id/poll_token(回传给
         login-poll)。流程无服务端状态;flow TTL 约 5 分钟(上游控制)。
+        env 决定账号体系(2026-11-19 实测,同一 OAuth 端点):
+        intl(默认)= z.ai 账号(provider=zai,授权页 chat.z.ai);
+        cn = 智谱 BigModel 账号(provider=bigmodel,授权页 bigmodel.cn)。
         OAuth base 可配 AIKUN_ZCODE_OAUTH_BASE(默认
         https://zcode.z.ai/api/v1)。
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcodeLoginInitRequest'
       responses:
         '200':
           description: 授权流已发起
@@ -1898,12 +1907,14 @@ paths:
     post:
       tags: [Admin]
       operationId: adminZcodeLoginPoll
-      summary: ZCode 在线登录——轮询授权结果,ready 即建渠道
+      summary: 在线登录——轮询授权结果,ready 即建渠道
       description: |
         轮询上游(网络错误按 pending)。status=ready 时服务端用
-        Coding Plan JWT 自动创建渠道(channel_kind=zcode、anthropic 协议、
-        base https://code.z.ai 占位——以实际出参为准),name 默认取授权
-        邮箱,响应含完整渠道。pending/expired/failed 透传,不建渠道。
+        Coding Plan JWT 自动创建渠道(channel_kind=zcode、anthropic 协议),
+        name 默认取授权邮箱,响应含完整渠道。env 决定建渠道的 base:
+        intl(默认)→ https://zcode.z.ai;cn → https://zcode.bigmodel.cn
+        (与登录账号体系一致,凭证互不通用)。pending/expired/failed
+        透传,不建渠道。
       requestBody:
         required: true
         content:
@@ -4252,11 +4263,23 @@ components:
         poll_token: {type: string}
       required: [flow_id, authorize_url, poll_token]
 
+    ZcodeLoginInitRequest:
+      type: object
+      description: 在线登录环境(账号体系);缺省 intl。
+      properties:
+        env:
+          type: string
+          enum: [intl, cn]
+      additionalProperties: false
+
     ZcodeLoginPollRequest:
       type: object
       properties:
         flow_id: {type: string}
         poll_token: {type: string}
+        env:
+          type: string
+          enum: [intl, cn]
         name: {type: string}
         priority: {type: integer}
         weight: {type: number}

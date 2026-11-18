@@ -10,7 +10,8 @@ use aikun_openapi::openapi::server::errors::{
 };
 use aikun_openapi::openapi::types::{
     AdminZcodeClaimResult, ProxyTaskList, ProxyTaskRecord, ProxyTaskRecordSource,
-    ZcodeLoginInitResult, ZcodeLoginPollRequest, ZcodeLoginPollResult, ZcodeLoginPollResultStatus,
+    ZcodeLoginInitRequestEnv, ZcodeLoginInitResult, ZcodeLoginPollRequest,
+    ZcodeLoginPollRequestEnv, ZcodeLoginPollResult, ZcodeLoginPollResultStatus,
 };
 use async_trait::async_trait;
 
@@ -42,7 +43,10 @@ pub trait ZcodeOAuth: Send + Sync + 'static {
     /// (Bearer poll_token,body {"provider":"zai"})。成功返回
     /// (init 结果, poll_token)——poll_token 原样返还前端供 poll 回传,
     /// 服务端无状态。Err 为网络/上游失败描述。
-    async fn init(&self) -> Result<(ZcodeOAuthInit, String), String>;
+    /// env = "intl"(z.ai 账号,provider=zai)| "cn"(智谱 BigModel 账号,
+    /// provider=bigmodel;2026-11-19 实测同一 OAuth 端点,仅 provider 值不同,
+    /// 授权页分别为 chat.z.ai / bigmodel.cn)。
+    async fn init(&self, env: &str) -> Result<(ZcodeOAuthInit, String), String>;
     /// 轮询:GET {base}/oauth/cli/poll/{flow_id}。网络错误按 Pending
     /// (调用方持续轮询;上游口径)。
     async fn poll(&self, flow_id: &str, poll_token: &str) -> ZcodePollStatus;
@@ -84,8 +88,16 @@ pub trait ZcodeClaimPort: Send + Sync + 'static {
 
 // ---- 服务方法(挂在主模块的服务上;子模块可访问其私有字段) ----
 impl AdminProvidersService {
-    pub async fn admin_zcode_login_init(&self) -> AdminZcodeLoginInitResponse {
-        match self.zcode_oauth.init().await {
+    pub async fn admin_zcode_login_init(
+        &self,
+        env: Option<ZcodeLoginInitRequestEnv>,
+    ) -> AdminZcodeLoginInitResponse {
+        let env = if matches!(env, Some(ZcodeLoginInitRequestEnv::Cn)) {
+            "cn"
+        } else {
+            "intl"
+        };
+        match self.zcode_oauth.init(env).await {
             Ok((init, poll_token)) => AdminZcodeLoginInitResponse::Ok(ZcodeLoginInitResult {
                 flow_id: init.flow_id,
                 authorize_url: init.authorize_url,
@@ -113,6 +125,11 @@ impl AdminProvidersService {
                 "flow_id 与 poll_token 必填",
             ));
         }
+        let env = if matches!(body.env, Some(ZcodeLoginPollRequestEnv::Cn)) {
+            "cn"
+        } else {
+            "intl"
+        };
         let status = self
             .zcode_oauth
             .poll(body.flow_id.trim(), body.poll_token.trim())
@@ -142,11 +159,17 @@ impl AdminProvidersService {
                     .clone()
                     .filter(|n| !n.trim().is_empty())
                     .unwrap_or_else(|| email.clone());
+                // 建渠道 base 与登录账号体系同环境(凭证互不通用)
+                let (base, origin_note) = if env == "cn" {
+                    ("https://zcode.bigmodel.cn", "国内 BigModel 账号")
+                } else {
+                    ("https://zcode.z.ai", "国际 z.ai 账号")
+                };
                 let cand = ProviderCandidate {
                     name,
                     provider_type: Some("anthropic".into()),
-                    openai_base_url: Some("https://zcode.z.ai".into()),
-                    anthropic_base_url: Some("https://zcode.z.ai".into()),
+                    openai_base_url: Some(base.into()),
+                    anthropic_base_url: Some(base.into()),
                     api_key: token,
                     models: vec!["GLM-5.3".into(), "GLM-5.3-Flash".into()],
                     priority: body.priority,
@@ -157,8 +180,15 @@ impl AdminProvidersService {
                     model_mapping: Default::default(),
                     protocols: Some(vec!["anthropic".into()]),
                     default_protocol: Some("anthropic".into()),
-                    note: Some(format!("ZCode 在线登录自动创建({email})")),
-                    website_url: Some("https://zcode.z.ai".into()),
+                    note: Some(format!("在线登录自动创建({origin_note},{email})")),
+                    website_url: Some(
+                        if env == "cn" {
+                            "https://bigmodel.cn"
+                        } else {
+                            "https://zcode.z.ai"
+                        }
+                        .into(),
+                    ),
                     channel_kind: Some("zcode".into()),
                 };
                 match validate_candidate(&cand) {

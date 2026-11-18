@@ -81,6 +81,16 @@
   `/data/aikun.surreal`);迁移工具默认目标同步。
 
 ## [Unreleased]
+### 新增(在线登录支持国内 + 按钮改名)
+
+- **国内(BigModel 账号)在线登录**(2026-11-19 实测:同一 OAuth 端点,
+  `provider=bigmodel` → 授权页 bigmodel.cn/login;zai → chat.z.ai):
+  login-init/login-poll 增加 `env`(intl|cn,缺省 intl);国内登录
+  ready 后建渠道 base=zcode.bigmodel.cn(与账号体系同环境)。
+- **按钮改名**:「ZCode 在线登录(国际)」→「**在线登录**」,
+  国际/国内两个 ZCode 页都显示,env 随页自动判定。
+
+## [Unreleased]
 ### 变更(ZCode 免费额度口径修正:窗口/额度/领取时刻/术语)
 
 - **术语**:签到 → **领取免费额度**(按钮"领取"/"全部领取免费额度",

@@ -134,17 +134,19 @@ function AppPage({ appId }: { appId: AppId }) {
     sonnerToast.success('已导出(⚠ 文件含明文凭证,仅可信环境存储)')
   }
 
-  // ZCode 在线登录(仅国际 z.ai 账号;国内 BigModel 账号暂用粘贴 JWT/API Key):
+  // 在线登录(env 随页:intl = z.ai 账号 / cn = 智谱 BigModel 账号):
   // init → 开授权窗 → 每 3s 轮询,总超时 5 分钟
   const startLogin = async () => {
+    // env 随应用页:zcode-cn = 智谱 BigModel 账号,否则 z.ai 国际账号
+    const env = appId === 'zcode-cn' ? 'cn' : 'intl'
     setLogin({ state: 'waiting', message: '正在发起授权…' })
-    const r = await api<{ flow_id: string; authorize_url: string; poll_token: string }>('POST', '/api/providers/zcode/login-init')
+    const r = await api<{ flow_id: string; authorize_url: string; poll_token: string }>('POST', '/api/providers/zcode/login-init', { env })
     if (!r.ok) {
       setLogin({ state: 'error', message: errMsg(r) })
       return
     }
     window.open(r.data.authorize_url, '_blank', 'noopener')
-    setLogin({ state: 'waiting', authorizeUrl: r.data.authorize_url, message: '已打开授权窗口,完成授权后自动创建渠道并领取免费额度…' })
+    setLogin({ state: 'waiting', authorizeUrl: r.data.authorize_url, message: `已打开授权窗口(${env === 'cn' ? '智谱 BigModel 账号' : 'z.ai 国际账号'}),完成授权后自动创建渠道并领取免费额度…` })
     const started = Date.now()
     const tick = async () => {
       if (Date.now() - started > 5 * 60_000) {
@@ -154,6 +156,7 @@ function AppPage({ appId }: { appId: AppId }) {
       const p = await api<{ status: string; email?: string }>('POST', '/api/providers/zcode/login-poll', {
         flow_id: r.data.flow_id,
         poll_token: r.data.poll_token,
+        env,
       })
       if (!p.ok) {
         setLogin({ state: 'error', message: errMsg(p) })
@@ -252,9 +255,9 @@ function AppPage({ appId }: { appId: AppId }) {
             <Button variant="outline" onClick={() => void doExport()}>导出</Button>
             <Button variant="outline" onClick={() => setImportOpen(true)}>导入</Button>
             {appId === 'zcode' && <Button onClick={() => void claimAll()}>全部领取免费额度</Button>}
-            {appId === 'zcode' && (
+            {appId.startsWith('zcode') && (
               <Button variant="outline" onClick={() => void startLogin()} disabled={login.state === 'waiting'}>
-                {login.state === 'waiting' ? '授权中…' : 'ZCode 在线登录(国际)'}
+                {login.state === 'waiting' ? '授权中…' : '在线登录'}
               </Button>
             )}
             <Button onClick={() => setBatchOpen(true)}>+ 批量添加</Button>
@@ -295,7 +298,7 @@ function AppPage({ appId }: { appId: AppId }) {
             <CardContent className="p-0">
               {data.length === 0 ? (
                 <div className="py-10 text-center text-sm text-muted-foreground">
-                  {list.isLoading ? '加载中...' : `暂无${conf.label}渠道——批量粘贴凭证添加${appId === 'zcode' ? ',或用「ZCode 在线登录」一键接入(国际)' : ''}`}
+                  {list.isLoading ? '加载中...' : `暂无${conf.label}渠道——批量粘贴凭证添加${appId.startsWith('zcode') ? ',或用「在线登录」一键接入' : ''}`}
                 </div>
               ) : (
                 <Table>
@@ -370,7 +373,7 @@ const PROXY_PRESETS: { id: string; kind: string; name: string; website_url: stri
     docs_url: 'https://zcode.z.ai/cn/docs', protocols: ['anthropic'], default_protocol: 'anthropic',
     openai_base_url: 'https://zcode.z.ai', anthropic_base_url: 'https://zcode.z.ai',
     key_placeholder: 'ZCode 客户端 JWT(z.ai 国际账号),每行一个',
-    hint: '推荐改用「ZCode 在线登录」一键授权;手动粘贴 JWT 也可。闲时(北京 23:00-09:00)Flash 零计费。',
+    hint: '推荐改用「在线登录」一键授权;手动粘贴 JWT 也可。免费窗口 Flash 零计费。',
     apps: ['zcode'],
   },
   {

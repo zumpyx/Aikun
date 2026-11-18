@@ -64,6 +64,136 @@ impl AsRef<str> for ZcodeLoginPollResultStatus {
         self.as_str()
     }
 }
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ZcodeLoginPollRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<ZcodeLoginPollRequestEnv>,
+    pub flow_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub poll_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f64>,
+}
+impl ZcodeLoginPollRequest {
+    /// Construct this request with every required wire field.
+    pub fn new(flow_id: String, poll_token: String) -> Self {
+        Self {
+            flow_id,
+            poll_token,
+            env: None,
+            name: None,
+            priority: None,
+            weight: None,
+        }
+    }
+    /// Start a dependency-free builder with every required wire field.
+    pub fn builder(flow_id: String, poll_token: String) -> ZcodeLoginPollRequestBuilder {
+        ZcodeLoginPollRequestBuilder::new(flow_id, poll_token)
+    }
+}
+/// Dependency-free builder for [`#struct_name`].
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct ZcodeLoginPollRequestBuilder {
+    value: ZcodeLoginPollRequest,
+}
+impl ZcodeLoginPollRequestBuilder {
+    /// Start a builder with every required wire field.
+    pub fn new(flow_id: String, poll_token: String) -> Self {
+        Self {
+            value: ZcodeLoginPollRequest::new(flow_id, poll_token),
+        }
+    }
+    #[doc = concat!("Set the optional `", "env", "` request field.")]
+    #[must_use]
+    pub fn env(mut self, env: ZcodeLoginPollRequestEnv) -> Self {
+        self.value.env = Some(env);
+        self
+    }
+    #[doc = concat!("Set the optional `", "name", "` request field.")]
+    #[must_use]
+    pub fn name(mut self, name: String) -> Self {
+        self.value.name = Some(name);
+        self
+    }
+    #[doc = concat!("Set the optional `", "priority", "` request field.")]
+    #[must_use]
+    pub fn priority(mut self, priority: i64) -> Self {
+        self.value.priority = Some(priority);
+        self
+    }
+    #[doc = concat!("Set the optional `", "weight", "` request field.")]
+    #[must_use]
+    pub fn weight(mut self, weight: f64) -> Self {
+        self.value.weight = Some(weight);
+        self
+    }
+    /// Finish building the request model.
+    pub fn build(self) -> ZcodeLoginPollRequest {
+        self.value
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ZcodeLoginPollRequestEnv {
+    #[default]
+    #[serde(rename = "intl")]
+    Intl,
+    #[serde(rename = "cn")]
+    Cn,
+}
+impl ZcodeLoginPollRequestEnv {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Intl => "intl",
+            Self::Cn => "cn",
+        }
+    }
+}
+impl ::std::fmt::Display for ZcodeLoginPollRequestEnv {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ZcodeLoginPollRequestEnv {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+///在线登录环境(账号体系);缺省 intl。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ZcodeLoginInitRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<ZcodeLoginInitRequestEnv>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ZcodeLoginInitRequestEnv {
+    #[default]
+    #[serde(rename = "intl")]
+    Intl,
+    #[serde(rename = "cn")]
+    Cn,
+}
+impl ZcodeLoginInitRequestEnv {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Intl => "intl",
+            Self::Cn => "cn",
+        }
+    }
+}
+impl ::std::fmt::Display for ZcodeLoginInitRequestEnv {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ZcodeLoginInitRequestEnv {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 ///本人钱包(金额均元;日序列合并明细表与日聚合表,不重复计数)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Wallet {
@@ -2763,67 +2893,4 @@ pub struct ZcodeLoginInitResult {
     pub authorize_url: String,
     pub flow_id: String,
     pub poll_token: String,
-}
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ZcodeLoginPollRequest {
-    pub flow_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub poll_token: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub priority: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub weight: Option<f64>,
-}
-impl ZcodeLoginPollRequest {
-    /// Construct this request with every required wire field.
-    pub fn new(flow_id: String, poll_token: String) -> Self {
-        Self {
-            flow_id,
-            poll_token,
-            name: None,
-            priority: None,
-            weight: None,
-        }
-    }
-    /// Start a dependency-free builder with every required wire field.
-    pub fn builder(flow_id: String, poll_token: String) -> ZcodeLoginPollRequestBuilder {
-        ZcodeLoginPollRequestBuilder::new(flow_id, poll_token)
-    }
-}
-/// Dependency-free builder for [`#struct_name`].
-#[derive(Debug, Clone)]
-#[must_use]
-pub struct ZcodeLoginPollRequestBuilder {
-    value: ZcodeLoginPollRequest,
-}
-impl ZcodeLoginPollRequestBuilder {
-    /// Start a builder with every required wire field.
-    pub fn new(flow_id: String, poll_token: String) -> Self {
-        Self {
-            value: ZcodeLoginPollRequest::new(flow_id, poll_token),
-        }
-    }
-    #[doc = concat!("Set the optional `", "name", "` request field.")]
-    #[must_use]
-    pub fn name(mut self, name: String) -> Self {
-        self.value.name = Some(name);
-        self
-    }
-    #[doc = concat!("Set the optional `", "priority", "` request field.")]
-    #[must_use]
-    pub fn priority(mut self, priority: i64) -> Self {
-        self.value.priority = Some(priority);
-        self
-    }
-    #[doc = concat!("Set the optional `", "weight", "` request field.")]
-    #[must_use]
-    pub fn weight(mut self, weight: f64) -> Self {
-        self.value.weight = Some(weight);
-        self
-    }
-    /// Finish building the request model.
-    pub fn build(self) -> ZcodeLoginPollRequest {
-        self.value
-    }
 }

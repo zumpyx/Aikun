@@ -1,7 +1,7 @@
 //! ZCode OAuth 在线登录端口实现(reqwest;装配层注入 admin 服务)。
 //!
 // 流程移植自 Zcode2Api internal/gateway/login.go:init(随机 poll_token
-// 作 Bearer,body {"provider":"zai"})→ 浏览器 authorize → poll 轮询。
+// 作 Bearer,body {"provider":"zai"|"bigmodel"})→ 浏览器 authorize → poll 轮询。
 // captcha:origin 已 skip(2026-10-08 起 chat 请求不再要求),此处不带。
 
 pub struct ZcodeOAuthImpl {
@@ -10,7 +10,13 @@ pub struct ZcodeOAuthImpl {
 
 #[async_trait::async_trait]
 impl aikun_admin::admin_providers::ZcodeOAuth for ZcodeOAuthImpl {
-    async fn init(&self) -> Result<(aikun_admin::admin_providers::ZcodeOAuthInit, String), String> {
+    async fn init(
+        &self,
+        env: &str,
+    ) -> Result<(aikun_admin::admin_providers::ZcodeOAuthInit, String), String> {
+        // env → 账号体系 provider(2026-11-19 实测:bigmodel 走智谱授权页,
+        // zai 走 z.ai 授权页;同一 init 端点,无效值上游回 code 1000)。
+        let provider = if env == "cn" { "bigmodel" } else { "zai" };
         let poll_token: String = {
             use rand::RngCore;
             let mut buf = [0u8; 32];
@@ -24,7 +30,7 @@ impl aikun_admin::admin_providers::ZcodeOAuth for ZcodeOAuthImpl {
         let resp = client
             .post(format!("{}/oauth/cli/init", self.base))
             .bearer_auth(&poll_token)
-            .json(&serde_json::json!({"provider": "zai"}))
+            .json(&serde_json::json!({"provider": provider}))
             .send()
             .await
             .map_err(|e| format!("oauth init 请求失败: {}", e.without_url()))?;

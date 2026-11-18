@@ -147,11 +147,14 @@ pub trait AdminApi: Send + Sync + 'static {
         &self,
         body: AdminImportProvidersRequest,
     ) -> AdminImportProvidersResponse;
-    /// ZCode 在线登录——发起 OAuth 授权流
+    /// 在线登录——发起 OAuth 授权流(国际/国内)
     ///
     /// `POST /api/providers/zcode/login-init`
-    async fn admin_zcode_login_init(&self) -> AdminZcodeLoginInitResponse;
-    /// ZCode 在线登录——轮询授权结果,ready 即建渠道
+    async fn admin_zcode_login_init(
+        &self,
+        body: Option<ZcodeLoginInitRequest>,
+    ) -> AdminZcodeLoginInitResponse;
+    /// 在线登录——轮询授权结果,ready 即建渠道
     ///
     /// `POST /api/providers/zcode/login-poll`
     async fn admin_zcode_login_poll(
