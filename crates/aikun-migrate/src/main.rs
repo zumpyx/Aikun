@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! AIKUN_DATABASE_URL=sqlite:///path/aikun.db \
-//! AIKUN_SURREAL_URL=surrealkv://./aikun.surreal \
+//! AIKUN_SURREAL_URL=surrealkv://./data/aikun.surreal \
 //! aikun-migrate
 //! ```
 //!
@@ -102,7 +102,7 @@ fn parse_args() -> Result<(String, String), String> {
     let surreal = std::env::var("AIKUN_SURREAL_URL")
         .ok()
         .or(surreal)
-        .unwrap_or_else(|| "surrealkv://./aikun.surreal".to_string());
+        .unwrap_or_else(|| "surrealkv://./data/aikun.surreal".to_string());
     Ok((sqlite, surreal))
 }
 

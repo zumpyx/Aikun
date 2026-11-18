@@ -172,11 +172,13 @@ impl Endpoint {
         })
     }
 
-    /// 嵌入式默认端点:工作目录下的 `./aikun.surreal` 目录(位置语义沿用
-    /// `AIKUN_DATABASE_URL` 的"默认工作目录"约定,见设计文档 §二)。
+    /// 嵌入式默认端点:工作目录下的 `./data/aikun.surreal` 目录
+    /// (2026-11-18 起数据统一收进 data/;config.rs 对旧默认位置
+    /// `./aikun.surreal` 有升级兼容,以二进制的 config 为准——本方法
+    /// 仅供无 config 上下文的调用方取"某个嵌入式默认")。
     pub fn embedded_default() -> Self {
         Self {
-            address: "surrealkv://./aikun.surreal".to_string(),
+            address: "surrealkv://./data/aikun.surreal".to_string(),
             ns: DEFAULT_NAMESPACE.to_string(),
             db: DEFAULT_DATABASE.to_string(),
             auth: None,

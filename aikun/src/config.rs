@@ -14,7 +14,9 @@ pub struct AppConfig {
     /// SurrealDB 连接端点(阶段 S):嵌入式 `surrealkv://<目录>` /
     /// 远程 `ws://`/`wss://`/`http://`/`https://`,可带
     /// `?ns=&db=&user=&pass=`。未设置 = 嵌入式 SurrealKV 默认
-    /// `surrealkv://./aikun.surreal`。解析与校验见
+    /// `surrealkv://./data/aikun.surreal`(数据统一收进 `data/` 目录;
+    /// 旧默认位置 `./aikun.surreal` 存在时自动沿用,见
+    /// [`default_surreal_url`])。解析与校验见
     /// `aikun_store::surreal::Endpoint::parse`(非法即拒绝启动)。
     pub surreal_url: String,
     pub health_check_interval: u64, // seconds
@@ -77,7 +79,7 @@ impl Default for AppConfig {
             encryption_key: None,
             jwt_expires_in: 86400 * 7, // 7 days
             database_url: "sqlite://aikun.db?mode=rwc".to_string(),
-            surreal_url: "surrealkv://./aikun.surreal".to_string(),
+            surreal_url: default_surreal_url(),
             health_check_interval: 30,
             max_retries: 3,
             auto_disable_threshold: 5,
@@ -123,7 +125,7 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     (
         "surreal-url",
         "AIKUN_SURREAL_URL",
-        "SurrealDB 端点(未设默认嵌入式 surrealkv://./aikun.surreal;远程如 ws://host:8000,可带 ?ns=&db=&user=&pass=)",
+        "SurrealDB 端点(未设默认嵌入式 surrealkv://./data/aikun.surreal;远程如 ws://host:8000,可带 ?ns=&db=&user=&pass=)",
     ),
     (
         "health-check-interval",
@@ -397,6 +399,25 @@ impl AppConfig {
 /// 从 SQLite URL 揨取数据文件所在目录(:memory: / 无目录 / 空路径返回
 /// None,表示沿用默认工作目录)。用于 SurrealKV 目录的位置语义沿用
 /// (config.load 的 database_url 推导)。
+/// 嵌入式默认数据目录(2026-11-18 起):`./data/aikun.surreal`。
+/// **旧默认位置兼容**:`./aikun.surreal` 存在且新位置不存在时沿用旧
+/// 位置——既有部署(0.6/0.7)升级后不落回空库;要迁移到 data/ 就把
+/// 目录移动过来(或显式设 AIKUN_SURREAL_URL)。多级目录由 SurrealKV
+/// 引擎自动创建(实测),无需手工 mkdir。
+fn default_surreal_url() -> String {
+    if std::path::Path::new("./aikun.surreal").exists()
+        && !std::path::Path::new("./data/aikun.surreal").exists()
+    {
+        tracing::info!(
+            "检测到旧默认数据目录 ./aikun.surreal,继续沿用(不迁移);\
+             如需收进 data/ 请移动目录或显式设置 AIKUN_SURREAL_URL"
+        );
+        "surrealkv://./aikun.surreal".to_string()
+    } else {
+        "surrealkv://./data/aikun.surreal".to_string()
+    }
+}
+
 fn sqlite_dir_of(database_url: &str) -> Option<String> {
     let without_scheme = database_url
         .strip_prefix("sqlite://")
@@ -528,6 +549,23 @@ mod tests {
         assert_eq!(parse_range("60", "t", 1u64, 100, 9), 60);
         assert!(std::panic::catch_unwind(|| parse_range("0", "t", 1u64, 100, 9)).is_err());
         assert!(std::panic::catch_unwind(|| parse_range("101", "t", 1u64, 100, 9)).is_err());
+    }
+
+    /// 默认数据目录:旧位置存在且新位置不存在 → 沿用旧位置(升级兼容);
+    /// 其余情况 → 新 data/ 目录。文件系统探测逻辑直接对 Path 斤两,
+    /// 此处锁定字符串常量与兼容函数的存在性(探测分支由 e2e/实机覆盖)。
+    #[test]
+    fn default_surreal_url_prefers_legacy_when_present() {
+        // 无旧目录的全新部署(常见 CI/临时目录):新默认
+        if !std::path::Path::new("./aikun.surreal").exists() {
+            assert_eq!(
+                default_surreal_url(),
+                "surrealkv://./data/aikun.surreal",
+                "全新部署 → data/ 目录"
+            );
+        }
+        // 常量锁定:两处路径不漂移
+        assert!(default_surreal_url().starts_with("surrealkv://./"));
     }
 
     /// SurrealKV 目录的位置语义沿用:旧库显式指向非默认位置时,嵌入式

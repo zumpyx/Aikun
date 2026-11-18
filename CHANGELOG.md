@@ -27,6 +27,17 @@
   transport(主/透传)与健康探测三处接线;前端渠道预设新增
   "ZCode(GLM)"。
 
+## [Unreleased]
+### 变更(数据目录)
+
+- **默认数据目录收进 `data/`**:嵌入式 SurrealKV 默认端点
+  `surrealkv://./aikun.surreal` → `surrealkv://./data/aikun.surreal`
+  (多级目录由引擎自动创建)。**旧部署兼容**:工作目录存在旧
+  `./aikun.surreal/` 且 `./data/aikun.surreal` 不存在时自动沿用旧位置
+  (info 日志提示),升级不落回空库;要迁移就把目录移动到 `data/` 下或
+  显式设置 `AIKUN_SURREAL_URL`。docker 部署不受影响(容器内显式
+  `/data/aikun.surreal`);迁移工具默认目标同步。
+
 ## [0.7.0] - 2026-11-18
 
 本版打包:roadmap 阶段 2(管线显式化)收尾 + 阶段 3 尾巴(熔断/计费幂等/
