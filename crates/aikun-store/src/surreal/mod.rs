@@ -449,6 +449,18 @@ pub const SCHEMA_SURQL: &str = r#"
     DEFINE FIELD IF NOT EXISTS provider ON TABLE channel_affinity TYPE record<provider>;
     DEFINE FIELD IF NOT EXISTS updated_at ON TABLE channel_affinity TYPE datetime DEFAULT time::now();
 
+    // ---- 反代应用任务记录(id = [provider, task_type];覆盖式快照,
+    //      每渠道每任务一行,签到/领取面板数据源) ----
+    DEFINE TABLE IF NOT EXISTS proxy_task SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS provider ON TABLE proxy_task TYPE record<provider>;
+    DEFINE FIELD IF NOT EXISTS task_type ON TABLE proxy_task TYPE string;
+    DEFINE FIELD IF NOT EXISTS last_run_at ON TABLE proxy_task TYPE datetime DEFAULT time::now();
+    DEFINE FIELD IF NOT EXISTS source ON TABLE proxy_task TYPE string;
+    DEFINE FIELD IF NOT EXISTS claimed ON TABLE proxy_task TYPE array DEFAULT [];
+    DEFINE FIELD IF NOT EXISTS skipped ON TABLE proxy_task TYPE array DEFAULT [];
+    DEFINE FIELD IF NOT EXISTS problems ON TABLE proxy_task TYPE array DEFAULT [];
+    DEFINE INDEX IF NOT EXISTS idx_proxy_task_type ON TABLE proxy_task FIELDS task_type;
+
     // ---- 管理员调账流水(amount/balance_after:整数微元,红线) ----
     DEFINE TABLE IF NOT EXISTS billing_transaction SCHEMAFULL;
     DEFINE FIELD IF NOT EXISTS user ON TABLE billing_transaction TYPE record<user>;

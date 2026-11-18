@@ -2770,6 +2770,67 @@ impl IntoResponse for AdminZcodeLoginPollResponse {
         }
     }
 }
+/// Response for `GET /api/providers/zcode/tasks` (operationId `adminListZcodeTasks`).
+pub enum AdminListZcodeTasksResponse {
+    Ok(ProxyTaskList),
+    Unauthorized(Problem),
+    Forbidden(Problem),
+    InternalServerError(Problem),
+}
+impl IntoResponse for AdminListZcodeTasksResponse {
+    fn into_response(self) -> ::axum::response::Response {
+        match self {
+            Self::Ok(body) => {
+                let mut response = (StatusCode::OK, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::Unauthorized(body) => {
+                let mut response = (StatusCode::UNAUTHORIZED, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/problem+json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::Forbidden(body) => {
+                let mut response = (StatusCode::FORBIDDEN, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/problem+json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::InternalServerError(body) => {
+                let mut response = (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/problem+json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+        }
+    }
+}
 /// Response for `POST /api/providers/{id}/zcode/claim` (operationId `adminZcodeClaimQuota`).
 pub enum AdminZcodeClaimQuotaResponse {
     Ok(AdminZcodeClaimResult),

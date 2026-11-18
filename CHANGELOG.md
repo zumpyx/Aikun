@@ -81,6 +81,34 @@
   `/data/aikun.surreal`);迁移工具默认目标同步。
 
 ## [Unreleased]
+### 新增(反代应用中心 + ZCode 国内外双环境)
+
+- **反代页重构为应用中心**(`/proxies/:app`):每应用独立子页
+  (ZCode / Z.AI Chat / WorkBuddy / Qoder),列表与导入导出按应用
+  归组(channel_kind 多值过滤,`?kind=zcode,zai-plan,...`)。
+- **ZCode 国内/国外双环境**(用户裁决"注意区分国内和国外的,都支持"):
+  国际 = z.ai(ZCode 订阅 JWT `zcode.z.ai` / Coding Plan API Key
+  `api.z.ai/api/anthropic`);国内 = 智谱 BigModel(ZCode 客户端 JWT
+  `zcode.bigmodel.cn`(域名实测存在,端点族同构,零代码适配)/
+  Coding Plan API Key `open.bigmodel.cn/api/anthropic`)。两侧凭证
+  互不通用。新增 `zai-plan` / `bigmodel-plan` 适配器 kind(官方
+  Anthropic 兼容端点,标准协议);批量添加四预设(环境 × 凭证形态)。
+- **签到任务面板**:领取(签到)结果落 `proxy_task` 快照表
+  (source = manual/oauth/auto),`GET /api/providers/zcode/tasks`
+  查询;ZCode 应用页显示每渠道上次签到(来源/时间/明细悬浮)。
+- **每日自动签到**:北京时间 `AIKUN_ZCODE_CLAIM_HOUR`(默认 9)点
+  10 分对全部活跃 ZCode 订阅渠道串行领取(渠道间 2s);
+  `AIKUN_ZCODE_AUTO_CLAIM=false` 可关。
+- **渠道业务模块化**(用户要求):zcode 业务拆目录模块——
+  channels `adapters/zcode/{mod,billing,mcp}`、admin
+  `admin_providers/zcode.rs`、bin `src/zcode/{oauth,claim,scheduler}`;
+  对外路径不变。新应用按此结构扩展。
+
+### 变更(渠道拆分批次后续)
+
+- ZCode 在线登录标注"国际"(国内 BigModel 账号暂用粘贴 JWT/API Key)。
+
+## [Unreleased]
 ### 新增(ZCode 免费额度领取 + MCP 工具透传)
 
 - **免费额度领取**(`POST /api/providers/{id}/zcode/claim`):官方

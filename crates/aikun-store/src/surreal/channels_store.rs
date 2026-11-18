@@ -79,6 +79,20 @@ use aikun_channels::Provider;
 use crate::surreal::SurrealHandle;
 use crate::{CacheToken, StoreError};
 
+/// 反代应用任务快照(覆盖式,每渠道每任务一行)。
+#[derive(Debug, Clone)]
+pub struct ProxyTaskRow {
+    pub provider_id: String,
+    pub task_type: String,
+    /// RFC3339。
+    pub last_run_at: String,
+    /// manual / oauth / auto。
+    pub source: String,
+    pub claimed: Vec<String>,
+    pub skipped: Vec<String>,
+    pub problems: Vec<String>,
+}
+
 /// 渠道域能力:async trait(async 化决策见设计文档 §六)。
 #[async_trait::async_trait]
 pub trait ChannelStore: Send + Sync {
@@ -199,9 +213,20 @@ pub trait ChannelStore: Send + Sync {
     async fn list_providers_by_priority(
         &self,
         category: Option<&str>,
+        kinds: Option<&[String]>,
         limit: i64,
         offset: i64,
     ) -> Result<(i64, Vec<Provider>), StoreError>;
+
+    /// 反代应用任务快照 UPSERT(数组 id `proxy_task:[provider, task_type]`;
+    /// 覆盖式,签到/领取面板数据源)。
+    async fn upsert_proxy_task(&self, row: ProxyTaskRow) -> Result<(), StoreError>;
+
+    /// 全部任务快照(小表全量;按 task_type 过滤,None = 全部)。
+    async fn list_proxy_tasks(
+        &self,
+        task_type: Option<&str>,
+    ) -> Result<Vec<ProxyTaskRow>, StoreError>;
 
     /// 全部渠道(含禁用)的 models 集合(计费页 price-in-use 判定;
     /// 查询失败由调用方按旧行为静默空集)。
@@ -1445,6 +1470,7 @@ impl ChannelStore for SurrealChannels {
     async fn list_providers_by_priority(
         &self,
         category: Option<&str>,
+        kinds: Option<&[String]>,
         limit: i64,
         offset: i64,
     ) -> Result<(i64, Vec<Provider>), StoreError> {
@@ -1457,13 +1483,26 @@ impl ChannelStore for SurrealChannels {
             Some(other) => return Err(StoreError::Failed(format!("未知分类 {other}"))),
             None => "",
         };
+        // kind 精确过滤(应用中心归组,逗号多值):值来自注册表合法 kind,
+        // 引号剥除后拼入;空集按无过滤处理。
+        let kind_filter = match kinds {
+            Some(ks) if !ks.is_empty() => {
+                let in_list = ks
+                    .iter()
+                    .map(|k| format!("'{}'", k.trim().replace('\'', "")))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(" AND channel_kind IN [{in_list}]")
+            }
+            _ => String::new(),
+        };
         let mut sql = String::from("SELECT * FROM provider");
         sql.push_str(cond);
-        let mut sql = String::from("SELECT * FROM provider");
-        sql.push_str(cond);
+        sql.push_str(&kind_filter);
         sql.push_str(" ORDER BY priority DESC, name ASC LIMIT $limit START $offset;");
         let mut count = String::from("SELECT count() AS total FROM provider");
         count.push_str(cond);
+        count.push_str(&kind_filter);
         count.push_str(" GROUP ALL;");
         sql.push('\n');
         sql.push_str(&count);
@@ -1485,6 +1524,50 @@ impl ChannelStore for SurrealChannels {
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(0);
         Ok((total, page.iter().filter_map(provider_from_json).collect()))
+    }
+
+    async fn upsert_proxy_task(&self, row: ProxyTaskRow) -> Result<(), StoreError> {
+        // 数组 record id 定位 UPSERT(同 model_health 惯例);覆盖式快照。
+        self.handle
+            .db()
+            .query(
+                "UPSERT type::record('proxy_task', [type::record('provider', $pid), $task]) SET
+                    provider = type::record('provider', $pid),
+                    task_type = $task,
+                    last_run_at = time::now(),
+                    source = $source,
+                    claimed = $claimed,
+                    skipped = $skipped,
+                    problems = $problems;",
+            )
+            .bind(("pid", row.provider_id.clone()))
+            .bind(("task", row.task_type.clone()))
+            .bind(("source", row.source.clone()))
+            .bind(("claimed", row.claimed.clone()))
+            .bind(("skipped", row.skipped.clone()))
+            .bind(("problems", row.problems.clone()))
+            .await
+            .map_err(qerr)?
+            .check()
+            .map_err(qerr)?;
+        Ok(())
+    }
+
+    async fn list_proxy_tasks(
+        &self,
+        task_type: Option<&str>,
+    ) -> Result<Vec<ProxyTaskRow>, StoreError> {
+        let sql = match task_type {
+            Some(_) => "SELECT * FROM proxy_task WHERE task_type = $task ORDER BY provider",
+            None => "SELECT * FROM proxy_task ORDER BY provider",
+        };
+        let mut query = self.handle.db().query(sql);
+        if let Some(t) = task_type {
+            query = query.bind(("task", t));
+        }
+        let mut res = query.await.map_err(qerr)?.check().map_err(qerr)?;
+        let rows: Vec<serde_json::Value> = res.take(0).map_err(qerr)?;
+        Ok(rows.iter().filter_map(proxy_task_from_json).collect())
     }
 
     async fn all_channel_models(&self) -> Result<std::collections::HashSet<String>, StoreError> {
@@ -1558,6 +1641,34 @@ fn model_from_health_id(id: &str) -> String {
 }
 
 // ---------- 单测(mem:// 进程内实例,设计文档 §七第 2 层) ----------
+
+/// proxy_task 行 → ProxyTaskRow(字段缺失按空集/默认处理,快照降级)。
+fn proxy_task_from_json(v: &serde_json::Value) -> Option<ProxyTaskRow> {
+    let pid = v
+        .get("provider")?
+        .as_str()?
+        .trim_start_matches("provider:")
+        .to_string();
+    let strs = |key: &str| -> Vec<String> {
+        v[key]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    Some(ProxyTaskRow {
+        provider_id: pid,
+        task_type: v.get("task_type")?.as_str()?.to_string(),
+        last_run_at: v["last_run_at"].as_str().unwrap_or_default().to_string(),
+        source: v["source"].as_str().unwrap_or("manual").to_string(),
+        claimed: strs("claimed"),
+        skipped: strs("skipped"),
+        problems: strs("problems"),
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -2147,7 +2258,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let (total, page) = store.list_providers_by_priority(None, 10, 0).await.unwrap();
+            let (total, page) = store
+                .list_providers_by_priority(None, None, 10, 0)
+                .await
+                .unwrap();
             assert_eq!(total, 2);
             assert_eq!(page[0].id, "prov-a", "priority 9 > 3");
 

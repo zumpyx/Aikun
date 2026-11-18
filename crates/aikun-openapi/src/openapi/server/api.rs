@@ -112,6 +112,7 @@ pub trait AdminApi: Send + Sync + 'static {
         limit: ::std::option::Option<i64>,
         offset: ::std::option::Option<i64>,
         category: ::std::option::Option<AdminListProvidersCategory>,
+        kind: ::std::option::Option<String>,
     ) -> AdminListProvidersResponse;
     /// 创建渠道(上游配置 + 加密 key)
     ///
@@ -137,6 +138,7 @@ pub trait AdminApi: Send + Sync + 'static {
     async fn admin_export_providers(
         &self,
         category: ::std::option::Option<AdminExportProvidersCategory>,
+        kind: ::std::option::Option<String>,
     ) -> AdminExportProvidersServerResponse;
     /// 导入渠道配置
     ///
@@ -156,6 +158,10 @@ pub trait AdminApi: Send + Sync + 'static {
         &self,
         body: ZcodeLoginPollRequest,
     ) -> AdminZcodeLoginPollResponse;
+    /// ZCode 签到(领取)任务面板
+    ///
+    /// `GET /api/providers/zcode/tasks`
+    async fn admin_list_zcode_tasks(&self) -> AdminListZcodeTasksResponse;
     /// 领取 ZCode 渠道的免费/营销额度
     ///
     /// `POST /api/providers/{id}/zcode/claim`

@@ -169,14 +169,20 @@ impl AdminApi for AdminService {
         category: ::std::option::Option<
             aikun_openapi::openapi::server::api::AdminListProvidersCategory,
         >,
+        kind: ::std::option::Option<String>,
     ) -> AdminListProvidersResponse {
         let cat = category.as_ref().map(|c| match c {
             aikun_openapi::openapi::server::api::AdminListProvidersCategory::Standard => "standard",
             aikun_openapi::openapi::server::api::AdminListProvidersCategory::Proxy => "proxy",
         });
         self.providers
-            .admin_list_providers(cat, limit, offset)
+            .admin_list_providers(cat, kind.as_deref(), limit, offset)
             .await
+    }
+    async fn admin_list_zcode_tasks(
+        &self,
+    ) -> aikun_openapi::openapi::server::errors::AdminListZcodeTasksResponse {
+        self.providers.admin_list_zcode_tasks().await
     }
     async fn admin_bulk_providers(
         &self,
@@ -189,6 +195,7 @@ impl AdminApi for AdminService {
         category: ::std::option::Option<
             aikun_openapi::openapi::server::api::AdminExportProvidersCategory,
         >,
+        kind: ::std::option::Option<String>,
     ) -> aikun_openapi::openapi::server::errors::AdminExportProvidersServerResponse {
         let cat = category.as_ref().map(|c| match c {
             aikun_openapi::openapi::server::api::AdminExportProvidersCategory::Standard => {
@@ -196,7 +203,9 @@ impl AdminApi for AdminService {
             }
             aikun_openapi::openapi::server::api::AdminExportProvidersCategory::Proxy => "proxy",
         });
-        self.providers.admin_export_providers(cat).await
+        self.providers
+            .admin_export_providers(cat, kind.as_deref())
+            .await
     }
     async fn admin_import_providers(
         &self,

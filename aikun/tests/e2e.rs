@@ -2717,3 +2717,195 @@ async fn mcp_passthrough_end_to_end() {
     let err: Value = r.json().await.unwrap();
     assert_eq!(err["error"]["type"], "invalid_request_error", "{err}");
 }
+
+/// kind 过滤(应用中心归组)+ 领取写 proxy_task 快照 + tasks 面板端点
+/// + zai-plan(国际 API Key 形态)标准 Anthropic 转发。
+#[tokio::test]
+async fn providers_kind_filter_and_claim_tasks() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn_with_env(&[
+        (
+            "AIKUN_ZCODE_OAUTH_BASE",
+            &format!("http://{}", mock.base.trim_start_matches("http://")),
+        ),
+        ("AIKUN_HEALTH_CHECK_INTERVAL", "3600"),
+    ])
+    .await;
+    let admin = app.admin_token().await;
+
+    // zcode 渠道(无 sub 的 key → 激活事件跳过,领取序列短)
+    app.seed_provider(&ProviderSeed {
+        name: "zc",
+        protocol: "anthropic",
+        base_url: &mock.base,
+        models: &["GLM-5.3-Flash"],
+        api_key: "fake-jwt-no-sub",
+        ..ProviderSeed::default()
+    })
+    .await;
+    // 渠道类型设为 zcode(种子走 generic 默认,PATCH 改 kind)
+    let provs = app
+        .client()
+        .get(format!("{}/api/providers", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    let provs: Value = provs.json().await.unwrap();
+    let zc_pid = provs["items"][0]["id"].as_str().unwrap().to_string();
+    let r = app
+        .client()
+        .patch(format!("{}/api/providers/{zc_pid}", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"channel_kind": "zcode"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "PATCH channel_kind=zcode");
+    // zai-plan 渠道(国际 API Key 形态;kind 在创建时直接带)
+    let r = app
+        .client()
+        .post(format!("{}/api/providers", app.base))
+        .bearer_auth(&admin)
+        .json(&serde_json::json!({
+            "name": "zai-key", "provider_type": "anthropic",
+            "anthropic_base_url": mock.base, "api_key": "zai-key-1",
+            "models": ["GLM-5.3"], "protocols": ["anthropic"], "default_protocol": "anthropic",
+            "channel_kind": "zai-plan",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "zai-plan 创建");
+
+    // kind 过滤
+    let get_ids = |q: &str| {
+        let url = format!("{}/api/providers?category=proxy{q}", app.base);
+        url
+    };
+    let _ = get_ids;
+    let r = app
+        .client()
+        .get(format!(
+            "{}/api/providers?category=proxy&kind=zcode",
+            app.base
+        ))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    let kinds: Vec<&str> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["channel_kind"].as_str().unwrap_or(""))
+        .collect();
+    assert!(kinds.iter().all(|k| *k == "zcode"), "{kinds:?}");
+    let r = app
+        .client()
+        .get(format!(
+            "{}/api/providers?category=proxy&kind=zcode,zai-plan",
+            app.base
+        ))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(
+        v["items"].as_array().map(Vec::len),
+        Some(2),
+        "多值 kind: {v}"
+    );
+
+    // zai-plan 转发:标准 Anthropic 形态打到 mock 的 /v1/messages
+    let user = app.seed_user_funded().await;
+    mock.push_json(
+        200,
+        json!({"id": "m1", "type": "message", "role": "assistant",
+               "content": [{"type": "text", "text": "hi"}],
+               "model": "GLM-5.3", "stop_reason": "end_turn",
+               "usage": {"input_tokens": 1, "output_tokens": 1}}),
+    );
+    let r = app
+        .client()
+        .post(format!("{}/v1/messages", app.base))
+        .bearer_auth(&user.api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&json!({"model": "GLM-5.3", "max_tokens": 16,
+                      "messages": [{"role": "user", "content": "hi"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "zai-plan 转发 200");
+    let reqs = mock.requests();
+    let mh = reqs
+        .iter()
+        .find(|q| q.path.ends_with("/v1/messages"))
+        .expect("打到 /v1/messages(标准 Anthropic 形态)");
+    assert_eq!(mh.authorization.as_deref(), Some("Bearer zai-key-1"));
+
+    // 领取(无 sub key → 序列:balance → preview → touch → claim)
+    let zc_id = {
+        let r = app
+            .client()
+            .get(format!(
+                "{}/api/providers?category=proxy&kind=zcode",
+                app.base
+            ))
+            .bearer_auth(&admin)
+            .send()
+            .await
+            .unwrap();
+        let v: Value = r.json().await.unwrap();
+        v["items"][0]["id"].as_str().unwrap().to_string()
+    };
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"plans": [{"plan_id": "owned"}]}}),
+    );
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"plans": [{"plan_id": "daily_free", "name": "每日免费额度", "priority": 5}]}}),
+    );
+    mock.push_json(200, json!({"code": 0, "data": {"deliveries": []}}));
+    mock.push_json(200, json!({"code": 0}));
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/{zc_id}/zcode/claim", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let res: Value = r.json().await.unwrap();
+    assert!(
+        res["claimed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "每日免费额度"),
+        "{res}"
+    );
+
+    // tasks 面板:快照已写(source=manual,ok=true)
+    let r = app
+        .client()
+        .get(format!("{}/api/providers/zcode/tasks", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let t: Value = r.json().await.unwrap();
+    let rec = t["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["provider_id"].as_str() == Some(zc_id.as_str()))
+        .expect("proxy_task 快照存在");
+    assert_eq!(rec["source"], "manual");
+    assert_eq!(rec["ok"], true);
+    assert_eq!(rec["task_type"], "zcode_claim");
+}

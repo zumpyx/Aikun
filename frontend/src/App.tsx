@@ -53,6 +53,7 @@ function LoginGate() {
           <Route path="/docs" element={<Docs />} />
           <Route path="/providers" element={<AdminRoute><Providers /></AdminRoute>} />
           <Route path="/proxies" element={<AdminRoute><ProxyProviders /></AdminRoute>} />
+          <Route path="/proxies/:app" element={<AdminRoute><ProxyProviders /></AdminRoute>} />
           <Route path="/users" element={<AdminRoute><Users /></AdminRoute>} />
           <Route path="/billing" element={<AdminRoute><Billing /></AdminRoute>} />
           <Route path="/models" element={<AdminRoute><Models /></AdminRoute>} />

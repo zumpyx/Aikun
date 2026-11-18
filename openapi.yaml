@@ -1639,6 +1639,14 @@ paths:
           schema:
             type: string
             enum: [standard, proxy]
+        - name: kind
+          in: query
+          description: |
+            channel_kind 精确过滤(应用中心按应用归组),逗号分隔多值,
+            如 kind=zcode,zai-plan,bigmodel-plan(ZCode 应用全家)。
+            与 category 可并用(先按分类再按 kind 收窄)。
+          schema:
+            type: string
       responses:
         '200':
           description: 渠道页
@@ -1797,6 +1805,12 @@ paths:
           schema:
             type: string
             enum: [standard, proxy]
+        - name: kind
+          in: query
+          description: |
+            channel_kind 精确过滤,逗号分隔多值(口径同列表接口)。
+          schema:
+            type: string
       responses:
         '200':
           description: |
@@ -1914,6 +1928,29 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+
+  /api/providers/zcode/tasks:
+    get:
+      tags: [Admin]
+      operationId: adminListZcodeTasks
+      summary: ZCode 签到(领取)任务面板
+      description: |
+        各 zcode 渠道的免费额度领取任务状态(手动/登录后自动/每日定时
+        三种来源都记 here):上次执行时间、领取/已持有/问题明细。
+        记录是"每渠道每任务一行"的覆盖式快照,不是历史流水。
+      responses:
+        '200':
+          description: 任务记录列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyTaskList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
   /api/providers/{id}/zcode/claim:
     post:
@@ -4184,6 +4221,44 @@ components:
           type: array
           items: {type: string}
       required: [claimed, skipped, problems]
+      additionalProperties: false
+
+    ProxyTaskRecord:
+      type: object
+      description: |
+        反代应用任务(如 zcode_claim 免费额度领取)的最近一次执行快照:
+        每渠道每任务一行,覆盖式更新。ok = problems 为空且无致命错误。
+      properties:
+        provider_id: {type: string}
+        task_type:
+          type: string
+          description: 任务类型(现仅 zcode_claim;预留签到家族扩展)
+        last_run_at: {type: string}
+        source:
+          type: string
+          enum: [manual, oauth, auto]
+          description: 触发来源(manual = 管理页按钮 / oauth = 在线登录后 / auto = 每日定时)
+        claimed:
+          type: array
+          items: {type: string}
+        skipped:
+          type: array
+          items: {type: string}
+        problems:
+          type: array
+          items: {type: string}
+        ok: {type: boolean}
+      required: [provider_id, task_type, last_run_at, source, claimed, skipped, problems, ok]
+      additionalProperties: false
+
+    ProxyTaskList:
+      type: object
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProxyTaskRecord'
+      required: [tasks]
       additionalProperties: false
 
     McpRequest:

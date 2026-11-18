@@ -29,6 +29,11 @@ pub struct AppConfig {
     pub breaker_failure_threshold: u32,
     /// 渠道熔断冷却时长(秒,9.5);到期恢复可选(半开)。
     pub breaker_cooldown_secs: u64,
+    /// ZCode 每日自动领取免费额度(签到任务;渠道串行,2s 间隔)。
+    pub zcode_auto_claim: bool,
+    /// 自动领取时刻(北京时间整点,0..=23;实际在该点后 10 分钟跑,
+    /// 避开整点发放竞态)。
+    pub zcode_claim_hour: u32,
     /// ZCode OAuth 在线登录端点(渠道拆分批次):默认官方
     /// https://zcode.z.ai/api/v1;e2e 用 mock 覆盖。
     pub zcode_oauth_base: String,
@@ -90,6 +95,8 @@ impl Default for AppConfig {
             auto_disable_threshold: 5,
             breaker_failure_threshold: 3,
             breaker_cooldown_secs: 30,
+            zcode_auto_claim: true,
+            zcode_claim_hour: 9,
             zcode_oauth_base: "https://zcode.z.ai/api/v1".to_string(),
             request_timeout_secs: 120,
             connect_timeout_secs: 15,
@@ -157,6 +164,16 @@ const SETTINGS: &[(&str, &str, &str)] = &[
         "breaker-cooldown-secs",
         "AIKUN_BREAKER_COOLDOWN_SECS",
         "渠道熔断冷却时长(秒,≥1,默认 30);到期恢复可选(半开)",
+    ),
+    (
+        "zcode-auto-claim",
+        "AIKUN_ZCODE_AUTO_CLAIM",
+        "ZCode 每日自动领取免费额度(默认 true;false 关闭签到任务)",
+    ),
+    (
+        "zcode-claim-hour",
+        "AIKUN_ZCODE_CLAIM_HOUR",
+        "自动领取时刻,北京时间整点 0..=23(默认 9;实际在整点后 10 分钟)",
     ),
     (
         "zcode-oauth-base",
@@ -335,6 +352,23 @@ impl AppConfig {
                 1,
                 config.breaker_cooldown_secs,
             );
+        }
+        if let Some(val) = get("zcode-auto-claim", "AIKUN_ZCODE_AUTO_CLAIM") {
+            config.zcode_auto_claim = matches!(
+                val.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+        }
+        if let Some(val) = get("zcode-claim-hour", "AIKUN_ZCODE_CLAIM_HOUR") {
+            let h: u32 = val
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("zcode-claim-hour 必须是 0..=23 的整数,当前值: {val}"));
+            assert!(
+                (0..=23).contains(&h),
+                "zcode-claim-hour 必须是 0..=23,当前值: {h}"
+            );
+            config.zcode_claim_hour = h;
         }
         if let Some(val) = get("zcode-oauth-base", "AIKUN_ZCODE_OAUTH_BASE") {
             let v = val.trim().trim_end_matches('/');

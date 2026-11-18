@@ -450,6 +450,56 @@ impl AsRef<str> for RedemptionCodeStatus {
         self.as_str()
     }
 }
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProxyTaskList {
+    pub tasks: Vec<ProxyTaskRecord>,
+}
+/**反代应用任务(如 zcode_claim 免费额度领取)的最近一次执行快照:
+每渠道每任务一行,覆盖式更新。ok = problems 为空且无致命错误。
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProxyTaskRecord {
+    pub claimed: Vec<String>,
+    pub last_run_at: String,
+    pub ok: bool,
+    pub problems: Vec<String>,
+    pub provider_id: String,
+    pub skipped: Vec<String>,
+    ///触发来源(manual = 管理页按钮 / oauth = 在线登录后 / auto = 每日定时)
+    pub source: ProxyTaskRecordSource,
+    ///任务类型(现仅 zcode_claim;预留签到家族扩展)
+    pub task_type: String,
+}
+///触发来源(manual = 管理页按钮 / oauth = 在线登录后 / auto = 每日定时)
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ProxyTaskRecordSource {
+    #[default]
+    #[serde(rename = "manual")]
+    Manual,
+    #[serde(rename = "oauth")]
+    Oauth,
+    #[serde(rename = "auto")]
+    Auto,
+}
+impl ProxyTaskRecordSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Oauth => "oauth",
+            Self::Auto => "auto",
+        }
+    }
+}
+impl ::std::fmt::Display for ProxyTaskRecordSource {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ProxyTaskRecordSource {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 ///导入结果:同 key 已存在 → skipped(不覆盖)。
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ProvidersImportResult {
