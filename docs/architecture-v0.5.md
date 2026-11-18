@@ -14,7 +14,7 @@
 | 4 | **`/v1/*` 纳入生成(2026-11-18 用户裁决,推翻 0.5 期的"/v1 永远手写")**:Proxy tag 8 个显式端点纳入生成;请求侧混合宽松 schema(核心字段 optional 类型化 + **每层显式 `additionalProperties: true`**——实测 0.24.0 生成 `#[serde(flatten)]`,未知字段不丢不拒,漏写的层会静默丢字段);响应侧管线动态产出(SSE/headers/厂商错误体),生成枚举装不下,由 gen-api.sh wrapper 注入 `Raw(Response)` 透传变体,装配层 `aikun/src/relay.rs` 只走 Raw;生成校验链的 problem+json 错误体经中间件改写为厂商格式;`/v1/{*path}` 通配兜底保留手写(OpenAPI 无通配语法);**Gemini 等新协议明确不做** | 原"永远手写"的三条理由被 2026-11-18 spike 逐条重估:① 契约属厂商 → 混合宽松 schema 只类型化网关真正消费的字段(model/stream 等),不镜像厂商契约、无第二份真相;② SSE 不适合生成器 → 响应侧不交给生成器,Raw 变体透传管线 Response;③ jsonschema 校验误拒扩展字段 → 实测 `additionalProperties: true` 下校验放行且 flatten 保留。用户知情后拍板统一走生成(入口校验/路由/trait 与管理面同构);安全网:扩展字段透传与错误形状各有 e2e 锚点,契约测试(aikun-protocol)不动 |
 | 5 | **channels 独立 crate,编译期静态注册** | 适配器只描述差异(URL/鉴权/归一化钩子),不做 I/O;不是动态插件系统 |
 | 6 | **pipeline 留在二进制 crate** | 只被二进制消费且阶段 2 大改中,过早 crate 化是纯摩擦 |
-| 7 | **前端保持 vanilla** | 路径随 spec 演化;TS 类型消费(vite + spec 生成)推迟到管理端 UI 大扩张时再评估 |
+| 7 | **前端 React 重写**(2026-11-18 用户裁决,推翻 0.5 期"保持 vanilla"):TS + Vite + Tailwind + shadcn/ui(radix 原语)+ TanStack Query + react-router(HashRouter) | 用户指定技术栈;dist 构建产物提交进仓库,build.rs 扫描生成 include 表(单二进制零外部工具纪律不变,Docker 无需 node);阶段 4 前端治理三项目(ESM/hash 路由/providers 弹窗去重)随重写一并完成 |
 | 8 | 仍然不做:Redis / PostgreSQL / 动态插件加载 / 每渠道一个 crate / 前端框架化 | 与 roadmap 一致,未推翻 |
 
 ## 二、最终项目结构
