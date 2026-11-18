@@ -35,6 +35,15 @@
   "ZCode(GLM)"。
 
 ## [Unreleased]
+### 变更(配置面)
+
+- **`AIKUN_DATABASE_URL` / `--database-url` 恢复为数据库端点的正式
+  配置**(用户裁决:数据库连接一个名字就够):非 `sqlite://` 值与
+  `AIKUN_SURREAL_URL` 完全等价(surreal-url 优先),不再打"已废弃"
+  警告;`sqlite://` 开头的旧值保持源库语义(迁移工具源 + 目录随迁)。
+  迁移工具的 env 源库同样只接纳 `sqlite://` 值,防止新语义值被误当
+  SQLite 打开。
+
 ### 变更(数据目录)
 
 - **默认数据目录收进 `data/`**:嵌入式 SurrealKV 默认端点

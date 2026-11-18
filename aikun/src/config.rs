@@ -8,8 +8,10 @@ pub struct AppConfig {
     /// 渠道 key 静态加密密钥;缺省时派生自 jwt_secret(见 crypto.rs)。
     pub encryption_key: Option<String>,
     pub jwt_expires_in: i64, // seconds
-    /// SQLite 数据库 URL(**已废弃**,阶段 S 起让位 surreal_url;SQLite
-    /// 后端与迁移工具在读,见 docs/surreal-migration.md §二)。
+    /// 旧 SQLite 源库位置(仅随迁语义:显式设 `AIKUN_DATABASE_URL` 且值为
+    /// `sqlite://` 时,嵌入式 SurrealKV 目录随迁同目录;2026-11-18 起
+    /// 该变量名的**非 sqlite 值就是 SurrealDB 端点**,等价于 surreal_url,
+    /// 见 [`resolve_surreal_endpoint`])。
     pub database_url: String,
     /// SurrealDB 连接端点(阶段 S):嵌入式 `surrealkv://<目录>` /
     /// 远程 `ws://`/`wss://`/`http://`/`https://`,可带
@@ -120,7 +122,7 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     (
         "database-url",
         "AIKUN_DATABASE_URL",
-        "已废弃(SQLite 后端与迁移工具在读):sqlite://aikun.db?mode=rwc",
+        "数据库端点(与 surreal-url 等价,surreal-url 优先):surrealkv://<目录> 或远程 ws:// 等;sqlite:// 旧值=源库位置随迁",
     ),
     (
         "surreal-url",
@@ -252,25 +254,35 @@ impl AppConfig {
                 config.jwt_expires_in,
             );
         }
-        if let Some(val) = get("database-url", "AIKUN_DATABASE_URL") {
-            // 废弃告警(阶段 S,SurrealDB 迁移):显式设置才告警——默认值
-            // 不告警,避免每个既有部署升级即刷日志。该值仍被 SQLite 后端
-            // (切换完成前)与迁移工具(读源库)消费,解析行为不变。
-            tracing::warn!(
-                "AIKUN_DATABASE_URL/--database-url 已废弃:阶段 S 起存储转向 SurrealDB \
-                 (AIKUN_SURREAL_URL);该值在 SQLite 后端移除前仍生效,迁移工具以它为源库"
-            );
-            config.database_url = val;
-        }
-        if let Some(val) = get("surreal-url", "AIKUN_SURREAL_URL") {
-            config.surreal_url = val;
-        } else if get("database-url", "AIKUN_DATABASE_URL").is_some() {
-            // 位置语义沿用:AIKUN_SURREAL_URL 未显式指定、而旧库指向
-            // 非默认位置(如 docker 卷挂载)时,嵌入式 SurrealKV 目录取
-            // 旧库同目录,数据位置随迁、不落回工作目录。
-            if let Some(dir) = sqlite_dir_of(&config.database_url) {
-                config.surreal_url = format!("surrealkv://{dir}/aikun.surreal");
+        let database_env = get("database-url", "AIKUN_DATABASE_URL");
+        // sqlite:// 开头的旧值只承载"源库位置"语义(随迁),不是 Surreal 端点;
+        // 其余值(non-sqlite)按 SurrealDB 端点接纳——AIKUN_DATABASE_URL 与
+        // AIKUN_SURREAL_URL 等价(2026-11-18 用户裁决:数据库连接一个名字
+        // 就够),细名优先。
+        if let Some(val) = &database_env {
+            config.database_url = val.clone();
+            if val.starts_with("sqlite://") {
+                tracing::info!(
+                    "AIKUN_DATABASE_URL 为 sqlite:// 旧值(源库位置语义):\
+                     嵌入式 SurrealKV 目录将随迁同目录;迁移后请改设 \
+                     SurrealDB 端点(本变量或 AIKUN_SURREAL_URL 均可)"
+                );
             }
+        }
+        match resolve_surreal_endpoint(
+            get("surreal-url", "AIKUN_SURREAL_URL").as_deref(),
+            database_env.as_deref(),
+        ) {
+            EndpointChoice::Surreal(url) => config.surreal_url = url,
+            EndpointChoice::FollowSqlite => {
+                // 位置语义沿用:未显式指定 Surreal 端点、而旧库指向
+                // 非默认位置(如 docker 卷挂载)时,嵌入式 SurrealKV 目录
+                // 取旧库同目录,数据位置随迁、不落回工作目录。
+                if let Some(dir) = sqlite_dir_of(&config.database_url) {
+                    config.surreal_url = format!("surrealkv://{dir}/aikun.surreal");
+                }
+            }
+            EndpointChoice::Default => {}
         }
         // 启动校验:非法端点直接拒绝启动(与 host 解析同口径,不静默回退
         // ——存错引擎/错库比拒启更难排查)。默认值同样过校验。
@@ -399,6 +411,34 @@ impl AppConfig {
 /// 从 SQLite URL 揨取数据文件所在目录(:memory: / 无目录 / 空路径返回
 /// None,表示沿用默认工作目录)。用于 SurrealKV 目录的位置语义沿用
 /// (config.load 的 database_url 推导)。
+/// [`resolve_surreal_endpoint`] 的判定结果。
+#[derive(Debug, PartialEq, Eq)]
+enum EndpointChoice {
+    /// 显式端点(来自 AIKUN_SURREAL_URL,或 AIKUN_DATABASE_URL 的非 sqlite 值)。
+    Surreal(String),
+    /// 无显式端点,但 database_url 是 sqlite:// 旧值 → 位置随迁。
+    FollowSqlite,
+    /// 无任何显式配置 → 默认(含旧目录兼容,见 [`default_surreal_url`])。
+    Default,
+}
+
+/// 两个变量名等价接纳 SurrealDB 端点(2026-11-18):
+/// `AIKUN_SURREAL_URL` 优先;`AIKUN_DATABASE_URL` 的 **非 sqlite:// 值**
+/// 等价于它(sqlite:// 开头的是旧源库位置,只触发随迁,不当端点解析)。
+fn resolve_surreal_endpoint(
+    surreal_env: Option<&str>,
+    database_env: Option<&str>,
+) -> EndpointChoice {
+    if let Some(url) = surreal_env {
+        return EndpointChoice::Surreal(url.to_string());
+    }
+    match database_env {
+        Some(v) if !v.starts_with("sqlite://") => EndpointChoice::Surreal(v.to_string()),
+        Some(_) => EndpointChoice::FollowSqlite,
+        None => EndpointChoice::Default,
+    }
+}
+
 /// 嵌入式默认数据目录(2026-11-18 起):`./data/aikun.surreal`。
 /// **旧默认位置兼容**:`./aikun.surreal` 存在且新位置不存在时沿用旧
 /// 位置——既有部署(0.6/0.7)升级后不落回空库;要迁移到 data/ 就把
@@ -549,6 +589,33 @@ mod tests {
         assert_eq!(parse_range("60", "t", 1u64, 100, 9), 60);
         assert!(std::panic::catch_unwind(|| parse_range("0", "t", 1u64, 100, 9)).is_err());
         assert!(std::panic::catch_unwind(|| parse_range("101", "t", 1u64, 100, 9)).is_err());
+    }
+
+    /// 两个变量名等价接纳 SurrealDB 端点;sqlite:// 旧值只触发随迁。
+    #[test]
+    fn surreal_endpoint_accepts_both_variable_names() {
+        use EndpointChoice::*;
+        // 细名优先
+        assert_eq!(
+            resolve_surreal_endpoint(Some("ws://h:8000"), Some("surrealkv://./x")),
+            Surreal("ws://h:8000".to_string())
+        );
+        // 通用名的非 sqlite 值 = 端点(等价)
+        assert_eq!(
+            resolve_surreal_endpoint(None, Some("surrealkv:///data/aikun.surreal")),
+            Surreal("surrealkv:///data/aikun.surreal".to_string())
+        );
+        assert_eq!(
+            resolve_surreal_endpoint(None, Some("wss://db.example.com?ns=p")),
+            Surreal("wss://db.example.com?ns=p".to_string())
+        );
+        // sqlite:// 旧值:随迁,不当端点
+        assert_eq!(
+            resolve_surreal_endpoint(None, Some("sqlite:///data/aikun.db?mode=rwc")),
+            FollowSqlite
+        );
+        // 全空:默认
+        assert_eq!(resolve_surreal_endpoint(None, None), Default);
     }
 
     /// 默认数据目录:旧位置存在且新位置不存在 → 沿用旧位置(升级兼容);

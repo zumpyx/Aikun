@@ -89,14 +89,19 @@ fn parse_args() -> Result<(String, String), String> {
             }
             "--help" | "-h" => {
                 eprintln!("aikun-migrate [--sqlite <url>] [--surreal <url>]");
-                eprintln!("env:AIKUN_DATABASE_URL(源)/ AIKUN_SURREAL_URL(目标)> CLI > 默认");
+                eprintln!(
+                    "env:AIKUN_DATABASE_URL(源,仅 sqlite:// 值)/ AIKUN_SURREAL_URL(目标)> CLI > 默认"
+                );
                 std::process::exit(0);
             }
             other => return Err(format!("未知参数 {other}(可用:--sqlite/--surreal)")),
         }
     }
+    // env 源库只接纳 sqlite:// 值——2026-11-18 起 AIKUN_DATABASE_URL 也可
+    // 装 SurrealDB 端点(与服务等价),拿它开 SQLite 会误报"不是合法库"。
     let sqlite = std::env::var("AIKUN_DATABASE_URL")
         .ok()
+        .filter(|v| v.starts_with("sqlite://"))
         .or(sqlite)
         .unwrap_or_else(|| "sqlite://aikun.db?mode=rw".to_string());
     let surreal = std::env::var("AIKUN_SURREAL_URL")
