@@ -9,7 +9,7 @@ COPY . .
 # 而 surrealdb 4 的传递依赖 sysinfo 0.39 MSRV 1.95(整条 0.39 线,不可降级)
 # ——用镜像内 rustup 换钉版工具链(与 CI/本地一致)。独立 RUN 层,
 # 不随源码变动,buildx gha 缓存可跨构建复用。
-RUN rustup toolchain install 1.99.1 --profile minimal && rustup default 1.99.1
+RUN rustup toolchain install 1.100.0 --profile minimal && rustup default 1.100.0
 
 ARG TARGETPLATFORM
 RUN case "$TARGETPLATFORM" in \

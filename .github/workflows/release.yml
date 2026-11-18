@@ -33,10 +33,10 @@ jobs:
 
       # 容器镜像只捆绑 Rust 1.93,sysinfo 0.39(surrealdb 4 传递依赖)
       # MSRV 1.95 不可降级——换钉版工具链(与 CI test / Dockerfile 一致)。
-      - name: Pin Rust toolchain (1.99.1)
+      - name: Pin Rust toolchain (1.100.0)
         run: |
-          rustup toolchain install 1.99.1 --profile minimal
-          rustup default 1.99.1
+          rustup toolchain install 1.100.0 --profile minimal
+          rustup default 1.100.0
           rustc --version
 
       - name: Add rust target

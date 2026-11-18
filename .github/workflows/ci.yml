@@ -41,10 +41,10 @@ jobs:
       # zigbuild 镜像 tag 不含 Rust 版本,0.23.0–0.24.1 全部只捆绑 1.93;
       # surrealdb 4 的传递依赖 sysinfo 0.39 MSRV 1.95(整条 0.39 线都是,
       # 不可降级),用镜像内 rustup 装钉版工具链(与本地开发一致)。
-      - name: Pin Rust toolchain (1.99.1)
+      - name: Pin Rust toolchain (1.100.0)
         run: |
-          rustup toolchain install 1.99.1 --profile minimal
-          rustup default 1.99.1
+          rustup toolchain install 1.100.0 --profile minimal
+          rustup default 1.100.0
           rustc --version
 
       - name: Cache cargo
