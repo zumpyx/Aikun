@@ -1,7 +1,7 @@
 // 侧栏布局:导航 + 用户区(core.js renderLayout 迁移;admin 项按角色显隐)
 import { NavLink, useNavigate } from 'react-router-dom'
 import {
-  Activity, BookOpen, Coins, Gauge, KeyRound, List, ScrollText,
+  Activity, BookOpen, Coins, Gauge, KeyRound, ScrollText,
   Settings2, Users, Zap, FlaskConical, Boxes,
 } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
@@ -10,17 +10,16 @@ import { Button } from '@/components/ui/button'
 import { sonnerToast } from '@/lib/toast'
 
 const NAV = [
-  { to: '/', label: '仪表盘', icon: Gauge, admin: false },
+  { to: '/', label: '面板', icon: Gauge, admin: false },
   { to: '/wallet', label: '钱包', icon: Coins, admin: false },
-  { to: '/keys', label: 'API Keys', icon: KeyRound, admin: false },
+  { to: '/keys', label: '密钥', icon: KeyRound, admin: false },
   { to: '/logs', label: '日志', icon: ScrollText, admin: false },
-  { to: '/docs', label: '接入文档', icon: BookOpen, admin: false },
+  { to: '/docs', label: '文档', icon: BookOpen, admin: false },
   { to: '/providers', label: '渠道', icon: Boxes, admin: true },
   { to: '/models', label: '模型', icon: Zap, admin: true },
   { to: '/test', label: '测试', icon: FlaskConical, admin: true },
   { to: '/users', label: '用户', icon: Users, admin: true },
   { to: '/billing', label: '价格', icon: Activity, admin: true },
-  { to: '/redemption', label: '兑换码', icon: List, admin: true },
 ]
 
 export function Shell({ children }: { children: React.ReactNode }) {

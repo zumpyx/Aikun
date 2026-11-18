@@ -11,7 +11,6 @@ const Wallet = lazy(() => import('./pages/Wallet'))
 const Providers = lazy(() => import('./pages/Providers'))
 const Users = lazy(() => import('./pages/Users'))
 const Billing = lazy(() => import('./pages/Billing'))
-const Redemption = lazy(() => import('./pages/Redemption'))
 const Keys = lazy(() => import('./pages/Keys'))
 const Models = lazy(() => import('./pages/Models'))
 const Test = lazy(() => import('./pages/Test'))
@@ -54,7 +53,6 @@ function LoginGate() {
           <Route path="/providers" element={<AdminRoute><Providers /></AdminRoute>} />
           <Route path="/users" element={<AdminRoute><Users /></AdminRoute>} />
           <Route path="/billing" element={<AdminRoute><Billing /></AdminRoute>} />
-          <Route path="/redemption" element={<AdminRoute><Redemption /></AdminRoute>} />
           <Route path="/models" element={<AdminRoute><Models /></AdminRoute>} />
           <Route path="/test" element={<AdminRoute><Test /></AdminRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />

@@ -1,6 +1,9 @@
-// 钱包:余额/消费统计 + 兑换码充值 + 消费趋势/分布 + 在售价格(wallet.js 迁移)
+// 钱包:余额/消费统计 + 兑换码充值 + 消费趋势/分布 + 在售价格 +
+// admin 专属的兑换码生成/管理(redemption 页并入,2026-11-18)
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/lib/auth'
+import { RedemptionSection } from './Redemption'
 import { api, errMsg, type Page } from '@/lib/api'
 import { fmtNum } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -91,6 +94,7 @@ function CostBarChart({ daily }: { daily: DailyCost[] }) {
 }
 
 export default function Wallet() {
+  const { isAdmin } = useAuth()
   const qc = useQueryClient()
   const [code, setCode] = useState('')
   const wallet = useQuery({ queryKey: ['wallet'], queryFn: async () => (await api<WalletData>('GET', '/api/users/me/wallet')).data })
@@ -142,6 +146,7 @@ export default function Wallet() {
               </div>
             </CardContent>
           </Card>
+          {isAdmin && <RedemptionSection />}
           <div className="grid gap-4 lg:grid-cols-5">
             <Card className="lg:col-span-3">
               <CardHeader className="flex-row items-center justify-between"><CardTitle>近 30 天消费趋势</CardTitle><span className="text-xs text-muted-foreground">每日消耗(元)</span></CardHeader>

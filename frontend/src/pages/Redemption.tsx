@@ -1,4 +1,5 @@
-// 兑换码:批量生成/筛选/分页/禁用(redemption.js 迁移)
+// 兑换码管理区块:批量生成/筛选/分页/禁用(redemption.js 迁移)。
+// 2026-11-18 起不设独立页面,由钱包页在 admin 视角嵌入渲染。
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, errMsg, type Page } from '@/lib/api'
@@ -92,7 +93,7 @@ function GenerateModal({ open, onOpenChange }: { open: boolean; onOpenChange: (v
   )
 }
 
-export default function Redemption() {
+export function RedemptionSection() {
   const qc = useQueryClient()
   const [batch, setBatch] = useState('')
   const [status, setStatus] = useState('')
