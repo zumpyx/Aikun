@@ -224,6 +224,23 @@ impl AdminApi for AdminService {
     ) -> aikun_openapi::openapi::server::errors::AdminZcodeLoginPollResponse {
         self.providers.admin_zcode_login_poll(body).await
     }
+    async fn admin_list_proxies(
+        &self,
+    ) -> aikun_openapi::openapi::server::errors::AdminListProxiesResponse {
+        self.providers.admin_list_proxies().await
+    }
+    async fn admin_create_proxy(
+        &self,
+        body: aikun_openapi::openapi::types::CreateProxyRequest,
+    ) -> aikun_openapi::openapi::server::errors::AdminCreateProxyResponse {
+        self.providers.admin_create_proxy(body).await
+    }
+    async fn admin_delete_proxy(
+        &self,
+        id: String,
+    ) -> aikun_openapi::openapi::server::errors::AdminDeleteProxyResponse {
+        self.providers.admin_delete_proxy(id).await
+    }
     async fn admin_zcode_claim_quota(
         &self,
         id: String,

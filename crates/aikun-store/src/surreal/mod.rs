@@ -449,6 +449,13 @@ pub const SCHEMA_SURQL: &str = r#"
     DEFINE FIELD IF NOT EXISTS provider ON TABLE channel_affinity TYPE record<provider>;
     DEFINE FIELD IF NOT EXISTS updated_at ON TABLE channel_affinity TYPE datetime DEFAULT time::now();
 
+    // ---- 代理池(渠道出网代理目录:socks5/http;渠道侧 proxy_url 引用其 URL) ----
+    DEFINE TABLE IF NOT EXISTS proxy SCHEMAFULL;
+    DEFINE FIELD IF NOT EXISTS name ON TABLE proxy TYPE string;
+    DEFINE FIELD IF NOT EXISTS url ON TABLE proxy TYPE string;
+    DEFINE FIELD IF NOT EXISTS note ON TABLE proxy TYPE string DEFAULT '';
+    DEFINE FIELD IF NOT EXISTS created_at ON TABLE proxy TYPE datetime DEFAULT time::now();
+
     // ---- 反代应用任务记录(id = [provider, task_type];覆盖式快照,
     //      每渠道每任务一行,签到/领取面板数据源) ----
     DEFINE TABLE IF NOT EXISTS proxy_task SCHEMAFULL;

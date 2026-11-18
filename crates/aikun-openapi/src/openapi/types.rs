@@ -500,6 +500,17 @@ impl AsRef<str> for ProxyTaskRecordSource {
         self.as_str()
     }
 }
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProxyPoolPage {
+    pub items: Vec<ProxyPoolItem>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProxyPoolItem {
+    pub id: String,
+    pub name: String,
+    pub note: String,
+    pub url: String,
+}
 ///导入结果:同 key 已存在 → skipped(不覆盖)。
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ProvidersImportResult {
@@ -2363,6 +2374,51 @@ pub struct CreateApiKeyRequest {
     ///Constraint: minimum=0
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_rpm: Option<i64>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CreateProxyRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub url: String,
+}
+impl CreateProxyRequest {
+    /// Construct this request with every required wire field.
+    pub fn new(name: String, url: String) -> Self {
+        Self {
+            name,
+            url,
+            note: None,
+        }
+    }
+    /// Start a dependency-free builder with every required wire field.
+    pub fn builder(name: String, url: String) -> CreateProxyRequestBuilder {
+        CreateProxyRequestBuilder::new(name, url)
+    }
+}
+/// Dependency-free builder for [`#struct_name`].
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct CreateProxyRequestBuilder {
+    value: CreateProxyRequest,
+}
+impl CreateProxyRequestBuilder {
+    /// Start a builder with every required wire field.
+    pub fn new(name: String, url: String) -> Self {
+        Self {
+            value: CreateProxyRequest::new(name, url),
+        }
+    }
+    #[doc = concat!("Set the optional `", "note", "` request field.")]
+    #[must_use]
+    pub fn note(mut self, note: String) -> Self {
+        self.value.note = Some(note);
+        self
+    }
+    /// Finish building the request model.
+    pub fn build(self) -> CreateProxyRequest {
+        self.value
+    }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CreateRedemptionCodesRequest {

@@ -158,6 +158,18 @@ pub trait AdminApi: Send + Sync + 'static {
         &self,
         body: ZcodeLoginPollRequest,
     ) -> AdminZcodeLoginPollResponse;
+    /// 代理池列表(socks5/http 出网代理目录)
+    ///
+    /// `GET /api/proxies`
+    async fn admin_list_proxies(&self) -> AdminListProxiesResponse;
+    /// 新增代理
+    ///
+    /// `POST /api/proxies`
+    async fn admin_create_proxy(&self, body: CreateProxyRequest) -> AdminCreateProxyResponse;
+    /// 删除代理
+    ///
+    /// `DELETE /api/proxies/{id}`
+    async fn admin_delete_proxy(&self, id: String) -> AdminDeleteProxyResponse;
     /// ZCode 签到(领取)任务面板
     ///
     /// `GET /api/providers/zcode/tasks`

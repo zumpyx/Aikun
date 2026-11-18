@@ -2909,3 +2909,106 @@ async fn providers_kind_filter_and_claim_tasks() {
     assert_eq!(rec["ok"], true);
     assert_eq!(rec["task_type"], "zcode_claim");
 }
+
+/// 代理池 CRUD + 渠道批量添加选用代理(proxy_url 拷贝语义)。
+#[tokio::test]
+async fn proxy_pool_crud_and_channel_pick() {
+    let app = TestApp::spawn().await;
+    let admin = app.admin_token().await;
+
+    // 非法 scheme 拒绝
+    let r = app
+        .client()
+        .post(format!("{}/api/proxies", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"name": "bad", "url": "ftp://x"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "非法 scheme 400");
+
+    // 创建 socks5 代理
+    let r = app
+        .client()
+        .post(format!("{}/api/proxies", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"name": "香港中转", "url": "socks5://u:p@127.0.0.1:1080", "note": "n1"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let created: Value = r.json().await.unwrap();
+    assert_eq!(created["url"], "socks5://u:p@127.0.0.1:1080");
+    let pid = created["id"].as_str().unwrap().to_string();
+
+    // 列表
+    let r = app
+        .client()
+        .get(format!("{}/api/proxies", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["items"].as_array().map(Vec::len), Some(1));
+
+    // 批量建渠道选用代理(proxy_url 拷贝进渠道)
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/batch", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({
+            "name": "zc", "channel_kind": "zcode", "protocols": ["anthropic"],
+            "default_protocol": "anthropic",
+            "openai_base_url": "https://zcode.z.ai", "anthropic_base_url": "https://zcode.z.ai",
+            "api_keys": ["jwt-1"], "models": ["GLM-5.3"],
+            "proxy_url": "socks5://u:p@127.0.0.1:1080",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "批量建渠道");
+    let r = app
+        .client()
+        .get(format!("{}/api/providers?category=proxy", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(
+        v["items"][0]["proxy_url"], "socks5://127.0.0.1:1080",
+        "代理 URL 拷贝进渠道(出参脱敏口径)"
+    );
+
+    // 删除池条目;渠道不受影响
+    let r = app
+        .client()
+        .delete(format!("{}/api/proxies/{pid}", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    let r = app
+        .client()
+        .get(format!("{}/api/providers?category=proxy", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(
+        v["items"][0]["proxy_url"], "socks5://127.0.0.1:1080",
+        "删池条目不影响存量渠道(出参脱敏口径)"
+    );
+    // 再删 → 404
+    let r = app
+        .client()
+        .delete(format!("{}/api/proxies/{pid}", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+}

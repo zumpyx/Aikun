@@ -411,6 +411,12 @@ const PROXY_PRESETS: { id: string; kind: string; name: string; website_url: stri
 function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: boolean) => void }) {
   const qc = useQueryClient()
   const presets = PROXY_PRESETS.filter((p) => p.apps.includes(appId))
+  // 出网代理池(可选;选中即把 URL 拷贝进渠道 proxy_url)
+  const pool = useQuery({
+    queryKey: ['proxy-pool'],
+    queryFn: async () => (await api<{ items: { id: string; name: string; url: string }[] }>('GET', '/api/proxies')).data,
+  })
+  const [proxyUrl, setProxyUrl] = useState('')
   const [presetId, setPresetId] = useState(presets[0]?.id ?? '')
   const preset = presets.find((p) => p.id === presetId)
   const [keys, setKeys] = useState('')
@@ -434,6 +440,7 @@ function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: b
         openai_base_url: preset.openai_base_url,
         anthropic_base_url: preset.anthropic_base_url,
         api_keys: keyList,
+        proxy_url: proxyUrl,
         models: models.split(',').map((s) => s.trim()).filter(Boolean),
         priority: parseInt(priority, 10) || 0,
         weight: parseFloat(weight) || 1.0,
@@ -472,6 +479,18 @@ function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: b
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-muted-foreground">{preset?.key_placeholder ?? '凭证(每行一个)'}</label>
             <Textarea rows={4} className="font-mono text-xs" value={keys} onChange={(e) => setKeys(e.target.value)} placeholder={'凭证1\n凭证2\n凭证3'} />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground">出网代理(可选)</label>
+            <select
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
+              value={proxyUrl} onChange={(e) => setProxyUrl(e.target.value)}>
+              <option value="">直连(不走代理)</option>
+              {(pool.data?.items ?? []).map((p) => (
+                <option key={p.id} value={p.url}>{p.name} · {p.url.replace(/(:\/\/[^:\/]+:)[^@]+@/, '$1***@')}</option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground">socks5/http 代理在「代理」页统一管理</p>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">

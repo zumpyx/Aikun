@@ -1328,6 +1328,35 @@ impl providers_port::ProviderStore for SurrealProviderStore {
             .map_err(|e| tracing::error!("SurrealProviderStore::list_proxy_tasks: {e}"))
     }
 
+    async fn create_proxy(
+        &self,
+        row: aikun_store::surreal::channels_store::NewProxyRow,
+    ) -> Result<aikun_store::surreal::channels_store::ProxyRow, ()> {
+        self.store
+            .channels
+            .create_proxy(row)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::create_proxy: {e}"))
+    }
+
+    async fn delete_proxy(&self, id: &str) -> Result<bool, ()> {
+        self.store
+            .channels
+            .delete_proxy(id)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::delete_proxy: {e}"))
+    }
+
+    async fn list_proxies(
+        &self,
+    ) -> Result<Vec<aikun_store::surreal::channels_store::ProxyRow>, ()> {
+        self.store
+            .channels
+            .list_proxies()
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::list_proxies: {e}"))
+    }
+
     async fn find_provider(&self, id: &str) -> Result<Option<aikun_channels::Provider>, ()> {
         self.store
             .channels

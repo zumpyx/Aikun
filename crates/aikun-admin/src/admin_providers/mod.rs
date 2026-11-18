@@ -73,6 +73,7 @@ use aikun_store::surreal::channels_store::ProxyTaskRow;
 
 use crate::problem;
 
+pub mod proxies;
 pub mod zcode;
 
 pub use zcode::{ZcodeClaimPort, ZcodeOAuth, ZcodeOAuthInit, ZcodeOfferedPlan, ZcodePollStatus};
@@ -222,6 +223,19 @@ pub trait ProviderStore: Send + Sync + 'static {
 
     /// 任务快照全量(小表;task_type 过滤,None = 全部)。
     async fn list_proxy_tasks(&self, task_type: Option<&str>) -> Result<Vec<ProxyTaskRow>, ()>;
+
+    /// 代理池:新增。URL scheme 白名单校验在服务层。
+    async fn create_proxy(
+        &self,
+        row: aikun_store::surreal::channels_store::NewProxyRow,
+    ) -> Result<aikun_store::surreal::channels_store::ProxyRow, ()>;
+
+    /// 代理池:按 id 删除,返回是否存在。
+    async fn delete_proxy(&self, id: &str) -> Result<bool, ()>;
+
+    /// 代理池:全量(名称序)。
+    async fn list_proxies(&self)
+    -> Result<Vec<aikun_store::surreal::channels_store::ProxyRow>, ()>;
     /// 单行(完整列;api_key 为库内原文——密文或历史明文)。
     async fn find_provider(&self, id: &str) -> Result<Option<ChannelRow>, ()>;
     /// 复制源:读回建行所需的全部配置列(密文 key 与 key_hash 原样)。

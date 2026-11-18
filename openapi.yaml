@@ -1929,6 +1929,78 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
 
+  /api/proxies:
+    get:
+      tags: [Admin]
+      operationId: adminListProxies
+      summary: 代理池列表(socks5/http 出网代理目录)
+      description: |
+        渠道出网代理的统一目录;渠道的 proxy_url 直接引用池内 URL 值
+        (拷贝语义,非外键)。传输层已支持 socks5/socks5h/http/https。
+      responses:
+        '200':
+          description: 代理列表(小表全量,名称序)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyPoolPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Admin]
+      operationId: adminCreateProxy
+      summary: 新增代理
+      description: |
+        URL 必须带 scheme:socks5:// socks5h:// http:// https://;
+        认证信息放 userinfo(socks5://user:pass@host:port)。
+      x-action: create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProxyRequest'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyPoolItem'
+        '400':
+          description: name/url 缺失或 scheme 非法
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/proxies/{id}:
+    delete:
+      tags: [Admin]
+      operationId: adminDeleteProxy
+      summary: 删除代理
+      description: |
+        仅删池内条目;已引用该 URL 的渠道不受影响(proxy_url 是拷贝值)。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '204':
+          description: 已删除
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
   /api/providers/zcode/tasks:
     get:
       tags: [Admin]
@@ -4221,6 +4293,35 @@ components:
           type: array
           items: {type: string}
       required: [claimed, skipped, problems]
+      additionalProperties: false
+
+    ProxyPoolItem:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        url: {type: string}
+        note: {type: string}
+      required: [id, name, url, note]
+      additionalProperties: false
+
+    ProxyPoolPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProxyPoolItem'
+      required: [items]
+      additionalProperties: false
+
+    CreateProxyRequest:
+      type: object
+      properties:
+        name: {type: string}
+        url: {type: string}
+        note: {type: string}
+      required: [name, url]
       additionalProperties: false
 
     ProxyTaskRecord:

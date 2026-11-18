@@ -10,6 +10,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'))
 const Wallet = lazy(() => import('./pages/Wallet'))
 const Providers = lazy(() => import('./pages/Providers'))
 const ProxyProviders = lazy(() => import('./pages/ProxyProviders'))
+const ProxyPool = lazy(() => import('./pages/ProxyPool'))
 const Users = lazy(() => import('./pages/Users'))
 const Billing = lazy(() => import('./pages/Billing'))
 const Keys = lazy(() => import('./pages/Keys'))
@@ -54,6 +55,7 @@ function LoginGate() {
           <Route path="/providers" element={<AdminRoute><Providers /></AdminRoute>} />
           <Route path="/proxies" element={<AdminRoute><ProxyProviders /></AdminRoute>} />
           <Route path="/proxies/:app" element={<AdminRoute><ProxyProviders /></AdminRoute>} />
+          <Route path="/proxy-pool" element={<AdminRoute><ProxyPool /></AdminRoute>} />
           <Route path="/users" element={<AdminRoute><Users /></AdminRoute>} />
           <Route path="/billing" element={<AdminRoute><Billing /></AdminRoute>} />
           <Route path="/models" element={<AdminRoute><Models /></AdminRoute>} />

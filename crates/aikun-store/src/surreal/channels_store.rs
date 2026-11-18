@@ -79,6 +79,24 @@ use aikun_channels::Provider;
 use crate::surreal::SurrealHandle;
 use crate::{CacheToken, StoreError};
 
+/// 代理池新建行(id 由实现生成)。
+#[derive(Debug, Clone)]
+pub struct NewProxyRow {
+    pub name: String,
+    pub url: String,
+    pub note: String,
+}
+
+/// 代理池行(渠道 proxy_url 引用其 URL 值,不外键)。
+#[derive(Debug, Clone)]
+pub struct ProxyRow {
+    pub id: String,
+    pub name: String,
+    /// socks5:// socks5h:// http:// https://(schema 校验在 admin 层)。
+    pub url: String,
+    pub note: String,
+}
+
 /// 反代应用任务快照(覆盖式,每渠道每任务一行)。
 #[derive(Debug, Clone)]
 pub struct ProxyTaskRow {
@@ -227,6 +245,15 @@ pub trait ChannelStore: Send + Sync {
         &self,
         task_type: Option<&str>,
     ) -> Result<Vec<ProxyTaskRow>, StoreError>;
+
+    /// 代理池:新增(name/url/note;id 由实现生成)。URL 形态校验在 admin 层。
+    async fn create_proxy(&self, row: NewProxyRow) -> Result<ProxyRow, StoreError>;
+
+    /// 代理池:按 id 删除,返回是否存在。
+    async fn delete_proxy(&self, id: &str) -> Result<bool, StoreError>;
+
+    /// 代理池:全量(小表,名称序)。
+    async fn list_proxies(&self) -> Result<Vec<ProxyRow>, StoreError>;
 
     /// 全部渠道(含禁用)的 models 集合(计费页 price-in-use 判定;
     /// 查询失败由调用方按旧行为静默空集)。
@@ -1526,6 +1553,57 @@ impl ChannelStore for SurrealChannels {
         Ok((total, page.iter().filter_map(provider_from_json).collect()))
     }
 
+    async fn create_proxy(&self, row: NewProxyRow) -> Result<ProxyRow, StoreError> {
+        let id = ulid::Ulid::new().to_string();
+        let mut res = self
+            .handle
+            .db()
+            .query("CREATE type::record('proxy', $id) SET name = $name, url = $url, note = $note, created_at = time::now() RETURN AFTER;")
+            .bind(("id", id.clone()))
+            .bind(("name", row.name.clone()))
+            .bind(("url", row.url.clone()))
+            .bind(("note", row.note.clone()))
+            .await
+            .map_err(qerr)?
+            .check()
+            .map_err(qerr)?;
+        let rows: Vec<serde_json::Value> = res.take(0).map_err(qerr)?;
+        let created = rows.first().cloned().unwrap_or(serde_json::Value::Null);
+        Ok(proxy_from_json(&created).unwrap_or(ProxyRow {
+            id,
+            name: row.name,
+            url: row.url,
+            note: row.note,
+        }))
+    }
+
+    async fn delete_proxy(&self, id: &str) -> Result<bool, StoreError> {
+        let mut res = self
+            .handle
+            .db()
+            .query("DELETE type::record('proxy', $id) RETURN BEFORE;")
+            .bind(("id", id))
+            .await
+            .map_err(qerr)?
+            .check()
+            .map_err(qerr)?;
+        let rows: Vec<serde_json::Value> = res.take(0).map_err(qerr)?;
+        Ok(!rows.is_empty())
+    }
+
+    async fn list_proxies(&self) -> Result<Vec<ProxyRow>, StoreError> {
+        let mut res = self
+            .handle
+            .db()
+            .query("SELECT id, name, url, note FROM proxy ORDER BY name;")
+            .await
+            .map_err(qerr)?
+            .check()
+            .map_err(qerr)?;
+        let rows: Vec<serde_json::Value> = res.take(0).map_err(qerr)?;
+        Ok(rows.iter().filter_map(proxy_from_json).collect())
+    }
+
     async fn upsert_proxy_task(&self, row: ProxyTaskRow) -> Result<(), StoreError> {
         // 数组 record id 定位 UPSERT(同 model_health 惯例);覆盖式快照。
         self.handle
@@ -1641,6 +1719,24 @@ fn model_from_health_id(id: &str) -> String {
 }
 
 // ---------- 单测(mem:// 进程内实例,设计文档 §七第 2 层) ----------
+
+/// proxy 行 → ProxyRow(id 形如 proxy:<ulid>)。
+fn proxy_from_json(v: &serde_json::Value) -> Option<ProxyRow> {
+    Some(ProxyRow {
+        id: v
+            .get("id")?
+            .as_str()?
+            .trim_start_matches("proxy:")
+            .to_string(),
+        name: v.get("name")?.as_str()?.to_string(),
+        url: v.get("url")?.as_str()?.to_string(),
+        note: v
+            .get("note")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
 
 /// proxy_task 行 → ProxyTaskRow(字段缺失按空集/默认处理,快照降级)。
 fn proxy_task_from_json(v: &serde_json::Value) -> Option<ProxyTaskRow> {

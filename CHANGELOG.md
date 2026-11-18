@@ -81,6 +81,17 @@
   `/data/aikun.surreal`);迁移工具默认目标同步。
 
 ## [Unreleased]
+### 新增(代理池与 SOCKS5 支持)
+
+- **「代理」管理页**(侧边栏,admin):出网代理统一目录
+  (socks5/socks5h/http/https;scheme 白名单校验),列表/添加/删除;
+  URL 内嵌凭证在出参与页面打码(`socks5://u:***@host:port`)。
+  `GET/POST /api/proxies` + `DELETE /api/proxies/{id}`。
+- **渠道选用代理**:反代应用「批量添加」新增出网代理下拉(从池中
+  选用,URL 拷贝进渠道 proxy_url——删池条目不影响存量渠道)。
+  传输层 SOCKS5 本就支持(reqwest socks feature),此前只能手填 URL。
+
+## [Unreleased]
 ### 变更(反代应用中心收敛)
 
 - **移除 Z.AI Chat / 智谱清言占位页**(用户裁决:先只接 ZCode 的模型
