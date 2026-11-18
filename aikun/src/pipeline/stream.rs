@@ -25,7 +25,7 @@ use tracing::{debug, warn};
 
 use crate::AppState;
 use crate::billing::ledger::{
-    RequestLogParams, request_log_sync, spawn_request_log, spawn_request_log_for_guard,
+    RequestLogParams, request_log_sync_billable, spawn_request_log, spawn_request_log_for_guard,
 };
 use crate::channel::selector::{spawn_record_failure, spawn_record_result};
 use crate::pipeline::context::RequestCtx;
@@ -164,6 +164,13 @@ pub(super) fn stream_response(
         // 结束、客户端断连、关停取消都触发生成器 Drop,槽位
         // (ctx.concurrency_guard 字段)与上游连接在那时才释放/中止。
         let ctx = ctx;
+        // ZCode 闲时免费(23:00-09:00 Flash 上游零消耗 → 下游 0 元,
+        // tokens 照记):按请求模型名 + 渠道类型判定(与 attempt 侧同口径)。
+        let free_upstream = adapter.kind() == aikun_channels::adapters::zcode::KIND
+            && aikun_channels::adapters::zcode::upstream_free(
+                &ctx.model,
+                chrono::Utc::now().timestamp(),
+            );
         let usage_cell = Arc::new(Mutex::new((0, 0, 0, 0)));
         let mut guard = StreamAbortGuard::from_ctx(
             &store,
@@ -295,7 +302,7 @@ pub(super) fn stream_response(
             // 中途失败(含空流):先记账并标记 guard 完成——否则客户端在
             // 下方 yield 期间断开会触发 StreamAbortGuard::drop 再记一条
             // 499,重复记账;再发错误帧收尾。
-            finalize_stream(&state, &ctx, &provider_id, &outcome, threshold, &mut guard).await;
+            finalize_stream(&state, &ctx, &provider_id, &outcome, threshold, &mut guard, free_upstream).await;
             for out in error_event_sequence(client_protocol, err_msg, &mut converter, events > 0) {
                 yield Ok(to_axum_event(out));
             }
@@ -307,7 +314,7 @@ pub(super) fn stream_response(
         }
         // 正常收尾(成功 / 流内错误帧):记账在终止帧之后、guard 完成标记
         // 之前(收尾路径只走一次,两条记账路径互斥)。
-        finalize_stream(&state, &ctx, &provider_id, &outcome, threshold, &mut guard).await;
+        finalize_stream(&state, &ctx, &provider_id, &outcome, threshold, &mut guard, free_upstream).await;
         if !outcome.error_frame {
             debug!(
                 request_id = %ctx.request_id,
@@ -329,6 +336,8 @@ async fn finalize_stream(
     outcome: &StreamOutcome,
     threshold: u32,
     guard: &mut StreamAbortGuard,
+    // ZCode 闲时免费(见生成器内判定):下游 0 元,tokens 照记。
+    free_upstream: bool,
 ) {
     let (p, c, t, k) = outcome.usage;
     let latency = outcome.latency_ms;
@@ -378,7 +387,7 @@ async fn finalize_stream(
             threshold,
             true,
         );
-        request_log_sync(
+        request_log_sync_billable(
             state,
             RequestLogParams {
                 request_id: ctx.request_id.clone(),
@@ -396,6 +405,7 @@ async fn finalize_stream(
                 success: false,
                 error_message: Some("upstream sent an in-stream error frame".to_string()),
             },
+            !free_upstream,
         )
         .await;
         ctx.span.record("status", 502u16);
@@ -405,7 +415,7 @@ async fn finalize_stream(
     spawn_record_result(state.store.clone(), provider_id.to_string(), latency, true);
     // 计费级:与非流式一致,流结束时同步等待日志与扣费落库,
     // fire-and-forget 在进程退出时会丢账。
-    request_log_sync(
+    request_log_sync_billable(
         state,
         RequestLogParams {
             request_id: ctx.request_id.clone(),
@@ -423,6 +433,7 @@ async fn finalize_stream(
             success: true,
             error_message: None,
         },
+        !free_upstream,
     )
     .await;
     ctx.span.record("status", 200u16);

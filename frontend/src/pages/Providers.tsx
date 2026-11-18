@@ -16,6 +16,12 @@ import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table'
 // ---- 预设(providers.js PROVIDER_PRESETS 原样迁移)----
 const PRESETS = [
   {
+    id: 'zcode', name: 'ZCode(GLM)', website_url: 'https://zcode.z.ai',
+    docs_url: 'https://zcode.z.ai/cn/docs', protocols: ['anthropic'],
+    default_protocol: 'anthropic', openai_base_url: 'https://zcode.z.ai',
+    anthropic_base_url: 'https://zcode.z.ai', key_placeholder: 'ZCode 客户端 JWT(登录后从客户端复制)',
+  },
+  {
     id: 'orcarouter', name: 'OrcaRouter', website_url: 'https://www.orcarouter.ai',
     docs_url: 'https://docs.orcarouter.ai', protocols: ['openai', 'anthropic', 'responses'],
     default_protocol: 'openai', openai_base_url: 'https://api.orcarouter.ai',

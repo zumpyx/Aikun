@@ -40,6 +40,9 @@ pub async fn check_provider_health(
     for (k, v) in adapter.auth_headers(api_key, protocol) {
         req = req.header(k, v);
     }
+    for (k, v) in adapter.extra_headers(protocol) {
+        req = req.header(k, v);
+    }
 
     let result = req.send().await;
 

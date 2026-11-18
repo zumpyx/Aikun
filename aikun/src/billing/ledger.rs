@@ -96,9 +96,16 @@ pub(crate) fn spawn_request_log_for_guard(
 }
 
 /// 计费级同步版本:调用方 await,函数返回时日志与扣费已落库。
-/// 用于非流式成功路径——响应返回给用户前费用必须已记账。
-pub(crate) async fn request_log_sync(state: &AppState, p: RequestLogParams) {
-    insert_request_log(state.store.billing.as_ref(), state.store.id, &p, true).await;
+/// 用于成功路径(非流式 attempt / 流式 finalize)——响应返回给用户前
+/// 费用必须已记账。:`billable = false` 只记日志与
+/// 用量、不扣费(ZCode 闲时窗口 Flash 上游零消耗,传导为下游 0 元,
+/// tokens 照记日志照落)。
+pub(crate) async fn request_log_sync_billable(
+    state: &AppState,
+    p: RequestLogParams,
+    billable: bool,
+) {
+    insert_request_log(state.store.billing.as_ref(), state.store.id, &p, billable).await;
 }
 
 /// 命中响应缓存时的记账:provider_id 为 NULL(未触达任何上游)、

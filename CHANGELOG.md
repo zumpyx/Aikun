@@ -5,6 +5,28 @@
 
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
+## [Unreleased]
+### 新增(ZCode 渠道)
+
+- **ZCode 渠道类型(`channel_kind = "zcode"`,GLM Coding Plan)**:接入
+  zcode.z.ai 订阅通道——API Key 填 ZCode 客户端 JWT(同时进入
+  `x-api-key` 与 `Authorization: Bearer`),仅勾选 Anthropic 协议,
+  Base URL 填 `https://zcode.z.ai`;请求打到
+  `/api/v1/zcode-plan/anthropic/v1/messages` 并携带 ZCode 客户端
+  伪装头(anthropic-beta / User-Agent / X-ZCode-* 等)。健康检查走
+  `/api/v1/zcode-plan/billing/balance`(**零消耗**,不打聊天端点烧额度);
+  个人订阅额度与免费每日额度共用同一 JWT 凭证。协议细节炼化自社区
+  D3-vin/Zcode2Api 与 zcode.z.ai 官方文档。
+- **闲时免费计费(官方夜间畅用)**:北京时间 23:00–09:00 窗口内,
+  zcode 渠道上名称含 "flash" 的模型(如 GLM-5.3-Flash)**对下游用户
+  0 元记账**(tokens 照记、日志照落)——上游套餐额度消耗为 0 的官方
+  规则传导到网关计费口径;窗口/模型判定由单测真值表锁定(按请求
+  模型名判定,渠道模型映射不参与)。已裁剪:上游风控验证码不支持,
+  触发时按上游失败故障转移。
+- `ChannelAdapter` 新增 `extra_headers` 钩子(鉴权之外的附加头),
+  transport(主/透传)与健康探测三处接线;前端渠道预设新增
+  "ZCode(GLM)"。
+
 ## [0.7.0] - 2026-11-18
 
 本版打包:roadmap 阶段 2(管线显式化)收尾 + 阶段 3 尾巴(熔断/计费幂等/

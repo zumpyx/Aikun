@@ -42,6 +42,7 @@ impl ChannelRegistry {
         reg.register(Arc::new(super::generic::GenericAdapter));
         reg.register(Arc::new(super::workbuddy::WorkBuddyAdapter));
         reg.register(Arc::new(super::qoder::QoderAdapter));
+        reg.register(Arc::new(super::zcode::ZcodeAdapter));
         reg
     }
 
@@ -107,6 +108,7 @@ mod tests {
         assert_eq!(kinds[0], "generic");
         assert!(kinds.contains(&"workbuddy"));
         assert!(kinds.contains(&"qoder"));
+        assert!(kinds.contains(&"zcode"));
     }
 
     #[test]
@@ -123,6 +125,7 @@ mod tests {
         assert!(reg.is_valid_kind(""));
         assert!(reg.is_valid_kind("generic"));
         assert!(reg.is_valid_kind("workbuddy"));
+        assert!(reg.is_valid_kind("zcode"));
         assert!(!reg.is_valid_kind("nope"));
     }
 

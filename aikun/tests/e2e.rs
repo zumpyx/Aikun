@@ -1923,3 +1923,112 @@ async fn circuit_breaker_skips_channel_within_cooldown_then_recovers() {
     assert_eq!(resp.status(), 200);
     assert_eq!(a_hits(), 3, "冷却到期后半开试探一次(失败后再冷却)");
 }
+
+/// ZCode 渠道适配器(GLM Coding Plan):协议链路端到端——上游收到
+/// Anthropic 形态请求打到 zcode-plan 专用端点,JWT 同时出现在
+/// x-api-key 与 Authorization(Bearer),伪装头(anthropic-beta /
+/// X-ZCode-Agent 等)到达上游;OpenAI 客户端请求经协议转换正常返回;
+/// 计费行落库(闲时免费口径由 channels crate 单测锁定,时间不可控)。
+#[tokio::test]
+async fn zcode_channel_anthropic_protocol_end_to_end() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    let user = app.seed_user_funded().await;
+    app.seed_provider(&ProviderSeed {
+        name: "zcode",
+        protocol: "anthropic", // 渠道只声明 anthropic 协议
+        base_url: &mock.base,
+        models: &["GLM-5.3-Flash"],
+        api_key: "fake-zcode-jwt-token",
+        ..ProviderSeed::default()
+    })
+    .await;
+
+    // 渠道类型设为 zcode(管理面创建走 generic 默认,PATCH 改 kind)
+    let provs = app
+        .client()
+        .get(format!("{}/api/providers", app.base))
+        .bearer_auth(app.admin_token().await)
+        .send()
+        .await
+        .unwrap();
+    let provs: serde_json::Value = provs.json().await.unwrap();
+    let pid = provs["items"][0]["id"].as_str().unwrap().to_string();
+    let r = app
+        .client()
+        .patch(format!("{}/api/providers/{pid}", app.base))
+        .bearer_auth(app.admin_token().await)
+        .json(&serde_json::json!({"channel_kind": "zcode"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "PATCH channel_kind=zcode");
+
+    // mock 上游:一条 Anthropic 形态的 chat 响应 + 一条 SSE(流式路径)
+    mock.push_json(
+        200,
+        json!({
+            "id": "msg_mock", "type": "message", "role": "assistant",
+            "model": "GLM-5.3-Flash",
+            "content": [{"type": "text", "text": "OK"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 3}
+        }),
+    );
+
+    // OpenAI 客户端 → zcode(anthropic 上游):跨协议转换
+    let resp = app
+        .client()
+        .post(format!("{}/v1/chat/completions", app.base))
+        .json(&json!({
+            "model": "GLM-5.3-Flash",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .bearer_auth(&user.api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "OK");
+
+    // 上游收到的请求:端点路径 + JWT 双头 + 伪装头
+    let sent = mock
+        .requests()
+        .iter()
+        .find(|r| r.path.contains("/api/v1/zcode-plan/anthropic/v1/messages"))
+        .expect("zcode-plan 端点被命中")
+        .clone();
+    let h = &sent.headers;
+    let get = |k: &str| -> String {
+        h.iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(k))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(get("x-api-key"), "fake-zcode-jwt-token", "JWT 进 x-api-key");
+    assert_eq!(
+        get("authorization"),
+        "Bearer fake-zcode-jwt-token",
+        "JWT 同时进 Bearer"
+    );
+    assert_eq!(get("anthropic-version"), "2023-06-01");
+    assert!(
+        get("anthropic-beta").contains("mid-conversation-system"),
+        "伪装 beta 头到达上游: {}",
+        get("anthropic-beta")
+    );
+    assert_eq!(get("x-zcode-agent"), "glm");
+    assert!(
+        get("user-agent").starts_with("ZCode/"),
+        "UA = {}",
+        get("user-agent")
+    );
+    let sent_body: Value = serde_json::from_str(&sent.body).unwrap();
+    assert_eq!(sent_body["model"], "GLM-5.3-Flash");
+
+    // 计费行落库(tokens 照记;cost 取决于执行时刻是否闲时窗口,不断言)
+    let log = wait_success_log(&app, &user.id, WAIT).await;
+    assert_eq!(log["total_tokens"], 8, "{log}");
+    assert_eq!(log["model"], "GLM-5.3-Flash");
+}

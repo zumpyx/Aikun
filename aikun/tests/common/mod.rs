@@ -49,6 +49,8 @@ pub struct Recorded {
     pub path: String,
     /// Authorization 头(无则 None),用于断言转发给上游的凭证。
     pub authorization: Option<String>,
+    /// 全部请求头(小写名):适配器注入的伪装头断言用(zcode 等)。
+    pub headers: Vec<(String, String)>,
     pub body: String,
 }
 
@@ -137,6 +139,16 @@ async fn mock_handler(
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+    let headers: Vec<(String, String)> = req
+        .headers()
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().to_ascii_lowercase(),
+                v.to_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
     let bytes = axum::body::to_bytes(req.into_body(), 8 * 1024 * 1024)
         .await
         .unwrap_or_default();
@@ -144,6 +156,7 @@ async fn mock_handler(
         method,
         path,
         authorization,
+        headers,
         body: String::from_utf8_lossy(&bytes).to_string(),
     });
     let scripted = if is_health_probe {

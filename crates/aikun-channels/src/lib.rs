@@ -80,6 +80,12 @@ pub trait ChannelAdapter: Send + Sync + 'static {
         default_auth_headers(api_key, protocol)
     }
 
+    /// 鉴权之外的附加上游请求头(客户端伪装 / beta 头等;纯数据,
+    /// 每次请求调用一次,可生成 per-request 值)。默认空。
+    fn extra_headers(&self, _protocol: Protocol) -> Vec<(&'static str, String)> {
+        Vec::new()
+    }
+
     /// 发送前修补上游请求体(已完成协议转换与模型映射)。
     fn prepare_request(&self, _provider: &Provider, _protocol: Protocol, _body: &mut Value) {}
 

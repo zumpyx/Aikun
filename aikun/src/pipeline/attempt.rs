@@ -15,7 +15,7 @@ use axum::{
 use tracing::{debug, warn};
 
 use crate::AppState;
-use crate::billing::ledger::{RequestLogParams, request_log_sync, spawn_request_log};
+use crate::billing::ledger::{RequestLogParams, request_log_sync_billable, spawn_request_log};
 use crate::channel::selector::{spawn_pin_channel, spawn_record_failure, spawn_record_result};
 use crate::channel::transport::{provider_secrets, send_raw, send_request};
 use crate::models::Provider;
@@ -318,7 +318,14 @@ async fn non_stream_success(
         provider.id.clone(),
     );
     let (p, c, t, k) = extract_usage_any(&resp_body);
-    request_log_sync(
+    // ZCode 闲时免费(23:00-09:00 Flash 上游零消耗):按请求模型名判定,
+    // 渠道模型映射不参与(映射到别名则不享受,保守方向)。
+    let free_upstream = provider.channel_kind.trim() == aikun_channels::adapters::zcode::KIND
+        && aikun_channels::adapters::zcode::upstream_free(
+            &ctx.model,
+            chrono::Utc::now().timestamp(),
+        );
+    request_log_sync_billable(
         state,
         RequestLogParams {
             request_id: ctx.request_id.clone(),
@@ -336,6 +343,7 @@ async fn non_stream_success(
             success: true,
             error_message: None,
         },
+        !free_upstream,
     )
     .await;
     debug!(

@@ -274,6 +274,9 @@ pub async fn send_request(
     for (k, v) in adapter.auth_headers(&provider.api_key, protocol) {
         req = req.header(k, v);
     }
+    for (k, v) in adapter.extra_headers(protocol) {
+        req = req.header(k, v);
+    }
 
     // 流式响应总时长任意,client 不带整体超时(中段 stall 由流读取侧的
     // idle 超时约束);但首字节必须有界:上游 accept 后迟迟不发响应头时
@@ -379,6 +382,9 @@ pub async fn send_raw(
     // 免密钥本地上游不携带 Authorization(空 Bearer 会让部分上游 401)。
     if !provider.api_key.is_empty() {
         for (k, v) in adapter.auth_headers(&provider.api_key, aikun_protocol::Protocol::OpenAi) {
+            req = req.header(k, v);
+        }
+        for (k, v) in adapter.extra_headers(aikun_protocol::Protocol::OpenAi) {
             req = req.header(k, v);
         }
     }
