@@ -80,6 +80,30 @@
   显式设置 `AIKUN_SURREAL_URL`。docker 部署不受影响(容器内显式
   `/data/aikun.surreal`);迁移工具默认目标同步。
 
+## [Unreleased]
+### 新增(ZCode 免费额度领取 + MCP 工具透传)
+
+- **免费额度领取**(`POST /api/providers/{id}/zcode/claim`):官方
+  免费/体验额度**不会自动到账**,需登录态 JWT 走领取序列——激活事件
+  (app_launch/app_daily_active,上游按 device_mid+日期去重)→
+  billing/balance 已持有清单 → billing/preview + marketing/touch 待领
+  清单 → 逐项 billing/claim(1003=已领取视为成功)→ campaign 投放补
+  touch/action confirm。反代页 zcode 行新增"领取额度"按钮,结果以
+  领取/已持有/问题三分类反馈;**OAuth 在线登录建渠道成功后后台自动
+  领取一遍**(fire-and-forget,失败可手动再领)。风控验证码(3007)
+  不在网关侧破解,按问题报告。序列炼化自 Zcode2Api warm.go,经
+  `ZcodeClaimPort` 端口注入(e2e 全序列 mock 验证)。
+- **MCP 远程工具透传**(`GET /v1/mcp` + `POST /v1/mcp/{server_key}`):
+  ZCode 订阅自带的远程 MCP 工具(官方插件 `.mcp.json` 揭示的
+  `{base}/api/v1/mcp/server/{key}` 形态,JWT 同一登录态)可经网关
+  调用——天眼查(`finance_tianyancha`)、图片搜索(`image_search`)等。
+  MCP Streamable HTTP(JSON-RPC 2.0)字节级透传:按优先级自动选路
+  zcode 渠道(传输错误/5xx/429 转移,4xx 协议错误原样透传),
+  `Mcp-Session-Id`/`Mcp-Protocol-Version`/`Accept` 头转发,响应体
+  (JSON 或 SSE)流式回传;0 元记账(日志照落,model 列 = server_key)。
+  v1 仅 POST(initialize/tools/list/tools/call 均走 POST);文档页
+  新增 MCP 调用示例。
+
 ## [0.7.0] - 2026-11-18
 
 本版打包:roadmap 阶段 2(管线显式化)收尾 + 阶段 3 尾巴(熔断/计费幂等/

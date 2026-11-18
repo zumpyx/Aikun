@@ -2451,3 +2451,269 @@ async fn zcode_oauth_login_flow() {
         "poll 打到 mock"
     );
 }
+
+/// ZCode 免费额度领取:完整序列(激活事件 → balance 已持有 → preview +
+/// touch 待领清单 → 逐项 claim → campaign confirm)打到 mock 上游,
+/// 结果分类(claimed / skipped)与转发头(Bearer JWT、X-Device-Mid)断言。
+/// AIKUN_ZCODE_OAUTH_BASE 指向 mock(claim 端口同源复用该配置)。
+#[tokio::test]
+async fn zcode_claim_free_quota() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn_with_env(&[
+        (
+            "AIKUN_ZCODE_OAUTH_BASE",
+            &format!("http://{}", mock.base.trim_start_matches("http://")),
+        ),
+        ("AIKUN_HEALTH_CHECK_INTERVAL", "3600"),
+    ])
+    .await;
+    let admin = app.admin_token().await;
+
+    // 带可解析 sub 的 JWT 形态 key(jwt_sub 命中 → 激活事件会发)。
+    let jwt = "h.eyJzdWIiOiJ1LTEyMyJ9.s";
+    app.seed_provider(&ProviderSeed {
+        name: "zcode-claim",
+        protocol: "anthropic",
+        base_url: &mock.base,
+        models: &["GLM-5.3-Flash"],
+        api_key: jwt,
+        ..ProviderSeed::default()
+    })
+    .await;
+    let provs = app
+        .client()
+        .get(format!("{}/api/providers", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    let provs: Value = provs.json().await.unwrap();
+    let pid = provs["items"][0]["id"].as_str().unwrap().to_string();
+    let r = app
+        .client()
+        .patch(format!("{}/api/providers/{pid}", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"channel_kind": "zcode"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "PATCH channel_kind=zcode");
+
+    // 上游脚本:事件 ×2 → balance → preview → touch → claim ×2 → confirm
+    mock.push_json(200, json!({"code": 0}));
+    mock.push_json(200, json!({"code": 0}));
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"plans": [{"plan_id": "owned_plan", "name": "Lite"}]}}),
+    );
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"plans": [
+            {"plan_id": "owned_plan", "name": "Lite", "priority": 1},
+            {"plan_id": "daily_free", "name": "每日免费额度", "priority": 5},
+        ]}}),
+    );
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"deliveries": [{"campaign_id": "camp1", "banner": {"buttons": [
+            {"action": {"args": {"plan_id": "touch_bonus"}}},
+        ]}}]}}),
+    );
+    mock.push_json(200, json!({"code": 0}));
+    mock.push_json(200, json!({"code": 0}));
+    mock.push_json(200, json!({"code": 0}));
+
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/{pid}/zcode/claim", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "claim 端点 200");
+    let res: Value = r.json().await.unwrap();
+    assert_eq!(res["problems"].as_array().map(Vec::len), Some(0), "{res}");
+    let claimed = res["claimed"].as_array().unwrap().clone();
+    assert!(claimed.iter().any(|v| v == "每日免费额度"), "{res}");
+    assert!(
+        claimed.iter().any(|v| v == "touch_bonus"),
+        "touch-only plan 也领取:{res}"
+    );
+    assert!(
+        res["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "Lite"),
+        "balance 已持有的跳过:{res}"
+    );
+
+    let reqs = mock.requests();
+    // 激活事件:device_mid 稳定派生 + user_id 来自 JWT sub
+    let events: Vec<_> = reqs
+        .iter()
+        .filter(|q| q.path.ends_with("/event/report"))
+        .collect();
+    assert_eq!(events.len(), 2, "app_launch + app_daily_active");
+    let ev_body: Value = serde_json::from_str(&events[0].body).unwrap();
+    assert_eq!(ev_body["user_id"], "u-123");
+    assert!(
+        ev_body["device_mid"].as_str().unwrap().contains('-'),
+        "UUID 形态 device_mid"
+    );
+    // balance / preview / touch 各一次
+    assert!(reqs.iter().any(|q| q.path.contains("/billing/balance")));
+    assert!(reqs.iter().any(|q| q.path.contains("/billing/preview")));
+    assert!(reqs.iter().any(|q| q.path.contains("/marketing/touch")));
+    // claim:Bearer JWT + billing 伪装头 + plan_id 体
+    let claims: Vec<_> = reqs
+        .iter()
+        .filter(|q| q.path.ends_with("/billing/claim"))
+        .collect();
+    assert_eq!(claims.len(), 2, "两个待领 plan 各一次 claim");
+    let bodies: Vec<Value> = claims
+        .iter()
+        .map(|q| serde_json::from_str(&q.body).unwrap())
+        .collect();
+    assert!(
+        bodies.iter().any(|b| b["plan_id"] == "daily_free"
+            && bodies.iter().any(|b2| b2["plan_id"] == "touch_bonus"))
+    );
+    assert_eq!(
+        claims[0].authorization.as_deref(),
+        Some(format!("Bearer {jwt}").as_str())
+    );
+    assert!(
+        claims[0]
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-device-mid" && v.contains('-')),
+        "billing 头带 device_mid"
+    );
+    // campaign confirm
+    assert!(
+        reqs.iter()
+            .any(|q| q.path.ends_with("/marketing/touch/action")),
+        "campaigned plan 领取后 confirm"
+    );
+}
+
+/// MCP 远程工具透传:GET /v1/mcp 目录 + POST /v1/mcp/{server_key}
+/// (JSON-RPC 体、Mcp-Session-Id 头转发、JWT 与伪装头送达上游、
+/// 响应体原样回传)。
+#[tokio::test]
+async fn mcp_passthrough_end_to_end() {
+    let mock = MockUpstream::start().await;
+    let app = TestApp::spawn().await;
+    let user = app.seed_user_funded().await;
+    let jwt = "fake-zcode-jwt-token";
+    app.seed_provider(&ProviderSeed {
+        name: "zcode-mcp",
+        protocol: "anthropic",
+        base_url: &mock.base,
+        models: &["GLM-5.3-Flash"],
+        api_key: jwt,
+        ..ProviderSeed::default()
+    })
+    .await;
+    let admin = app.admin_token().await;
+    let provs = app
+        .client()
+        .get(format!("{}/api/providers", app.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    let provs: Value = provs.json().await.unwrap();
+    let pid = provs["items"][0]["id"].as_str().unwrap().to_string();
+    let r = app
+        .client()
+        .patch(format!("{}/api/providers/{pid}", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"channel_kind": "zcode"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "PATCH channel_kind=zcode");
+
+    // 目录
+    let r = app
+        .client()
+        .get(format!("{}/v1/mcp", app.base))
+        .bearer_auth(&user.api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "GET /v1/mcp");
+    let cat: Value = r.json().await.unwrap();
+    assert!(
+        cat["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["key"] == "finance_tianyancha"),
+        "{cat}"
+    );
+
+    // tools/call 透传(上游单条 JSON-RPC 响应)
+    mock.push_json(
+        200,
+        json!({"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "智谱华章"}]}}),
+    );
+    let r = app
+        .client()
+        .post(format!("{}/v1/mcp/finance_tianyancha", app.base))
+        .bearer_auth(&user.api_key)
+        .header("Mcp-Session-Id", "sess-1")
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "search_companies", "arguments": {"query": "智谱"}}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "POST /v1/mcp/finance_tianyancha");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["result"]["content"][0]["text"], "智谱华章", "{body}");
+
+    let reqs = mock.requests();
+    let mcp_req = reqs
+        .iter()
+        .find(|q| q.path.ends_with("/api/v1/mcp/server/finance_tianyancha"))
+        .expect("MCP 请求打到上游");
+    assert_eq!(
+        mcp_req.authorization.as_deref(),
+        Some(format!("Bearer {jwt}").as_str()),
+        "渠道 JWT 送上游"
+    );
+    let sent: Value = serde_json::from_str(&mcp_req.body).unwrap();
+    assert_eq!(sent["method"], "tools/call", "JSON-RPC 体透传");
+    assert_eq!(sent["params"]["arguments"]["query"], "智谱", "扩展字段存活");
+    assert!(
+        mcp_req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "mcp-session-id" && v == "sess-1"),
+        "客户端 MCP 会话头转发"
+    );
+    assert!(
+        mcp_req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-zcode-agent" && v == "glm"),
+        "伪装头注入"
+    );
+
+    // 无 zcode 渠道的 server_key 非法 → 400(生成层 pattern → vendor 形状)
+    let r = app
+        .client()
+        .post(format!("{}/v1/mcp/bad$key", app.base))
+        .bearer_auth(&user.api_key)
+        .json(&json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "非法 server_key 400");
+    let err: Value = r.json().await.unwrap();
+    assert_eq!(err["error"]["type"], "invalid_request_error", "{err}");
+}

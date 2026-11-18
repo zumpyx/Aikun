@@ -26,14 +26,14 @@ use serde_json::{Value, json};
 
 use aikun_openapi::openapi::server::api::ProxyApi;
 use aikun_openapi::openapi::server::errors::{
-    CreateChatCompletionResponse, CreateEmbeddingResponse, CreateImageResponse,
-    CreateMessageResponse, CreateModerationResponse, CreateRerankResponse, CreateResponseResponse,
-    ListModelsResponse,
+    CallMcpServerResponse, CreateChatCompletionResponse, CreateEmbeddingResponse,
+    CreateImageResponse, CreateMessageResponse, CreateModerationResponse, CreateRerankResponse,
+    CreateResponseResponse, ListMcpServersResponse, ListModelsResponse,
 };
 use aikun_openapi::openapi::types::{
-    ChatCompletionRequest, EmbeddingsRequest, ImagesRequest, MessagesRequest, ModelList,
-    ModelListDataItem, ModelListDataItemObject, ModelListObject, ModerationsRequest, RerankRequest,
-    ResponsesRequest,
+    ChatCompletionRequest, EmbeddingsRequest, ImagesRequest, ListMcpServersResult, McpRequest,
+    McpServerInfo, MessagesRequest, ModelList, ModelListDataItem, ModelListDataItemObject,
+    ModelListObject, ModerationsRequest, RerankRequest, ResponsesRequest,
 };
 use aikun_protocol::Protocol;
 
@@ -135,7 +135,11 @@ pub async fn problem_to_vendor_error(req: Request, next: Next) -> Response {
     vendor_error(status, "invalid_request_error", Some((code, message)))
 }
 
-fn vendor_error(status: StatusCode, err_type: &str, code_msg: Option<(&str, &str)>) -> Response {
+pub(crate) fn vendor_error(
+    status: StatusCode,
+    err_type: &str,
+    code_msg: Option<(&str, &str)>,
+) -> Response {
     let (code, message) = code_msg
         .map(|(c, m)| (c.to_string(), m.to_string()))
         .unwrap_or_else(|| (err_type.to_string(), "Invalid request".to_string()));
@@ -224,6 +228,30 @@ impl ProxyApi for RelayService {
 
     async fn create_rerank(&self, body: RerankRequest) -> CreateRerankResponse {
         CreateRerankResponse::Raw(self.passthrough("rerank", to_body(body)).await)
+    }
+
+    async fn list_mcp_servers(&self) -> ListMcpServersResponse {
+        if relay_ctx().is_err() {
+            return ListMcpServersResponse::Raw(unauthorized());
+        }
+        ListMcpServersResponse::Ok(ListMcpServersResult {
+            servers: aikun_channels::adapters::zcode::MCP_SERVERS
+                .iter()
+                .map(|(key, description)| McpServerInfo {
+                    key: (*key).to_string(),
+                    description: (*description).to_string(),
+                })
+                .collect(),
+        })
+    }
+
+    async fn call_mcp_server(&self, server_key: String, body: McpRequest) -> CallMcpServerResponse {
+        match relay_ctx() {
+            Ok(ctx) => CallMcpServerResponse::Raw(
+                crate::mcp::call_mcp(&self.0, &ctx, &server_key, to_body(body)).await,
+            ),
+            Err(()) => CallMcpServerResponse::Raw(unauthorized()),
+        }
     }
 }
 

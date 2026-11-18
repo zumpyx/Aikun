@@ -215,6 +215,12 @@ impl AdminApi for AdminService {
     ) -> aikun_openapi::openapi::server::errors::AdminZcodeLoginPollResponse {
         self.providers.admin_zcode_login_poll(body).await
     }
+    async fn admin_zcode_claim_quota(
+        &self,
+        id: String,
+    ) -> aikun_openapi::openapi::server::errors::AdminZcodeClaimQuotaResponse {
+        self.providers.admin_zcode_claim_quota(id).await
+    }
     async fn admin_list_redemption_codes(
         &self,
         limit: ::std::option::Option<i64>,

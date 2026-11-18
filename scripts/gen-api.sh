@@ -8,7 +8,7 @@
 #   2) openapi-to-rust generate(读仓库根 openapi-to-rust.toml,
 #      原始输出进 target/openapi-to-rust 暂存,不进 git);
 #   3) Proxy 后处理(2026-11-18 /v1 纳入生成):python3 对暂存
-#      server/errors.rs 的 8 个 Proxy 响应枚举注入 Raw(Response)
+#      server/errors.rs 的 10 个 Proxy 响应枚举注入 Raw(Response)
 #      透传变体(变体 + IntoResponse 首分支),并做代理面正向清单校验
 #      (8 条 /v1 路由必须齐,缺失即拒绝组装);
 #   4) wrapper 组装独立 crate:<output>/{Cargo.toml, src/lib.rs, src/openapi/**}:
@@ -121,9 +121,11 @@ for f in REQUIRED_DEPS.toml mod.rs types.rs server/mod.rs server/api.rs \
   [[ -f "$STAGING_DIR/$f" ]] || { echo "gen-api: 生成器输出缺少 $f" >&2; exit 1; }
 done
 
-# 代理面正向清单:8 条 /v1 路由必须齐(2026-11-18 Proxy 纳入生成)
+# 代理面正向清单:10 条 /v1 路由必须齐(2026-11-18 Proxy 纳入生成;
+# 11-18 MCP 透传家族并入)
 for p in /v1/chat/completions /v1/messages /v1/responses /v1/models \
-         /v1/embeddings /v1/moderations /v1/images/generations /v1/rerank; do
+         /v1/embeddings /v1/moderations /v1/images/generations /v1/rerank \
+         /v1/mcp '/v1/mcp/{server_key}'; do
   if ! grep -qF "\"$p\"" "$STAGING_DIR/server/router.rs"; then
     echo "gen-api: 代理路由缺失:$p(白名单/spec 与预期不符),拒绝组装" >&2
     exit 1
@@ -150,6 +152,8 @@ ENUMS = [
     "CreateModerationResponse",
     "CreateImageResponse",
     "CreateRerankResponse",
+    "ListMcpServersResponse",
+    "CallMcpServerResponse",
 ]
 VARIANT = (
     "    /// 网关透传变体(gen-api.sh wrapper 注入,勿手改):管线产出的\n"

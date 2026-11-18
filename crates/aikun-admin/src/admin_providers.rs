@@ -57,19 +57,20 @@ use aikun_openapi::openapi::server::errors::{
     AdminExportProvidersServerResponse, AdminFetchUpstreamModelsResponse, AdminGetProviderResponse,
     AdminImportProvidersResponse, AdminListChannelKindsResponse, AdminListModelHealthResponse,
     AdminListProvidersResponse, AdminTestProviderModelResponse, AdminTestProviderResponse,
-    AdminUpdateProviderResponse, AdminZcodeLoginInitResponse, AdminZcodeLoginPollResponse,
-    ServerEventStream,
+    AdminUpdateProviderResponse, AdminZcodeClaimQuotaResponse, AdminZcodeLoginInitResponse,
+    AdminZcodeLoginPollResponse, ServerEventStream,
 };
 use aikun_openapi::openapi::types::{
-    AdminImportProvidersRequest, BatchFailureItem, ChannelKind as ApiChannelKind, ChannelKindPage,
-    CreateProviderRequest, CreateProvidersBatchRequest, FetchModelsRequest, FetchedModels,
-    ModelHealth as ApiModelHealth, ModelHealthPage, ModelHealthStatus, ModelTestRequest,
-    ModelTestResult, Problem, Provider as ApiProvider, ProviderBatchResult,
-    ProviderDefaultProtocol, ProviderExportItem, ProviderExportItemModelMapping,
-    ProviderHealthStatus, ProviderModelMapping, ProviderPage, ProviderProtocolsItem,
-    ProviderProviderType, ProviderTestResult, ProviderTestResultStatus, ProvidersBulkRequest,
-    ProvidersBulkRequestAction, ProvidersBulkResult, ProvidersImportResult, UpdateProviderRequest,
-    ZcodeLoginInitResult, ZcodeLoginPollRequest, ZcodeLoginPollResult, ZcodeLoginPollResultStatus,
+    AdminImportProvidersRequest, AdminZcodeClaimResult, BatchFailureItem,
+    ChannelKind as ApiChannelKind, ChannelKindPage, CreateProviderRequest,
+    CreateProvidersBatchRequest, FetchModelsRequest, FetchedModels, ModelHealth as ApiModelHealth,
+    ModelHealthPage, ModelHealthStatus, ModelTestRequest, ModelTestResult, Problem,
+    Provider as ApiProvider, ProviderBatchResult, ProviderDefaultProtocol, ProviderExportItem,
+    ProviderExportItemModelMapping, ProviderHealthStatus, ProviderModelMapping, ProviderPage,
+    ProviderProtocolsItem, ProviderProviderType, ProviderTestResult, ProviderTestResultStatus,
+    ProvidersBulkRequest, ProvidersBulkRequestAction, ProvidersBulkResult, ProvidersImportResult,
+    UpdateProviderRequest, ZcodeLoginInitResult, ZcodeLoginPollRequest, ZcodeLoginPollResult,
+    ZcodeLoginPollResultStatus,
 };
 
 use crate::problem;
@@ -277,6 +278,35 @@ pub trait ZcodeOAuth: Send + Sync + 'static {
     async fn poll(&self, flow_id: &str, poll_token: &str) -> ZcodePollStatus;
 }
 
+/// ZCode 免费额度领取的可领清单项(billing/preview ∪ marketing/touch)。
+pub struct ZcodeOfferedPlan {
+    pub plan_id: String,
+    /// 展示名(无则用 plan_id)。
+    pub name: String,
+    /// marketing/touch 投放带来的 plan 才有;领取成功后需 confirm。
+    pub campaign_id: String,
+}
+
+/// ZCode 免费额度领取端口(HTTP 经装配层注入,crate 纯净度)。序列炼化
+/// 自 Zcode2Api warm.go:激活事件 → preview/touch 拉清单 → 逐项 claim →
+/// campaign confirm。风控验证码(3007)不在网关侧破解,按 Err 报告。
+#[async_trait]
+pub trait ZcodeClaimPort: Send + Sync + 'static {
+    /// 激活事件(app_launch / app_daily_active 各一条;上游按
+    /// device_mid+日期去重)。领取前置,失败不阻断(记 problem 继续)。
+    async fn report_activation(&self, jwt: &str) -> Result<(), String>;
+    /// 待领清单:billing/preview(priority 降序)+ marketing/touch 横幅
+    /// 按钮(plan_id + campaign_id),已按领取优先级排好。
+    async fn offered_plans(&self, jwt: &str) -> Result<Vec<ZcodeOfferedPlan>, String>;
+    /// billing/balance 已持有的 plan_id(小写;claim 前查重跳过)。
+    async fn owned_plans(&self, jwt: &str) -> Result<Vec<String>, String>;
+    /// POST billing/claim:Ok(true)=领取成功;Ok(false)=已领取
+    /// (上游 code 1003,视为成功);Err=问题(含 3007 风控)。
+    async fn claim_plan(&self, jwt: &str, plan_id: &str) -> Result<bool, String>;
+    /// POST marketing/touch/action(confirm;campaigned plan 领取后补)。
+    async fn confirm_campaign(&self, jwt: &str, campaign_id: &str) -> Result<(), String>;
+}
+
 /// 一次连通性探测的输入(base_url 已按协议选定;api_key 为明文)。
 pub struct HealthProbe {
     pub base_url: String,
@@ -374,6 +404,8 @@ pub struct AdminProvidersService {
     probes: Arc<dyn ProviderProbes>,
     /// ZCode OAuth 在线登录端口(HTTP 经装配层注入,crate 纯净度)。
     zcode_oauth: Arc<dyn ZcodeOAuth>,
+    /// ZCode 免费额度领取端口(同上注入)。
+    zcode_claim: Arc<dyn ZcodeClaimPort>,
     /// PATCH 读-改-写串行锁(见文件头):并发 PATCH 经同一服务实例排队,
     /// 恢复旧实现"持锁全程读→校验→写"对管理端写的互斥。`Arc` 共享——
     /// clone 出的服务副本(路由工厂会克隆)必须落在同一把锁上。tokio
@@ -387,11 +419,13 @@ impl AdminProvidersService {
         store: Arc<dyn ProviderStore>,
         probes: Arc<dyn ProviderProbes>,
         zcode_oauth: Arc<dyn ZcodeOAuth>,
+        zcode_claim: Arc<dyn ZcodeClaimPort>,
     ) -> Self {
         Self {
             store,
             probes,
             zcode_oauth,
+            zcode_claim,
             patch_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -403,6 +437,7 @@ impl Clone for AdminProvidersService {
             store: Arc::clone(&self.store),
             probes: Arc::clone(&self.probes),
             zcode_oauth: Arc::clone(&self.zcode_oauth),
+            zcode_claim: Arc::clone(&self.zcode_claim),
             patch_lock: Arc::clone(&self.patch_lock),
         }
     }
@@ -1584,6 +1619,7 @@ impl AdminProvidersService {
                 })
             }
             ZcodePollStatus::Ready { token, email } => {
+                let token_for_claim = token.clone();
                 let name = body
                     .name
                     .clone()
@@ -1610,11 +1646,34 @@ impl AdminProvidersService {
                 };
                 match validate_candidate(&cand) {
                     Ok(config) => match insert_checked(self.store.as_ref(), &cand, config).await {
-                        Ok(row) => AdminZcodeLoginPollResponse::Ok(ZcodeLoginPollResult {
-                            status: ZcodeLoginPollResultStatus::Ready,
-                            email: Some(email),
-                            provider: Some(to_api_provider(&row)),
-                        }),
+                        Ok(row) => {
+                            // 免费额度不会自动到账:建好渠道后台自动领取一遍
+                            // (fire-and-forget,结果只留痕;失败可随时手动再领)。
+                            let svc = self.clone();
+                            let jwt = token_for_claim.clone();
+                            tokio::spawn(async move {
+                                let r = svc.claim_quota_sequence(&jwt).await;
+                                if r.problems.is_empty() {
+                                    tracing::info!(
+                                        "zcode oauth 自动领取完成: claimed={:?} skipped={:?}",
+                                        r.claimed,
+                                        r.skipped
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "zcode oauth 自动领取有问题: claimed={:?} skipped={:?} problems={:?}",
+                                        r.claimed,
+                                        r.skipped,
+                                        r.problems
+                                    );
+                                }
+                            });
+                            AdminZcodeLoginPollResponse::Ok(ZcodeLoginPollResult {
+                                status: ZcodeLoginPollResultStatus::Ready,
+                                email: Some(email),
+                                provider: Some(to_api_provider(&row)),
+                            })
+                        }
                         Err(p) => AdminZcodeLoginPollResponse::BadRequest(problem(
                             p.status as u16,
                             &p.code,
@@ -1628,6 +1687,116 @@ impl AdminProvidersService {
                     )),
                 }
             }
+        }
+    }
+
+    /// `POST /api/providers/{id}/zcode/claim`——领取 ZCode 渠道的免费/
+    /// 营销额度(官方免费/体验额度不会自动到账,需登录态 JWT 走领取
+    /// 序列,见 [`ZcodeClaimPort`])。
+    pub async fn admin_zcode_claim_quota(&self, id: String) -> AdminZcodeClaimQuotaResponse {
+        let row = match self.store.find_provider(&id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                return AdminZcodeClaimQuotaResponse::NotFound(problem(
+                    404,
+                    "not_found",
+                    "渠道不存在",
+                ));
+            }
+            Err(()) => {
+                return AdminZcodeClaimQuotaResponse::NotFound(problem(
+                    502,
+                    "store_error",
+                    "渠道读取失败",
+                ));
+            }
+        };
+        if row.channel_kind.trim() != aikun_channels::adapters::zcode::KIND {
+            return AdminZcodeClaimQuotaResponse::BadRequest(problem(
+                400,
+                "invalid_channel_kind",
+                "仅 zcode 渠道支持领取额度",
+            ));
+        }
+        let (jwt, _) = match self.store.find_provider_credentials(&id).await {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                return AdminZcodeClaimQuotaResponse::NotFound(problem(
+                    404,
+                    "not_found",
+                    "渠道不存在",
+                ));
+            }
+            Err(()) => {
+                return AdminZcodeClaimQuotaResponse::BadRequest(problem(
+                    502,
+                    "store_error",
+                    "渠道凭证读取失败",
+                ));
+            }
+        };
+        AdminZcodeClaimQuotaResponse::Ok(self.claim_quota_sequence(&jwt).await)
+    }
+
+    /// 领取序列(管理端按钮与 OAuth ready 自动领取共用):激活事件 →
+    /// 已持有清单 → 待领清单 → 逐项 claim → campaign confirm。
+    /// 事件/余额失败不阻断(记 problem 继续)——领取本体才是目的;
+    /// preview 拉不到则无事可做,直接带问题返回。
+    async fn claim_quota_sequence(&self, jwt: &str) -> AdminZcodeClaimResult {
+        let mut claimed: Vec<String> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        let mut problems: Vec<String> = Vec::new();
+
+        if let Err(p) = self.zcode_claim.report_activation(jwt).await {
+            problems.push(format!("activation: {p}"));
+        }
+        // 已持有清单拉不到按空集处理:claim 回 1003(已领取)同样视为成功。
+        let owned = self.zcode_claim.owned_plans(jwt).await.unwrap_or_else(|p| {
+            problems.push(format!("balance: {p}"));
+            Vec::new()
+        });
+        let offers = match self.zcode_claim.offered_plans(jwt).await {
+            Ok(o) => o,
+            Err(p) => {
+                problems.push(format!("preview: {p}"));
+                return AdminZcodeClaimResult {
+                    claimed,
+                    skipped,
+                    problems,
+                };
+            }
+        };
+        for plan in offers {
+            let display = if plan.name.trim().is_empty() {
+                plan.plan_id.clone()
+            } else {
+                plan.name.clone()
+            };
+            if owned.iter().any(|o| o.eq_ignore_ascii_case(&plan.plan_id)) {
+                skipped.push(display);
+                continue;
+            }
+            match self.zcode_claim.claim_plan(jwt, &plan.plan_id).await {
+                Ok(true) => {
+                    claimed.push(display);
+                    if !plan.campaign_id.is_empty()
+                        && let Err(p) = self
+                            .zcode_claim
+                            .confirm_campaign(jwt, &plan.campaign_id)
+                            .await
+                    {
+                        problems.push(format!("confirm {}: {p}", plan.campaign_id));
+                    }
+                }
+                // 上游 1003:已领取(比如 balance 拉取失败走了空集)。
+                Ok(false) => skipped.push(display),
+                Err(p) => problems.push(format!("claim {display}: {p}")),
+            }
+        }
+        AdminZcodeClaimResult {
+            claimed,
+            skipped,
+            problems,
         }
     }
 

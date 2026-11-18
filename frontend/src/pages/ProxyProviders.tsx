@@ -99,6 +99,28 @@ export default function ProxyProviders() {
     loginTimer.current = window.setTimeout(() => void tick(), 3000)
   }
 
+  // 免费额度领取(zcode 专属):官方免费/体验额度不自动到账,需调领取序列。
+  const [claiming, setClaiming] = useState<Set<string>>(new Set())
+  const doClaim = async (id: string, name: string) => {
+    setClaiming((prev) => new Set(prev).add(id))
+    const r = await api<{ claimed: string[]; skipped: string[]; problems: string[] }>('POST', `/api/providers/${id}/zcode/claim`)
+    setClaiming((prev) => {
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+    if (!r.ok) {
+      sonnerToast.error(`${name} 领取失败:${errMsg(r)}`)
+      return
+    }
+    if (r.data.problems.length > 0) sonnerToast.warning(`${name} 领取存在问题:${r.data.problems.join(';')}`)
+    const parts: string[] = []
+    if (r.data.claimed.length > 0) parts.push(`已领取 ${r.data.claimed.join('、')}`)
+    if (r.data.skipped.length > 0) parts.push(`已持有 ${r.data.skipped.join('、')}`)
+    if (parts.length > 0) sonnerToast.success(`${name}:${parts.join(' · ')}`)
+    else if (r.data.problems.length === 0) sonnerToast.info(`${name}:当前没有可领的额度`)
+  }
+
   const data = list.data?.items ?? []
   const allChecked = data.length > 0 && data.every((p) => selected.has(p.id))
   const toggleAll = () => setSelected(allChecked ? new Set() : new Set(data.map((p) => p.id)))
@@ -121,7 +143,7 @@ export default function ProxyProviders() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-xl font-bold">反代渠道</h2>
-          <p className="text-sm text-muted-foreground">ZCode / WorkBuddy 等订阅型上游;支持批量操作、导入导出与在线登录</p>
+          <p className="text-sm text-muted-foreground">ZCode / WorkBuddy 等订阅型上游;支持批量操作、导入导出、在线登录与免费额度领取</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={() => void doExport()}>导出</Button>
@@ -173,7 +195,7 @@ export default function ProxyProviders() {
               <THead>
                 <TR>
                   <TH className="w-8"><Checkbox checked={allChecked} onChange={toggleAll} aria-label="全选" /></TH>
-                  <TH>名称</TH><TH>类型</TH><TH>模型</TH><TH>状态</TH><TH>延迟</TH><TH>优先级</TH><TH>权重</TH>
+                  <TH>名称</TH><TH>类型</TH><TH>模型</TH><TH>状态</TH><TH>延迟</TH><TH>优先级</TH><TH>权重</TH><TH>操作</TH>
                 </TR>
               </THead>
               <TBody>
@@ -191,6 +213,13 @@ export default function ProxyProviders() {
                     <TD>{p.latency_ms > 0 ? `${Math.round(p.latency_ms)}ms` : '-'}</TD>
                     <TD>{p.priority}</TD>
                     <TD>{p.weight}</TD>
+                    <TD>
+                      {p.channel_kind === 'zcode' ? (
+                        <Button size="sm" variant="outline" disabled={claiming.has(p.id)} onClick={() => void doClaim(p.id, p.name)}>
+                          {claiming.has(p.id) ? '领取中…' : '领取额度'}
+                        </Button>
+                      ) : <span className="text-xs text-muted-foreground">-</span>}
+                    </TD>
                   </TR>
                 ))}
               </TBody>

@@ -156,6 +156,10 @@ pub trait AdminApi: Send + Sync + 'static {
         &self,
         body: ZcodeLoginPollRequest,
     ) -> AdminZcodeLoginPollResponse;
+    /// 领取 ZCode 渠道的免费/营销额度
+    ///
+    /// `POST /api/providers/{id}/zcode/claim`
+    async fn admin_zcode_claim_quota(&self, id: String) -> AdminZcodeClaimQuotaResponse;
     /// 为(尚未保存的)渠道配置拉取上游模型列表
     ///
     /// `POST /api/providers/fetch-models`
@@ -318,6 +322,14 @@ pub trait ProxyApi: Send + Sync + 'static {
     ///
     /// `POST /v1/rerank`
     async fn create_rerank(&self, body: RerankRequest) -> CreateRerankResponse;
+    /// 可透传的 MCP 远程工具目录(zcode 渠道)
+    ///
+    /// `GET /v1/mcp`
+    async fn list_mcp_servers(&self) -> ListMcpServersResponse;
+    /// MCP 远程工具透传(JSON-RPC,转发 zcode 渠道 JWT)
+    ///
+    /// `POST /v1/mcp/{server_key}`
+    async fn call_mcp_server(&self, server_key: String, body: McpRequest) -> CallMcpServerResponse;
 }
 /// Operations under the `User` tag.
 #[async_trait::async_trait]

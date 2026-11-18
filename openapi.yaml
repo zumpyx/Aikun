@@ -701,6 +701,120 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProxyError'
 
+  /v1/mcp:
+    get:
+      tags: [Proxy]
+      operationId: listMcpServers
+      summary: 可透传的 MCP 远程工具目录(zcode 渠道)
+      description: |
+        **代理端点;经 openapi-to-rust 生成(见 Proxy tag)。**
+        返回已知 MCP server_key 目录(天眼查/图片搜索等)。目录仅用于
+        展示与发现——任意 server_key 都能直接调 `/v1/mcp/{server_key}`,
+        存在性与权限由上游裁决。
+      security:
+        - apiKeyAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: MCP 服务目录
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListMcpServersResult'
+        '401':
+          description: |
+            鉴权失败:**网关扁平体** {error:"<code>", message}(error 是字符串,
+            不是对象 —— 厂商 SDK 的 error.message / error.code 解析路径对 401
+            不适用)。非厂商格式;/v1 冻结面现行为,见 GatewayAuthError。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayAuthError'
+
+  /v1/mcp/{server_key}:
+    post:
+      tags: [Proxy]
+      operationId: callMcpServer
+      summary: MCP 远程工具透传(JSON-RPC,转发 zcode 渠道 JWT)
+      description: |
+        **代理端点,契约属 MCP;经 openapi-to-rust 生成(混合宽松 schema,
+        未知字段 flatten 透传,见 Proxy tag)。**
+        MCP Streamable HTTP(JSON-RPC 2.0)透传:按优先级选一条可用
+        zcode 渠道,把请求转发到
+        `{渠道base}/api/v1/mcp/server/{server_key}`(ZCode 官方插件同款
+        端点,JWT 同一登录态,消耗套餐权限)。initialize/tools/list/
+        tools/call 等方法均在 body 的 JSON-RPC 消息里;`Mcp-Session-Id` /
+        `Mcp-Protocol-Version` / `Accept` 头原样转发。响应体与状态码原样
+        回传(JSON 或 SSE)。0 元记账(上游消耗套餐额度,无 usage 可提)。
+      security:
+        - apiKeyAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/McpRequest'
+            examples:
+              tools_list:
+                value:
+                  jsonrpc: '2.0'
+                  id: 1
+                  method: tools/list
+              tianyancha_call:
+                value:
+                  jsonrpc: '2.0'
+                  id: 2
+                  method: tools/call
+                  params:
+                    name: search_companies
+                    arguments:
+                      query: 智谱
+      responses:
+        '200':
+          description: |
+            MCP JSON-RPC 响应,原样透传(可能是 application/json 单响应,
+            也可能是 text/event-stream 流——由上游与请求方法决定)。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyJsonObject'
+        '400':
+          description: server_key 非法(字符/长度)或 JSON-RPC 消息畸形
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '401':
+          description: |
+            鉴权失败:**网关扁平体** {error:"<code>", message}(error 是字符串,
+            不是对象 —— 厂商 SDK 的 error.message / error.code 解析路径对 401
+            不适用)。非厂商格式;/v1 冻结面现行为,见 GatewayAuthError。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayAuthError'
+        '429':
+          description: key 限额(rate_limit_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '502':
+          description: 上游失败且 zcode 渠道转移耗尽
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+        '503':
+          description: 无可用 zcode 渠道(provider_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProxyError'
+
 # =============================================================================
 # components
 # =============================================================================
@@ -1801,6 +1915,43 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
 
+  /api/providers/{id}/zcode/claim:
+    post:
+      tags: [Admin]
+      operationId: adminZcodeClaimQuota
+      summary: 领取 ZCode 渠道的免费/营销额度
+      description: |
+        官方免费与体验额度**不会自动到账**(2026-11-18 调研):需用渠道
+        JWT 走领取序列——激活事件(app_launch/app_daily_active,上游按
+        device_mid+日期去重)→ billing/preview + marketing/touch 拉可领
+        清单 → 逐项 POST billing/claim(跳过 balance 已持有的 plan_id;
+        回码 1003=已领取视为成功)→ campaign 活动补 touch/action confirm。
+        风控验证码(3007)不在网关侧破解,按 problem 报告。OAuth 在线登录
+        建渠道成功后会在后台自动跑一遍领取。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: |
+            领取结果:claimed(领取到的套餐名)/ skipped(已持有)/
+            problems(逐项问题;为空即全部成功)。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminZcodeClaimResult'
+        '400':
+          description: 渠道 channel_kind 不是 zcode
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/providers/fetch-models:
     post:
       tags: [Admin]
@@ -2463,6 +2614,18 @@ components:
         两边兼容)。现网为 UUID;客户端不得解析其内部结构。
       schema:
         type: string
+    ServerKey:
+      name: server_key
+      in: path
+      required: true
+      description: |
+        MCP server_key(ZCode 官方插件 .mcp.json 同名标识,如
+        finance_tianyancha / image_search)。白名单字符集
+        [a-zA-Z0-9_-],长度 1..=64;目录见 GET /v1/mcp,未收录的 key
+        照常透传,存在性由上游裁决。
+      schema:
+        type: string
+        pattern: '^[a-zA-Z0-9_-]{1,64}$'
 
   responses:
     Unauthorized:
@@ -4003,6 +4166,56 @@ components:
         provider:
           $ref: '#/components/schemas/Provider'
       required: [status]
+
+    AdminZcodeClaimResult:
+      type: object
+      description: |
+        免费额度领取结果:claimed = 本次领取到的套餐/额度名;skipped =
+        balance 已持有的;problems = 逐项问题(风控/网络/上游报错),
+        为空即全部成功。
+      properties:
+        claimed:
+          type: array
+          items: {type: string}
+        skipped:
+          type: array
+          items: {type: string}
+        problems:
+          type: array
+          items: {type: string}
+      required: [claimed, skipped, problems]
+      additionalProperties: false
+
+    McpRequest:
+      type: object
+      description: |
+        MCP JSON-RPC 2.0 消息(混合宽松:jsonrpc/method 轻量类型化,id/
+        params/result 等经 flatten 原样透传——id 可为 string/number,
+        params 结构随 method 变化,不适合钉死 schema)。
+      properties:
+        jsonrpc: {type: string}
+        method: {type: string}
+      additionalProperties: true
+
+    McpServerInfo:
+      type: object
+      properties:
+        key:
+          type: string
+          description: server_key,直接用于 /v1/mcp/{server_key}
+        description: {type: string}
+      required: [key, description]
+      additionalProperties: false
+
+    ListMcpServersResult:
+      type: object
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: '#/components/schemas/McpServerInfo'
+      required: [servers]
+      additionalProperties: false
 
     ProviderBatchResult:
       type: object

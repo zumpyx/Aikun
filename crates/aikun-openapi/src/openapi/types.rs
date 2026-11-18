@@ -1105,6 +1105,16 @@ pub struct RequestLog {
     )]
     pub username: Option<Option<String>>,
 }
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListMcpServersResult {
+    pub servers: Vec<McpServerInfo>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpServerInfo {
+    pub description: String,
+    ///server_key,直接用于 /v1/mcp/{server_key}
+    pub key: String,
+}
 #[doc = "/v1 端点 401 的错误体:**网关扁平体,非厂商格式**(auth 中间件在\n进入代理管线之前产生,src/auth/mod.rs:332-339、367-384)。\n`error` 是**字符串短码,不是对象** —— 按厂商 SDK 的\nerror.message / error.code 解析路径会失败,消费者需对 401 单独分支。\n短码取值:\n* invalid_token —— Authorization: Bearer 路径:JWT 与 sk- key 均未通过;\n* unauthorized —— 缺 Authorization 头,或 x-api-key 通道的 key 无效。\n"]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GatewayAuthError {
@@ -2258,6 +2268,16 @@ impl AdjustBalanceRequestBuilder {
     }
 }
 pub type AdminExportProvidersResponse = serde_json::Value;
+/**免费额度领取结果:claimed = 本次领取到的套餐/额度名;skipped =
+balance 已持有的;problems = 逐项问题(风控/网络/上游报错),
+为空即全部成功。
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AdminZcodeClaimResult {
+    pub claimed: Vec<String>,
+    pub problems: Vec<String>,
+    pub skipped: Vec<String>,
+}
 ///OpenAI chat/completions 请求(混合宽松;字段全 optional, 缺 model 等校验留在网关管线以保持厂商格式错误体)。
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ChatCompletionRequest {
@@ -2416,6 +2436,20 @@ pub struct LogStats {
 pub struct LoginRequest {
     pub password: String,
     pub username: String,
+}
+/**MCP JSON-RPC 2.0 消息(混合宽松:jsonrpc/method 轻量类型化,id/
+params/result 等经 flatten 原样透传——id 可为 string/number,
+params 结构随 method 变化,不适合钉死 schema)。
+*/
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct McpRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jsonrpc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Additional properties not explicitly defined in the schema
+    #[serde(flatten)]
+    pub additional_properties: std::collections::BTreeMap<String, serde_json::Value>,
 }
 ///Anthropic Messages 请求(混合宽松;字段全 optional)。
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

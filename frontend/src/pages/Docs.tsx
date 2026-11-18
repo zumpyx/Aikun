@@ -126,6 +126,39 @@ Content-Type: application/json
       </Card>
 
       <Card>
+        <CardHeader><CardTitle>AI 代理 — MCP 工具透传(ZCode 渠道)</CardTitle></CardHeader>
+        <CardContent>
+          <p className="mb-3 text-sm text-muted-foreground">
+            ZCode 订阅自带的远程 MCP 工具(天眼查企业查询 <code>finance_tianyancha</code>、图片搜索 <code>image_search</code> 等)
+            可直接经网关调用:MCP Streamable HTTP(JSON-RPC 2.0)字节级透传,鉴权用<b>你的网关 API Key</b>,
+            上游自动挂 ZCode 渠道的登录态 JWT(消耗套餐权限,网关侧 0 元记账)。按渠道优先级自动选路,失败转移。
+            目录查询与调用示例:
+          </p>
+          <CodeBlock>{`GET ${baseUrl}/v1/mcp
+Authorization: Bearer sk-...
+→ 200 {"servers": [{"key": "finance_tianyancha", "description": "天眼查企业信息查询(工商/股权/涉诉/舆情)"}, ...]}
+
+POST ${baseUrl}/v1/mcp/finance_tianyancha
+Authorization: Bearer sk-...
+Mcp-Session-Id: <initialize 返回的会话 ID,后续请求携带>
+Content-Type: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {"name": "search_companies", "arguments": {"query": "智谱"}}
+}
+
+→ 200(JSON-RPC 结果原样回传;initialize / tools/list 同理)}`}</CodeBlock>
+          <p className="mt-2 text-sm text-muted-foreground">
+            注:v1 仅透传 POST(initialize / tools/list / tools/call 均走 POST);<code>Mcp-Session-Id</code>、
+            <code>Mcp-Protocol-Version</code>、<code>Accept</code> 头会原样送达上游。无可用 ZCode 渠道时返回 503。
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
         <CardHeader><CardTitle>错误语义</CardTitle></CardHeader>
         <CardContent>
           <p className="mb-3 text-sm text-muted-foreground">

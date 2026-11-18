@@ -969,6 +969,136 @@ impl IntoResponse for CreateRerankResponse {
         }
     }
 }
+/// Response for `GET /v1/mcp` (operationId `listMcpServers`).
+pub enum ListMcpServersResponse {
+    /// 网关透传变体(gen-api.sh wrapper 注入,勿手改):管线产出的
+    /// 完整 Response 原样返回(SSE/headers/错误体均由管线决定)。
+    Raw(::axum::response::Response),
+    Ok(ListMcpServersResult),
+    Unauthorized(GatewayAuthError),
+}
+impl IntoResponse for ListMcpServersResponse {
+    fn into_response(self) -> ::axum::response::Response {
+        match self {
+            Self::Raw(response) => response,
+            Self::Ok(body) => {
+                let mut response = (StatusCode::OK, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::Unauthorized(body) => {
+                let mut response = (StatusCode::UNAUTHORIZED, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+        }
+    }
+}
+/// Response for `POST /v1/mcp/{server_key}` (operationId `callMcpServer`).
+pub enum CallMcpServerResponse {
+    /// 网关透传变体(gen-api.sh wrapper 注入,勿手改):管线产出的
+    /// 完整 Response 原样返回(SSE/headers/错误体均由管线决定)。
+    Raw(::axum::response::Response),
+    Ok(ProxyJsonObject),
+    BadRequest(ProxyError),
+    Unauthorized(GatewayAuthError),
+    TooManyRequests(ProxyError),
+    BadGateway(ProxyError),
+    ServiceUnavailable(ProxyError),
+}
+impl IntoResponse for CallMcpServerResponse {
+    fn into_response(self) -> ::axum::response::Response {
+        match self {
+            Self::Raw(response) => response,
+            Self::Ok(body) => {
+                let mut response = (StatusCode::OK, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::BadRequest(body) => {
+                let mut response = (StatusCode::BAD_REQUEST, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::Unauthorized(body) => {
+                let mut response = (StatusCode::UNAUTHORIZED, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::TooManyRequests(body) => {
+                let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::BadGateway(body) => {
+                let mut response = (StatusCode::BAD_GATEWAY, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::ServiceUnavailable(body) => {
+                let mut response = (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+        }
+    }
+}
 /// Response for `GET /` (operationId `serveFrontend`).
 pub enum ServeFrontendResponse {
     Ok(String),
@@ -2627,6 +2757,80 @@ impl IntoResponse for AdminZcodeLoginPollResponse {
             }
             Self::Forbidden(body) => {
                 let mut response = (StatusCode::FORBIDDEN, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/problem+json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+        }
+    }
+}
+/// Response for `POST /api/providers/{id}/zcode/claim` (operationId `adminZcodeClaimQuota`).
+pub enum AdminZcodeClaimQuotaResponse {
+    Ok(AdminZcodeClaimResult),
+    BadRequest(Problem),
+    Unauthorized(Problem),
+    Forbidden(Problem),
+    NotFound(Problem),
+}
+impl IntoResponse for AdminZcodeClaimQuotaResponse {
+    fn into_response(self) -> ::axum::response::Response {
+        match self {
+            Self::Ok(body) => {
+                let mut response = (StatusCode::OK, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::BadRequest(body) => {
+                let mut response = (StatusCode::BAD_REQUEST, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/problem+json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::Unauthorized(body) => {
+                let mut response = (StatusCode::UNAUTHORIZED, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/problem+json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::Forbidden(body) => {
+                let mut response = (StatusCode::FORBIDDEN, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/problem+json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::NotFound(body) => {
+                let mut response = (StatusCode::NOT_FOUND, Json(body)).into_response();
                 let Ok(content_type) =
                     ::axum::http::HeaderValue::from_bytes("application/problem+json".as_bytes())
                 else {
