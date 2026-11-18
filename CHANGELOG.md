@@ -5,7 +5,39 @@
 
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
-## [Unreleased]
+## [0.7.0] - 2026-11-18
+
+本版打包:roadmap 阶段 2(管线显式化)收尾 + 阶段 3 尾巴(熔断/计费幂等/
+Limiter)+ /v1 代理面纳入 openapi-to-rust 生成(全量生成无白名单)+
+管理端 React 重写。Gemini 等新协议与 /metrics 端点拍板不做(roadmap
+阶段 4 待定项关闭)。
+
+### 新增(阶段 3 尾巴)
+
+- **渠道熔断**(9.5):连续计入健康的失败达到阈值(默认 3,`AIKUN_BREAKER_
+  FAILURE_THRESHOLD`)后,冷却期内(默认 30s,`AIKUN_BREAKER_COOLDOWN_SECS`)
+  选路优先跳过该渠道,到期恢复可选(半开);全部候选被熔断时回退为忽略
+  熔断(不硬墙)。进程内状态,不取代自动禁用;429/客户端 4xx 不计入;
+  管理端手动启停不受影响。
+- **计费幂等**(9.3):用量行(total_tokens > 0 且带 request_id)以
+  request_id 为键**只落一次**——重复落账(Guard 与正常收尾赛跑、崩溃
+  恢复重放)不再双扣费/双计日额度。零用量失败行不受影响(同请求多次
+  attempt 各留审计行)。
+- **Limiter 组件**:AppState 四个限流 HashMap(登录失败/兑换失败/API key
+  RPM/并发在途)合并为 `aikun-store::limiter` 统一组件(访问时清理 +
+  删除时清理 + 锁中毒恢复)。行为收紧点仅锁中毒场景:RPM 窗口锁中毒
+  原为跳过检查放行(fail-open),现为恢复数据继续限流。
+
+### 变更(管理端 React 重写)
+
+- 管理端前端从 vanilla JS(14 文件 3175 行)重写为 React(TS + Vite +
+  Tailwind + shadcn/ui 风格组件 + TanStack Query + HashRouter)。页面与
+  功能等价(登录/仪表盘/钱包/密钥/日志/文档/渠道/模型/测试/用户/价格/
+  兑换码);providers 单建与批量两份重复表单合并;刷新/深链/后退可用
+  (hash 路由)。构建产物 `frontend/dist` 提交进仓库并由 build.rs 嵌入,
+  **单二进制零外部文件不变,Docker 构建无需 node**;CSP 维持仅同源。
+- 二进制版本 0.5.0 → 0.7.0(`/api/system/version` 门禁语义不变,≥ 0.5)。
+
 ### 修复
 - `aikun-migrate`:v3 早期库缺 `api_key_usage_daily` 表时中断且留半成品库——改为缺表按
   0 行迁移并 WARN(计数器可由明细重建,服务端启动本就重建当日值);其余表缺失仍报错。

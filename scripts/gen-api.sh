@@ -216,7 +216,7 @@ fi
 [package]
 name = "aikun-openapi"
 # 与 openapi.yaml info.version 对齐
-version = "0.5.0"
+version = "0.7.0"
 edition = "2024"
 description = "Aikun 管理面(Auth/User/Admin)API 脚手架,由 openapi-to-rust 从 openapi.yaml 生成(scripts/gen-api.sh)"
 publish = false

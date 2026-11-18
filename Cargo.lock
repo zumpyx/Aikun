@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "aikun"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "aikun-admin",
  "aikun-channels",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "aikun-openapi"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "axum",

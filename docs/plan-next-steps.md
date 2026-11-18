@@ -277,6 +277,32 @@ roadmap 阶段 2(pipeline 显式化)与步骤 3–5 无冲突,可并行推进
   GatewayError/passthrough 并入(27 行薄壳)/request_id 贯穿/三类超时/脱敏/缓存收紧,
   全量 270 测试绿(7bbd2a6);**9.1 流式黄金样本**双向 7 用例(6a9ef68)。
 
+### 后续批次(2026-11-18):阶段 3 尾巴 + /v1 生成化 + React 重写 → **0.7.0 发版** ✅
+
+- **阶段 3 尾巴**全部落地:9.5 渠道熔断(breaker 组件 + e2e)、9.3 计费幂等
+  (request_ledger_dedup 哨兵 + 单测)、Limiter 组件(aikun-store::limiter,
+  四消费方迁移)。
+- **/v1 生成化**:8 端点混合宽松 schema 纳入生成;全量注入(无手工白名单);
+  Raw(Response) 透传变体;problem→厂商格式错误体中间件。
+- **React 重写**:管理端 11 页等价(TS+Vite+shadcn/ui),dist 提交入库 +
+  build.rs 嵌入,单二进制不变;CI 加 frontend-rebuild-check。
+- **发版**:二进制与 spec 0.5.0 → **0.7.0**(CHANGELOG 三段式定稿);
+  Gemini 与 /metrics 拍板不做(阶段 4 待定项关闭);**refactor/modular-gateway
+  合回 main**。
+- **bench 新基线(0.7.0,12 核 Apple M6,node v26.13.1,release,同机
+  纵向对照阶段 S)**:
+
+  | 并发 | 请求数 | QPS | P50(ms) | P99(ms) |
+  |---|---|---|---|---|
+  | 10 | 1000 | 637 | 12.5 | 50.3 |
+  | 50 | 5000 | 640 | 71.5 | 184.0 |
+  | 100 | 10000 | 594 | 151.9 | 419.2 |
+  | 200 | 20000 | 580 | 301.8 | 976.9 |
+
+  对阶段 S 同机记录(609/576/569/539)**全档不劣化、小幅提升**;
+  "与 SQLite 同机对照"一项就此关闭为不可行(主路径已无 SQLite),
+  以 M6 纵向基线替代。
+
 ### 后续批次(2026-11-18):/v1 代理面纳入 openapi-to-rust 生成 ✅
 
 > 用户裁决,推翻 0.5 期"/v1 永远手写"(architecture-v0.5 决策 4 已重写留痕);
