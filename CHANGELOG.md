@@ -6,6 +6,13 @@
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
 ## [Unreleased]
+### 修复
+
+- **管理端白屏**:React 入口忘记包裹 `<AuthProvider>`——首屏
+  `useAuth()` 即抛错,React 卸载整树,直接访问 `/` 只见空白页。
+  修复 `frontend/src/main.tsx` 并重建 dist。e2e 只覆盖 HTTP 层
+  (HTML/资产/头),渲染级问题不可见——本次经浏览器实测发现,
+  前端改动此后必须过浏览器冒烟(登录页渲染 + 一次登录链路)。
 ### 新增(ZCode 渠道)
 
 - **ZCode 渠道类型(`channel_kind = "zcode"`,GLM Coding Plan)**:接入
