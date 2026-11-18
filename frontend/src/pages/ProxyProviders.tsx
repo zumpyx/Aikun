@@ -32,12 +32,6 @@ const APPS = {
     regionFilter: 'intl' as const,
     desc: 'GLM Coding Plan·国际(z.ai):订阅 JWT(zcode.z.ai)与 API Key(api.z.ai);支持免费额度签到',
   },
-  zaichat: {
-    region: 'intl',
-    label: 'Z.AI Chat',
-    kinds: '',
-    desc: 'chat.z.ai 网页会话上游(协议调研中,暂未接入)',
-  },
   workbuddy: {
     region: 'intl',
     label: 'WorkBuddy',
@@ -57,18 +51,12 @@ const APPS = {
     regionFilter: 'cn' as const,
     desc: 'GLM Coding Plan·国内(智谱 BigModel):订阅 JWT(zcode.bigmodel.cn)与 API Key(open.bigmodel.cn);凭证与国际 z.ai 互不通用',
   },
-  chatglm: {
-    region: 'cn',
-    label: '智谱清言',
-    kinds: '',
-    desc: 'chatglm.cn 网页会话上游(协议调研中,暂未接入)',
-  },
 } as const
 
 /** 两行区域分组(第一行国际,第二行国内)。 */
 const REGION_ROWS: { label: string; apps: AppId[] }[] = [
-  { label: '国际', apps: ['zcode', 'zaichat', 'workbuddy', 'qoder'] },
-  { label: '国内', apps: ['zcode-cn', 'chatglm'] },
+  { label: '国际', apps: ['zcode', 'workbuddy', 'qoder'] },
+  { label: '国内', apps: ['zcode-cn'] },
 ]
 
 /** 渠道是否国内域(base 含 bigmodel)。 */
@@ -260,15 +248,6 @@ function AppPage({ appId }: { appId: AppId }) {
         ))}
       </div>
 
-      {appId === 'zaichat' ? (
-        <Card>
-          <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            Z.AI Chat(chat.z.ai / chatglm.cn 网页会话)协议调研中,暂未接入。
-            <br />已就绪的接入方式见「ZCode」应用的 Coding Plan 预设(官方兼容端点,更稳定)。
-          </CardContent>
-        </Card>
-      ) : (
-        <>
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => void doExport()}>导出</Button>
             <Button variant="outline" onClick={() => setImportOpen(true)}>导入</Button>
@@ -377,8 +356,6 @@ function AppPage({ appId }: { appId: AppId }) {
               (AIKUN_ZCODE_AUTO_CLAIM / AIKUN_ZCODE_CLAIM_HOUR 可调);API Key 形态(zai-plan / bigmodel-plan)无签到序列。
             </p>
           )}
-        </>
-      )}
     </div>
   )
 }

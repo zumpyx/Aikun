@@ -81,6 +81,14 @@
   `/data/aikun.surreal`);迁移工具默认目标同步。
 
 ## [Unreleased]
+### 变更(反代应用中心收敛)
+
+- **移除 Z.AI Chat / 智谱清言占位页**(用户裁决:先只接 ZCode 的模型
+  反代;两行分组收敛为 国际 ZCode/WorkBuddy/Qoder + 国内 ZCode,
+  旧路由自动重定向到 ZCode)。ZCode 的 MCP 透传(/v1/mcp)已上线,
+  无需改动,不在管理面展示。
+
+## [Unreleased]
 ### 变更(反代应用中心:两行区域分组 + 领取端点跟渠道走)
 
 - **应用 Tab 两行分组**(用户裁决):第一行国际(ZCode / Z.AI Chat /
