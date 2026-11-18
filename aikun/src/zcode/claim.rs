@@ -1,24 +1,23 @@
 //! ZCode 免费额度领取端口实现(reqwest;装配层注入 admin 服务)。
 //!
-// ZCode 免费额度领取端口(reqwest 实现;序列见 admin_providers 的
-// ZcodeClaimPort 文档与 aikun_channels zcode.rs 常量)。
-pub struct ZcodeClaimImpl {
-    /// 与 OAuth 同一配置项(AIKUN_ZCODE_OAUTH_BASE);billing/marketing/
-    /// event 家族挂在 origin 的 /api/v1 下,配置尾缀 /api/v1 自动剥掉。
-    pub base: String,
-}
+//! 端点跟**渠道自身的 base** 走(国内渠道打 zcode.bigmodel.cn,国际打
+//! zcode.z.ai——与凭证环境一致);序列见 ZcodeClaimPort 文档与
+//! aikun_channels zcode 常量。
+pub struct ZcodeClaimImpl;
 
 impl ZcodeClaimImpl {
-    fn origin(&self) -> String {
-        let mut b = self.base.trim_end_matches('/').to_string();
+    /// 端点前缀归一:剥尾斜杠与 /api/v1 后缀(渠道 base 是纯 origin,
+    /// AIKUN_ZCODE_OAUTH_BASE 默认带 /api/v1——两种形态都归一到 origin)。
+    fn origin_of(base: &str) -> String {
+        let mut b = base.trim_end_matches('/').to_string();
         if let Some(stripped) = b.strip_suffix("/api/v1") {
             b = stripped.to_string();
         }
         b
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}{path}", self.origin())
+    fn url_for(base: &str, path: &str) -> String {
+        format!("{}{path}", Self::origin_of(base))
     }
 
     /// billing 家族通用请求:billing_request_headers + JSON 体,20s 超时。
@@ -26,6 +25,7 @@ impl ZcodeClaimImpl {
     async fn request_json(
         &self,
         method: reqwest::Method,
+        base: &str,
         path: &str,
         jwt: &str,
         body: Option<&serde_json::Value>,
@@ -37,7 +37,7 @@ impl ZcodeClaimImpl {
             .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;
         let mid = device_mid_for(jwt);
         let rid = uuid::Uuid::new_v4().to_string();
-        let url = self.url(path);
+        let url = Self::url_for(base, path);
         let mut req = client.request(method, &url);
         for (k, v) in billing_request_headers(jwt, &mid, &rid) {
             req = req.header(k, v.as_str());
@@ -80,7 +80,7 @@ pub(crate) fn zcode_activation_event(element: &str, user_id: &str, mid: &str) ->
 
 #[async_trait::async_trait]
 impl aikun_admin::admin_providers::ZcodeClaimPort for ZcodeClaimImpl {
-    async fn report_activation(&self, jwt: &str) -> Result<(), String> {
+    async fn report_activation(&self, base: &str, jwt: &str) -> Result<(), String> {
         use aikun_channels::adapters::zcode::{EVENT_REPORT_PATH, device_mid_for, jwt_sub};
         // JWT 无 sub 时上游无法归因,Zcode2Api 直接跳过事件——同口径,
         // 不算问题(领取本体不受影响)。
@@ -91,7 +91,13 @@ impl aikun_admin::admin_providers::ZcodeClaimPort for ZcodeClaimImpl {
         for element in ["app_launch", "app_daily_active"] {
             let body = zcode_activation_event(element, &user_id, &mid);
             let (status, resp) = self
-                .request_json(reqwest::Method::POST, EVENT_REPORT_PATH, jwt, Some(&body))
+                .request_json(
+                    reqwest::Method::POST,
+                    base,
+                    EVENT_REPORT_PATH,
+                    jwt,
+                    Some(&body),
+                )
                 .await?;
             if status >= 400 {
                 return Err(format!("event {element} 上游返回 {status}"));
@@ -109,6 +115,7 @@ impl aikun_admin::admin_providers::ZcodeClaimPort for ZcodeClaimImpl {
 
     async fn offered_plans(
         &self,
+        base: &str,
         jwt: &str,
     ) -> Result<Vec<aikun_admin::admin_providers::ZcodeOfferedPlan>, String> {
         use aikun_admin::admin_providers::ZcodeOfferedPlan;
@@ -119,7 +126,7 @@ impl aikun_admin::admin_providers::ZcodeClaimPort for ZcodeClaimImpl {
 
         // billing/preview:plans 按 priority 降序(稳定),高优先级先领。
         match self
-            .request_json(reqwest::Method::GET, PREVIEW_PATH, jwt, None)
+            .request_json(reqwest::Method::GET, base, PREVIEW_PATH, jwt, None)
             .await
         {
             Ok((200, body)) if body["code"].as_i64() == Some(0) => {
@@ -162,6 +169,7 @@ impl aikun_admin::admin_providers::ZcodeClaimPort for ZcodeClaimImpl {
         match self
             .request_json(
                 reqwest::Method::GET,
+                base,
                 &format!("{TOUCH_PATH}?seq=0"),
                 jwt,
                 None,
@@ -216,11 +224,11 @@ impl aikun_admin::admin_providers::ZcodeClaimPort for ZcodeClaimImpl {
         Ok(offers)
     }
 
-    async fn owned_plans(&self, jwt: &str) -> Result<Vec<String>, String> {
+    async fn owned_plans(&self, base: &str, jwt: &str) -> Result<Vec<String>, String> {
         use aikun_channels::adapters::zcode::{BALANCE_PATH, BILLING_CLIENT_VERSION};
         let path = format!("{BALANCE_PATH}?app_version={BILLING_CLIENT_VERSION}");
         let (status, body) = self
-            .request_json(reqwest::Method::GET, &path, jwt, None)
+            .request_json(reqwest::Method::GET, base, &path, jwt, None)
             .await?;
         if status != 200 {
             return Err(format!("balance HTTP {status}"));
@@ -244,11 +252,11 @@ impl aikun_admin::admin_providers::ZcodeClaimPort for ZcodeClaimImpl {
             .unwrap_or_default())
     }
 
-    async fn claim_plan(&self, jwt: &str, plan_id: &str) -> Result<bool, String> {
+    async fn claim_plan(&self, base: &str, jwt: &str, plan_id: &str) -> Result<bool, String> {
         use aikun_channels::adapters::zcode::CLAIM_PATH;
         let body = serde_json::json!({"plan_id": plan_id});
         let (status, resp) = self
-            .request_json(reqwest::Method::POST, CLAIM_PATH, jwt, Some(&body))
+            .request_json(reqwest::Method::POST, base, CLAIM_PATH, jwt, Some(&body))
             .await?;
         // 401/403 带错误体 code(与 Zcode2Api 同口径);其余非 200 直接报。
         if status != 200 && status != 401 && status != 403 {
@@ -266,11 +274,22 @@ impl aikun_admin::admin_providers::ZcodeClaimPort for ZcodeClaimImpl {
         }
     }
 
-    async fn confirm_campaign(&self, jwt: &str, campaign_id: &str) -> Result<(), String> {
+    async fn confirm_campaign(
+        &self,
+        base: &str,
+        jwt: &str,
+        campaign_id: &str,
+    ) -> Result<(), String> {
         use aikun_channels::adapters::zcode::TOUCH_ACTION_PATH;
         let body = serde_json::json!({"campaign_id": campaign_id, "action_type": "confirm"});
         let (status, resp) = self
-            .request_json(reqwest::Method::POST, TOUCH_ACTION_PATH, jwt, Some(&body))
+            .request_json(
+                reqwest::Method::POST,
+                base,
+                TOUCH_ACTION_PATH,
+                jwt,
+                Some(&body),
+            )
             .await?;
         if status != 200 {
             return Err(format!("touch confirm HTTP {status}"));

@@ -81,6 +81,18 @@
   `/data/aikun.surreal`);迁移工具默认目标同步。
 
 ## [Unreleased]
+### 变更(反代应用中心:两行区域分组 + 领取端点跟渠道走)
+
+- **应用 Tab 两行分组**(用户裁决):第一行国际(ZCode / Z.AI Chat /
+  WorkBuddy / Qoder),第二行国内(ZCode / 智谱清言)。ZCode 拆成
+  国际/国内两个独立应用页:列表按渠道 base 分域(JWT 形态两区域共用
+  kind=zcode,base 含 bigmodel 即国内;zai-plan/bigmodel-plan 自带),
+  批量添加预设各自只显示对应环境的两种。
+- **领取(签到)端点改跟渠道自身 base**:国内渠道签到打
+  zcode.bigmodel.cn 而非全局配置的国际端点(此前国内 JWT 签到必然
+  401);`ZcodeClaimPort` 各方法增加 base 参数。
+
+## [Unreleased]
 ### 新增(反代应用中心 + ZCode 国内外双环境)
 
 - **反代页重构为应用中心**(`/proxies/:app`):每应用独立子页

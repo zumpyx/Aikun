@@ -198,9 +198,7 @@ async fn async_main() {
             Arc::new(ZcodeOAuthImpl {
                 base: config.zcode_oauth_base.clone(),
             }),
-            Arc::new(ZcodeClaimImpl {
-                base: config.zcode_oauth_base.clone(),
-            }),
+            Arc::new(ZcodeClaimImpl),
         ),
         users: aikun_admin::admin_users::AdminUsersService::new(Arc::new(SurrealAdminUsersStore {
             store: store.clone(),

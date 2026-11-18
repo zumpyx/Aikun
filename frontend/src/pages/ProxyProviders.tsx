@@ -18,29 +18,62 @@ import type { ProviderDetail } from './Providers'
 
 const PAGE_SIZE = 200
 
-/** 应用注册表:kinds = 该应用归组的 channel_kind 集(查询 kind 过滤)。 */
+/**
+ * 应用注册表(两行按区域分组,每应用一个页):
+ * kinds = 归组的 channel_kind 集(查询 kind 过滤);regionFilter 只对
+ * zcode 生效——JWT 形态两个区域共用 kind=zcode,按渠道 base 含
+ * bigmodel 与否在前端分域(zai-plan / bigmodel-plan 自带区域属性)。
+ */
 const APPS = {
   zcode: {
+    region: 'intl',
     label: 'ZCode',
-    kinds: 'zcode,zai-plan,bigmodel-plan',
-    desc: 'GLM Coding Plan:国际 z.ai / 国内 BigModel 双环境,订阅 JWT 与 API Key 两种凭证;支持免费额度签到',
+    kinds: 'zcode,zai-plan',
+    regionFilter: 'intl' as const,
+    desc: 'GLM Coding Plan·国际(z.ai):订阅 JWT(zcode.z.ai)与 API Key(api.z.ai);支持免费额度签到',
   },
   zaichat: {
+    region: 'intl',
     label: 'Z.AI Chat',
     kinds: '',
     desc: 'chat.z.ai 网页会话上游(协议调研中,暂未接入)',
   },
   workbuddy: {
+    region: 'intl',
     label: 'WorkBuddy',
     kinds: 'workbuddy',
     desc: 'WorkBuddy 订阅上游(协议尚未接入,按 OpenAI 兼容转发)',
   },
   qoder: {
+    region: 'intl',
     label: 'Qoder',
     kinds: 'qoder',
     desc: 'Qoder 订阅上游(协议尚未接入,按 OpenAI 兼容转发)',
   },
+  'zcode-cn': {
+    region: 'cn',
+    label: 'ZCode',
+    kinds: 'zcode,bigmodel-plan',
+    regionFilter: 'cn' as const,
+    desc: 'GLM Coding Plan·国内(智谱 BigModel):订阅 JWT(zcode.bigmodel.cn)与 API Key(open.bigmodel.cn);凭证与国际 z.ai 互不通用',
+  },
+  chatglm: {
+    region: 'cn',
+    label: '智谱清言',
+    kinds: '',
+    desc: 'chatglm.cn 网页会话上游(协议调研中,暂未接入)',
+  },
 } as const
+
+/** 两行区域分组(第一行国际,第二行国内)。 */
+const REGION_ROWS: { label: string; apps: AppId[] }[] = [
+  { label: '国际', apps: ['zcode', 'zaichat', 'workbuddy', 'qoder'] },
+  { label: '国内', apps: ['zcode-cn', 'chatglm'] },
+]
+
+/** 渠道是否国内域(base 含 bigmodel)。 */
+const isDomestic = (p: ProviderDetail) =>
+  `${p.anthropic_base_url ?? ''}${p.openai_base_url ?? ''}`.includes('bigmodel')
 
 type AppId = keyof typeof APPS
 
@@ -182,7 +215,11 @@ function AppPage({ appId }: { appId: AppId }) {
     for (const p of targets) await doClaim(p.id, p.name)
   }
 
-  const data = list.data?.items ?? []
+  // zcode 双页分域:JWT 形态按 base;kind 自带区域的(plan 两种)顺带兜底
+  const rf = 'regionFilter' in conf ? conf.regionFilter : undefined
+  const data = (list.data?.items ?? []).filter((p) =>
+    rf === 'intl' ? !isDomestic(p) : rf === 'cn' ? isDomestic(p) : true,
+  )
   const allChecked = data.length > 0 && data.every((p) => selected.has(p.id))
   const toggleAll = () => setSelected(allChecked ? new Set() : new Set(data.map((p) => p.id)))
   const toggleOne = (id: string) => setSelected((prev) => {
@@ -209,12 +246,17 @@ function AppPage({ appId }: { appId: AppId }) {
           <p className="text-sm text-muted-foreground">{conf.desc}</p>
         </div>
       </div>
-      <div className="flex flex-wrap gap-1.5">
-        {(Object.keys(APPS) as AppId[]).map((k) => (
-          <Link key={k} to={`/proxies/${k}`}
-            className={`rounded-full border px-4 py-1.5 text-sm font-medium transition-colors ${k === appId ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:bg-muted'}`}>
-            {APPS[k].label}
-          </Link>
+      <div className="space-y-1.5">
+        {REGION_ROWS.map((row) => (
+          <div key={row.label} className="flex flex-wrap items-center gap-1.5">
+            <span className="w-9 text-xs font-medium text-muted-foreground">{row.label}</span>
+            {row.apps.map((k) => (
+              <Link key={`${row.label}-${k}`} to={`/proxies/${k}`}
+                className={`rounded-full border px-4 py-1.5 text-sm font-medium transition-colors ${k === appId ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:bg-muted'}`}>
+                {APPS[k].label}
+              </Link>
+            ))}
+          </div>
         ))}
       </div>
 
@@ -359,7 +401,7 @@ const PROXY_PRESETS: { id: string; kind: string; name: string; website_url: stri
     openai_base_url: 'https://zcode.bigmodel.cn', anthropic_base_url: 'https://zcode.bigmodel.cn',
     key_placeholder: 'ZCode 客户端 JWT(智谱 BigModel 国内账号),每行一个',
     hint: '国内版客户端(「连接 BigModel」登录)复制 JWT;凭证与国际 z.ai 互不通用。',
-    apps: ['zcode'],
+    apps: ['zcode-cn'],
   },
   {
     id: 'zai-plan', kind: 'zai-plan', name: 'Coding Plan·国际 API Key', website_url: 'https://z.ai',
@@ -375,7 +417,7 @@ const PROXY_PRESETS: { id: string; kind: string; name: string; website_url: stri
     openai_base_url: 'https://open.bigmodel.cn/api/anthropic', anthropic_base_url: 'https://open.bigmodel.cn/api/anthropic',
     key_placeholder: '智谱开放平台签发的 Coding Plan API Key,每行一个',
     hint: '国内官方 Anthropic 兼容端点(open.bigmodel.cn/api/anthropic);Coding 端点与通用端点额度不互通。',
-    apps: ['zcode'],
+    apps: ['zcode-cn'],
   },
   {
     id: 'workbuddy', kind: 'workbuddy', name: 'WorkBuddy', website_url: '', docs_url: '',

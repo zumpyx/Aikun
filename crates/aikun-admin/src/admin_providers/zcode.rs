@@ -64,17 +64,22 @@ pub struct ZcodeOfferedPlan {
 pub trait ZcodeClaimPort: Send + Sync + 'static {
     /// 激活事件(app_launch / app_daily_active 各一条;上游按
     /// device_mid+日期去重)。领取前置,失败不阻断(记 problem 继续)。
-    async fn report_activation(&self, jwt: &str) -> Result<(), String>;
+    async fn report_activation(&self, base: &str, jwt: &str) -> Result<(), String>;
     /// 待领清单:billing/preview(priority 降序)+ marketing/touch 横幅
     /// 按钮(plan_id + campaign_id),已按领取优先级排好。
-    async fn offered_plans(&self, jwt: &str) -> Result<Vec<ZcodeOfferedPlan>, String>;
+    async fn offered_plans(&self, base: &str, jwt: &str) -> Result<Vec<ZcodeOfferedPlan>, String>;
     /// billing/balance 已持有的 plan_id(小写;claim 前查重跳过)。
-    async fn owned_plans(&self, jwt: &str) -> Result<Vec<String>, String>;
+    async fn owned_plans(&self, base: &str, jwt: &str) -> Result<Vec<String>, String>;
     /// POST billing/claim:Ok(true)=领取成功;Ok(false)=已领取
     /// (上游 code 1003,视为成功);Err=问题(含 3007 风控)。
-    async fn claim_plan(&self, jwt: &str, plan_id: &str) -> Result<bool, String>;
+    async fn claim_plan(&self, base: &str, jwt: &str, plan_id: &str) -> Result<bool, String>;
     /// POST marketing/touch/action(confirm;campaigned plan 领取后补)。
-    async fn confirm_campaign(&self, jwt: &str, campaign_id: &str) -> Result<(), String>;
+    async fn confirm_campaign(
+        &self,
+        base: &str,
+        jwt: &str,
+        campaign_id: &str,
+    ) -> Result<(), String>;
 }
 
 // ---- 服务方法(挂在主模块的服务上;子模块可访问其私有字段) ----
@@ -246,6 +251,12 @@ impl AdminProvidersService {
                 "仅 zcode 渠道支持领取额度",
             ));
         }
+        // 领取端点跟渠道自身的 base 走(国内渠道打国内域,与凭证环境一致)
+        let base = if row.anthropic_base_url.trim().is_empty() {
+            row.openai_base_url.trim().to_string()
+        } else {
+            row.anthropic_base_url.trim().to_string()
+        };
         let (jwt, _) = match self.store.find_provider_credentials(&id).await {
             Ok(Some(c)) => c,
             Ok(None) => {
@@ -263,7 +274,7 @@ impl AdminProvidersService {
                 ));
             }
         };
-        let result = self.claim_quota_sequence(&jwt).await;
+        let result = self.claim_quota_sequence(&base, &jwt).await;
         let ok = result.problems.is_empty();
         if let Err(()) = self
             .store
@@ -321,20 +332,24 @@ impl AdminProvidersService {
     /// 已持有清单 → 待领清单 → 逐项 claim → campaign confirm。
     /// 事件/余额失败不阻断(记 problem 继续)——领取本体才是目的;
     /// preview 拉不到则无事可做,直接带问题返回。
-    async fn claim_quota_sequence(&self, jwt: &str) -> AdminZcodeClaimResult {
+    async fn claim_quota_sequence(&self, base: &str, jwt: &str) -> AdminZcodeClaimResult {
         let mut claimed: Vec<String> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
         let mut problems: Vec<String> = Vec::new();
 
-        if let Err(p) = self.zcode_claim.report_activation(jwt).await {
+        if let Err(p) = self.zcode_claim.report_activation(base, jwt).await {
             problems.push(format!("activation: {p}"));
         }
         // 已持有清单拉不到按空集处理:claim 回 1003(已领取)同样视为成功。
-        let owned = self.zcode_claim.owned_plans(jwt).await.unwrap_or_else(|p| {
-            problems.push(format!("balance: {p}"));
-            Vec::new()
-        });
-        let offers = match self.zcode_claim.offered_plans(jwt).await {
+        let owned = self
+            .zcode_claim
+            .owned_plans(base, jwt)
+            .await
+            .unwrap_or_else(|p| {
+                problems.push(format!("balance: {p}"));
+                Vec::new()
+            });
+        let offers = match self.zcode_claim.offered_plans(base, jwt).await {
             Ok(o) => o,
             Err(p) => {
                 problems.push(format!("preview: {p}"));
@@ -355,13 +370,13 @@ impl AdminProvidersService {
                 skipped.push(display);
                 continue;
             }
-            match self.zcode_claim.claim_plan(jwt, &plan.plan_id).await {
+            match self.zcode_claim.claim_plan(base, jwt, &plan.plan_id).await {
                 Ok(true) => {
                     claimed.push(display);
                     if !plan.campaign_id.is_empty()
                         && let Err(p) = self
                             .zcode_claim
-                            .confirm_campaign(jwt, &plan.campaign_id)
+                            .confirm_campaign(base, jwt, &plan.campaign_id)
                             .await
                     {
                         problems.push(format!("confirm {}: {p}", plan.campaign_id));
