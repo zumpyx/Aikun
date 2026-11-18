@@ -35,79 +35,22 @@ use aikun_openapi::openapi::types::{LoginRequest, LoginResponse, User, UserRole}
 
 use crate::problem;
 
-// ---------- 内嵌前端(自 main.rs 迁入,资产清单与行为不变) ----------
+// ---------- 内嵌前端 ----------
 
-/// Frontend assets, embedded into the binary at compile time — the
-/// executable is fully self-contained and reads no static files at runtime.
-/// The HTML shell references these under /static/*.
-const INDEX_HTML: &str = include_str!("../../../aikun/src/frontend/index.html");
+// Frontend assets, embedded into the binary at compile time — the
+// executable is fully self-contained and reads no static files at runtime.
+// The HTML shell references these under /static/*.
+// React 前端(frontend/ 目录)的 Vite 构建产物,由 build.rs 扫描
+// frontend/dist 生成(dist 提交进仓库,构建零外部工具)。
+include!(concat!(env!("OUT_DIR"), "/frontend_assets.rs"));
 
-/// 前端全自托管、无外链脚本,CSP 收敛为仅允许自身来源。
+/// 前端全自托管、无外链脚本,CSP 收敛为仅允许自身来源(React 打包产物
+/// 为外链 module 脚本 + 外链 CSS,均同源;style 的 'unsafe-inline' 保留
+/// 给运行时内联样式)。
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'";
 
 /// 旧路径写死的 no-cache 头(迁移期逐字保留,含 pragma)。
 const NO_CACHE: &str = "no-cache, no-store, must-revalidate";
-
-/// (path, content) for every embedded frontend asset.
-const STATIC_ASSETS: &[(&str, &str)] = &[
-    (
-        "style.css",
-        include_str!("../../../aikun/src/frontend/style.css"),
-    ),
-    (
-        "js/core.js",
-        include_str!("../../../aikun/src/frontend/js/core.js"),
-    ),
-    (
-        "js/dashboard.js",
-        include_str!("../../../aikun/src/frontend/js/dashboard.js"),
-    ),
-    (
-        "js/wallet.js",
-        include_str!("../../../aikun/src/frontend/js/wallet.js"),
-    ),
-    (
-        "js/providers.js",
-        include_str!("../../../aikun/src/frontend/js/providers.js"),
-    ),
-    (
-        "js/users.js",
-        include_str!("../../../aikun/src/frontend/js/users.js"),
-    ),
-    (
-        "js/billing.js",
-        include_str!("../../../aikun/src/frontend/js/billing.js"),
-    ),
-    (
-        "js/redemption.js",
-        include_str!("../../../aikun/src/frontend/js/redemption.js"),
-    ),
-    (
-        "js/keys.js",
-        include_str!("../../../aikun/src/frontend/js/keys.js"),
-    ),
-    (
-        "js/models.js",
-        include_str!("../../../aikun/src/frontend/js/models.js"),
-    ),
-    (
-        "js/test.js",
-        include_str!("../../../aikun/src/frontend/js/test.js"),
-    ),
-    (
-        "js/logs.js",
-        include_str!("../../../aikun/src/frontend/js/logs.js"),
-    ),
-    (
-        "js/docs.js",
-        include_str!("../../../aikun/src/frontend/js/docs.js"),
-    ),
-    (
-        "js/init.js",
-        include_str!("../../../aikun/src/frontend/js/init.js"),
-    ),
-];
-
 /// 按资产路径扩展名给 mime(表内只有 css/js 两类,保持旧实现口径)。
 fn asset_mime(path: &str) -> &'static str {
     if path.ends_with(".css") {

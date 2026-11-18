@@ -256,8 +256,8 @@ async fn login_rejects_body_missing_fields() {
 }
 
 /// 前端壳与内嵌静态资产(Auth tag 的 serveFrontend/serveStaticAsset):
-/// CSP / no-cache 头保持;嵌套路径 `/static/js/*.js` 走装配 fallback;
-/// 白名单外一律 404 纯文本 'not found'(非 JSON)。
+/// CSP / no-cache 头保持;React 产物(`/static/assets/*` 嵌套路径)走装配
+/// fallback;白名单外一律 404 纯文本 'not found'(非 JSON)。
 #[tokio::test]
 async fn frontend_and_static_assets() {
     let app = TestApp::spawn().await;
@@ -283,9 +283,20 @@ async fn frontend_and_static_assets() {
     assert_eq!(r.headers().get("pragma").unwrap(), "no-cache");
     assert!(r.text().await.unwrap().contains("<!DOCTYPE html>"));
 
-    // 单段资产(生成路由 /static/{path})
+    // 单段资产路由:React 产物全部在 assets/ 嵌套路径下,单段一律 404
+    // 纯文本(生成路由 NotFound 变体语义保持)
     let r = client
         .get(format!("{}/static/style.css", app.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(r.text().await.unwrap(), "not found");
+
+    // 嵌套资产(生成路由匹配不到,装配 fallback 兜底)——React 产物全部
+    // 在此:vite base=/static/,构建产物提交仓库,build.rs 扫 dist 嵌入
+    let r = client
+        .get(format!("{}/static/assets/index.css", app.base))
         .send()
         .await
         .unwrap();
@@ -299,11 +310,8 @@ async fn frontend_and_static_assets() {
             .starts_with("text/css")
     );
     assert!(r.headers().get("content-security-policy").is_some());
-    assert!(r.headers().get("cache-control").is_some());
-
-    // 嵌套资产(生成路由匹配不到,装配 fallback 兜底)——前端全部 JS 在此
     let r = client
-        .get(format!("{}/static/js/core.js", app.base))
+        .get(format!("{}/static/assets/app.js", app.base))
         .send()
         .await
         .unwrap();
@@ -319,7 +327,11 @@ async fn frontend_and_static_assets() {
     );
     assert!(r.headers().get("content-security-policy").is_some());
     let body = r.text().await.unwrap();
-    assert!(body.contains("fetch("), "core.js 内容应完整内嵌");
+    assert!(
+        body.len() > 100_000,
+        "app bundle 应完整内嵌(实际 {} 字节)",
+        body.len()
+    );
 
     // 白名单外:单段与嵌套都是 404 纯文本 'not found'
     let r = client
