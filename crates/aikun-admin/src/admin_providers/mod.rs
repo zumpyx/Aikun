@@ -272,6 +272,13 @@ pub trait ProviderStore: Send + Sync + 'static {
     ) -> Result<(Vec<ModelHealthRow>, i64), ()>;
     /// 编辑态回退用:库存 (api_key 原文, proxy_url)。
     async fn find_provider_credentials(&self, id: &str) -> Result<Option<(String, String)>, ()>;
+    /// zcode OAuth 业务 token 落库(密文;monitor 域订阅/5h·周额度凭证)。
+    async fn upsert_zcode_oauth(&self, provider_id: &str, token_enc: &str) -> Result<(), ()>;
+    /// zcode OAuth 业务 token 读取(密文原样;无则 None,解密在调用方)。
+    async fn find_zcode_oauth(&self, provider_id: &str) -> Result<Option<String>, ()>;
+    /// key_hash → 渠道 id(在线登录遇到重复 JWT 时,定位既有渠道回填
+    /// 业务 token 而不是报 409)。
+    async fn find_provider_id_by_key_hash(&self, key_hash: &str) -> Result<Option<String>, ()>;
 }
 
 /// 一次连通性探测的输入(base_url 已按协议选定;api_key 为明文)。

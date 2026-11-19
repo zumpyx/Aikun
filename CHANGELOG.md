@@ -6,6 +6,28 @@
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
 ## [Unreleased]
+### 新增(ZCode 订阅/额度/重置)
+
+- **账号信息弹窗(订阅 + 5h/周额度 + 重置次数)**:反代页「账号信息」
+  从 toast 升级为弹窗,聚合四路零消耗查询——billing/balance(免费
+  额度桶,进度条)、coding-plan/reset/status(可用 5 小时/每周重置
+  次数 + 最近使用,端点炼化自 ZCode 桌面客户端 3.18.2,要求双头认证
+  `X-Bigmodel-Authorization` + `Bigmodel-Target-Type: PERSONAL`,缺任一
+  上游 3001)、monitor 域订阅清单与用量额度(国内 bigmodel.cn / 国际
+  api.z.ai 的 `/api/biz/subscription/list` 与
+  `/api/monitor/usage/quota/limit`)。子查询失败降级 null + 说明,
+  不阻断主响应。
+- **「使用重置」按钮(消耗性)**:`POST /api/providers/{id}/zcode/
+  reset-quota`(reset_type = FIVE_HOUR | WEEK)→ 上游 coding-plan/
+  reset/use,服务端每次生成新幂等键防重放;成功后回读最新重置次数。
+  仅由弹窗按钮 + confirm 触发,不自动化。
+- **OAuth 业务 token 落库**:在线登录的 poll ready 响应携带家族
+  业务 token(`data.bigmodel.access_token` / `data.zai.access_token`,
+  官方客户端无此字段即判响应无效),加密存入新 `zcode_oauth` 侧表
+  (每渠道一行;monitor 域订阅/5h·周额度查询凭证)。同一账号重复
+  在线登录不再 409,而是定位既有渠道回填业务 token——旧渠道重新
+  登录一次即可看到 Lite 订阅与 5h/周额度(批量粘贴 JWT 的渠道没有
+  此凭证,弹窗中明确提示)。
 ### 修复
 
 - **管理端白屏**:React 入口忘记包裹 `<AuthProvider>`——首屏

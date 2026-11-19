@@ -6,7 +6,7 @@
 
 use aikun_openapi::openapi::server::errors::{
     AdminListZcodeTasksResponse, AdminZcodeAccountInfoResponse, AdminZcodeClaimQuotaResponse,
-    AdminZcodeLoginInitResponse, AdminZcodeLoginPollResponse,
+    AdminZcodeLoginInitResponse, AdminZcodeLoginPollResponse, AdminZcodeResetQuotaResponse,
 };
 use aikun_openapi::openapi::types::{
     AdminZcodeClaimResult, ProxyTaskList, ProxyTaskRecord, ProxyTaskRecordSource, ZcodeAccountInfo,
@@ -32,7 +32,14 @@ pub struct ZcodeOAuthInit {
 
 pub enum ZcodePollStatus {
     Pending,
-    Ready { token: String, email: String },
+    /// token = zcode JWT(data.token);business_token = 家族业务 token
+    /// (`data.bigmodel.access_token` / `data.zai.access_token`,monitor 域
+    /// 的订阅与 5h/周额度查询要用;官方客户端无此字段即判响应无效)。
+    Ready {
+        token: String,
+        email: String,
+        business_token: Option<String>,
+    },
     Expired,
     Failed(String),
 }
@@ -88,10 +95,58 @@ pub trait ZcodeClaimPort: Send + Sync + 'static {
     /// GET billing/balance 返回 data 原始对象(零消耗;一键获取账号信息
     /// 的数据源——套餐/额度/账号字段都在里面)。
     async fn fetch_balance(&self, base: &str, jwt: &str) -> Result<serde_json::Value, String>;
+
+    /// GET coding-plan/reset/status 的 data(零消耗):可用 5h/周重置次数
+    /// (含过期时间)与最近使用记录。双头认证(X-Bigmodel-Authorization +
+    /// Bigmodel-Target-Type: PERSONAL)由实现侧负责。
+    async fn reset_status(&self, base: &str, jwt: &str) -> Result<serde_json::Value, String>;
+
+    /// POST coding-plan/reset/use(**消耗性**:扣一次重置机会,把 5h/周
+    /// 额度窗清零重来)。reset_type = "FIVE_HOUR" | "WEEK";实现侧自生成
+    /// idempotency_key。返回 data(used 布尔在里面)。
+    async fn reset_use(
+        &self,
+        base: &str,
+        jwt: &str,
+        reset_type: &str,
+    ) -> Result<serde_json::Value, String>;
+
+    /// GET {monitor 域}/api/biz/subscription/list 的 data(订阅信息:
+    /// productId / productName / billingCycle / expireTime)。鉴权用
+    /// OAuth 业务 token;monitor 域按国内/国际家族选择(实现侧解析,
+    /// env `AIKUN_ZCODE_BIGMODEL_HOST` / `AIKUN_ZCODE_ZAI_HOST` 可覆盖)。
+    async fn fetch_subscription(
+        &self,
+        domestic: bool,
+        token: &str,
+    ) -> Result<serde_json::Value, String>;
+
+    /// GET {monitor 域}/api/monitor/usage/quota/limit 的 data(5 小时窗
+    /// 与每周窗的用量额度:`{level, limits:[...]}`)。
+    async fn fetch_quota(&self, domestic: bool, token: &str) -> Result<serde_json::Value, String>;
 }
 
 // ---- 服务方法(挂在主模块的服务上;子模块可访问其私有字段) ----
 impl AdminProvidersService {
+    /// OAuth 业务 token 加密落库(monitor 域订阅/5h·周额度凭证)。
+    /// 空值跳过;失败只留痕——订阅信息是增强能力,不该阻断建渠道。
+    async fn persist_business_token(&self, provider_id: &str, token: Option<&str>) {
+        let Some(token) = token.filter(|t| !t.trim().is_empty()) else {
+            return;
+        };
+        let enc = self.store.encrypt_key(token);
+        if let Err(()) = self.store.upsert_zcode_oauth(provider_id, &enc).await {
+            tracing::warn!("zcode 业务 token 落库失败({provider_id}),订阅/额度查询将不可用");
+        }
+    }
+
+    /// 读回业务 token 明文(zcode_oauth 行解密;无则 None)。
+    async fn business_token_of(&self, provider_id: &str) -> Option<String> {
+        let enc = self.store.find_zcode_oauth(provider_id).await.ok()??;
+        let plain = self.store.decrypt_key(&enc);
+        (!plain.trim().is_empty()).then_some(plain)
+    }
+
     pub async fn admin_zcode_login_init(
         &self,
         env: Option<ZcodeLoginInitRequestEnv>,
@@ -157,7 +212,11 @@ impl AdminProvidersService {
                     provider: None,
                 })
             }
-            ZcodePollStatus::Ready { token, email } => {
+            ZcodePollStatus::Ready {
+                token,
+                email,
+                business_token,
+            } => {
                 // name 不依赖授权响应里的 email/phone(国内手机号账号常为
                 // 空串,踩过 400 坑;用户裁决 2026-11-19):显式 name →
                 // 自动生成 zcode-{6 hex},后续管理员自行改名标记;账号
@@ -182,7 +241,7 @@ impl AdminProvidersService {
                     provider_type: Some("anthropic".into()),
                     openai_base_url: Some(base.into()),
                     anthropic_base_url: Some(base.into()),
-                    api_key: token,
+                    api_key: token.clone(),
                     models: vec!["GLM-5.3".into(), "GLM-5.3-Flash".into()],
                     priority: body.priority,
                     weight: body.weight,
@@ -206,6 +265,9 @@ impl AdminProvidersService {
                 match validate_candidate(&cand) {
                     Ok(config) => match insert_checked(self.store.as_ref(), &cand, config).await {
                         Ok(row) => {
+                            // 业务 token(monitor 域订阅/5h·周额度凭证)加密落库
+                            self.persist_business_token(&row.id, business_token.as_deref())
+                                .await;
                             // 免费额度不会自动到账:建好渠道后台自动领取一遍
                             // (fire-and-forget,结果入 proxy_task 快照;失败可随时手动再领)。
                             let svc = self.clone();
@@ -239,6 +301,35 @@ impl AdminProvidersService {
                                 provider: Some(to_api_provider(&row)),
                             })
                         }
+                        // 同一账号重复在线登录:定位既有渠道回填业务 token
+                        //(订阅/额度信息凭证),不报 409——重复登录是用户
+                        // 补全凭证的正常路径(2026-11-20)。
+                        Err(p) if p.code == "duplicate_key" => {
+                            let hash = self.store.hash_key(&token);
+                            let existing = self
+                                .store
+                                .find_provider_id_by_key_hash(&hash)
+                                .await
+                                .ok()
+                                .flatten();
+                            match existing {
+                                Some(pid) => {
+                                    self.persist_business_token(&pid, business_token.as_deref())
+                                        .await;
+                                    let row = self.store.find_provider(&pid).await.ok().flatten();
+                                    AdminZcodeLoginPollResponse::Ok(ZcodeLoginPollResult {
+                                        status: ZcodeLoginPollResultStatus::Ready,
+                                        email: Some(email),
+                                        provider: row.as_ref().map(to_api_provider),
+                                    })
+                                }
+                                None => AdminZcodeLoginPollResponse::BadRequest(problem(
+                                    p.status as u16,
+                                    &p.code,
+                                    &p.detail.unwrap_or_default(),
+                                )),
+                            }
+                        }
                         Err(p) => AdminZcodeLoginPollResponse::BadRequest(problem(
                             p.status as u16,
                             &p.code,
@@ -263,7 +354,9 @@ impl AdminProvidersService {
     }
 
     /// `POST /api/providers/{id}/zcode/account-info`——token 查上游
-    /// billing/balance(零消耗),回填名称(仅自动生成名)与 note 摘要。
+    /// (全部零消耗)聚合:balance(主数据源,失败即整体 502)+ 重置
+    /// 次数 + 订阅/5h·周额度(需业务 token;子项失败降级 null,不阻断)。
+    /// 回填名称(仅自动生成名)与 note 摘要。
     pub async fn admin_zcode_account_info(&self, id: String) -> AdminZcodeAccountInfoResponse {
         let row = match self.store.find_provider(&id).await {
             Ok(Some(r)) => r,
@@ -311,6 +404,7 @@ impl AdminProvidersService {
                 ));
             }
         };
+
         let balance = match self.zcode_claim.fetch_balance(&base, &jwt).await {
             Ok(v) => v,
             Err(e) => {
@@ -321,6 +415,49 @@ impl AdminProvidersService {
                 ));
             }
         };
+
+        // 子查询:重置次数(JWT 双头即可)+ 订阅/额度(需业务 token,
+        // monitor 域按渠道归组选家族:[国内] → bigmodel,否则 zai)。
+        // 失败降级 null + warnings 说明,不阻断主响应。
+        let mut warnings: Vec<String> = Vec::new();
+        let domestic = row.note.trim().starts_with("[国内]");
+        let token = self.business_token_of(&id).await;
+        let reset_res = self.zcode_claim.reset_status(&base, &jwt).await;
+        // 无业务 token:订阅/额度一并跳过,单条说明(不报两条空错误)。
+        let (sub_res, quota_res) = match &token {
+            Some(t) => (
+                self.zcode_claim.fetch_subscription(domestic, t).await,
+                self.zcode_claim.fetch_quota(domestic, t).await,
+            ),
+            None => {
+                warnings.push("订阅与 5h/周额度未查询:该渠道无 monitor 业务 token(重新在线登录即可补全)".to_string());
+                (Ok(serde_json::Value::Null), Ok(serde_json::Value::Null))
+            }
+        };
+        let reset_status = match reset_res {
+            Ok(v) => Some(Some(v)),
+            Err(e) => {
+                warnings.push(format!("重置次数查询失败: {e}"));
+                Some(None)
+            }
+        };
+        let subscription = match sub_res {
+            Ok(v) if v.is_null() => None,
+            Ok(v) => Some(Some(v)),
+            Err(e) => {
+                warnings.push(format!("订阅信息查询失败: {e}"));
+                Some(None)
+            }
+        };
+        let quota = match quota_res {
+            Ok(v) if v.is_null() => None,
+            Ok(v) => Some(Some(v)),
+            Err(e) => {
+                warnings.push(format!("额度查询失败: {e}"));
+                Some(None)
+            }
+        };
+
         // 账号标识:常见字段里取第一个非空字符串
         let pick = |keys: &[&str]| -> Option<String> {
             keys.iter().find_map(|k| {
@@ -376,7 +513,88 @@ impl AdminProvidersService {
             plan_name,
             balance,
             name_updated,
+            reset_status,
+            subscription,
+            quota,
+            plan_credentials: token.is_some(),
+            warnings,
         })
+    }
+
+    /// `POST /api/providers/{id}/zcode/reset-quota`——使用一次额度重置
+    /// (**消耗性**;上游 coding-plan/reset/use,reset_type FIVE_HOUR|WEEK)。
+    /// 成功后回读最新重置状态一并返回(前端直接刷新显示)。
+    pub async fn admin_zcode_reset_quota(
+        &self,
+        id: String,
+        body: aikun_openapi::openapi::types::ZcodeResetRequest,
+    ) -> AdminZcodeResetQuotaResponse {
+        use aikun_openapi::openapi::types::ZcodeResetResult;
+        let row = match self.store.find_provider(&id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                return AdminZcodeResetQuotaResponse::NotFound(problem(
+                    404,
+                    "not_found",
+                    "渠道不存在",
+                ));
+            }
+            Err(()) => {
+                return AdminZcodeResetQuotaResponse::NotFound(problem(
+                    502,
+                    "store_error",
+                    "渠道读取失败",
+                ));
+            }
+        };
+        if row.channel_kind.trim() != aikun_channels::adapters::zcode::KIND {
+            return AdminZcodeResetQuotaResponse::BadRequest(problem(
+                400,
+                "invalid_channel_kind",
+                "仅 zcode 渠道支持额度重置",
+            ));
+        }
+        let reset_type = body.reset_type.as_str();
+        let base = if row.anthropic_base_url.trim().is_empty() {
+            row.openai_base_url.trim().to_string()
+        } else {
+            row.anthropic_base_url.trim().to_string()
+        };
+        let (jwt, _) = match self.store.find_provider_credentials(&id).await {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                return AdminZcodeResetQuotaResponse::NotFound(problem(
+                    404,
+                    "not_found",
+                    "渠道不存在",
+                ));
+            }
+            Err(()) => {
+                return AdminZcodeResetQuotaResponse::BadRequest(problem(
+                    502,
+                    "store_error",
+                    "渠道凭证读取失败",
+                ));
+            }
+        };
+        let data = match self.zcode_claim.reset_use(&base, &jwt, reset_type).await {
+            Ok(v) => v,
+            Err(e) => {
+                return AdminZcodeResetQuotaResponse::BadGateway(problem(
+                    502,
+                    "upstream_error",
+                    &e,
+                ));
+            }
+        };
+        let used = data["used"].as_bool().unwrap_or(false);
+        // 回读最新状态(失败给空对象——重置本身已成功,不为展示失败报错)
+        let reset_status = self
+            .zcode_claim
+            .reset_status(&base, &jwt)
+            .await
+            .unwrap_or(serde_json::Value::Null);
+        AdminZcodeResetQuotaResponse::Ok(ZcodeResetResult { used, reset_status })
     }
 
     /// 领取核心(manual/oauth/auto 三来源共用):领取后把结果写进

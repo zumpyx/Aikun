@@ -29,8 +29,10 @@ pub mod billing;
 pub mod mcp;
 
 pub use billing::{
-    BILLING_CLIENT_VERSION, BILLING_OS_VERSION, CLAIM_PATH, EVENT_REPORT_PATH, PREVIEW_PATH,
-    TOUCH_ACTION_PATH, TOUCH_PATH, billing_request_headers, device_mid_for, jwt_sub,
+    BIGMODEL_HOST, BILLING_CLIENT_VERSION, BILLING_OS_VERSION, BM_QUOTA_PATH, BM_SUBSCRIPTION_PATH,
+    CLAIM_PATH, EVENT_REPORT_PATH, PREVIEW_PATH, RESET_STATUS_PATH, RESET_USE_PATH,
+    TOUCH_ACTION_PATH, TOUCH_PATH, ZAI_HOST, billing_request_headers, device_mid_for, jwt_sub,
+    reset_extra_headers,
 };
 pub use mcp::{MCP_FORWARDED_HEADERS, MCP_SERVER_PATH_PREFIX, MCP_SERVERS};
 

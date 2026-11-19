@@ -111,6 +111,18 @@ pub struct ProxyTaskRow {
     pub problems: Vec<String>,
 }
 
+/// zcode 渠道的 OAuth 家族业务 token(每渠道一行;monitor 域订阅与
+/// 5h/周额度查询的凭证。token 为库内密文——admin 层 KeyCipher 加密,
+/// store 只存不解)。
+#[derive(Debug, Clone)]
+pub struct ZcodeOauthRow {
+    pub provider_id: String,
+    /// enc:v1: 密文。
+    pub business_token: String,
+    /// RFC3339。
+    pub refreshed_at: String,
+}
+
 /// 渠道域能力:async trait(async 化决策见设计文档 §六)。
 #[async_trait::async_trait]
 pub trait ChannelStore: Send + Sync {
@@ -245,6 +257,23 @@ pub trait ChannelStore: Send + Sync {
         &self,
         task_type: Option<&str>,
     ) -> Result<Vec<ProxyTaskRow>, StoreError>;
+
+    /// zcode 渠道的 OAuth 业务 token UPSERT(每渠道一行,数组 id
+    /// `zcode_oauth:[provider]`;token 为 admin 层加密后的密文)。
+    async fn upsert_zcode_oauth(&self, row: ZcodeOauthRow) -> Result<(), StoreError>;
+
+    /// zcode 业务 token 读取(无则 None;解密在 admin 层)。
+    async fn find_zcode_oauth(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<ZcodeOauthRow>, StoreError>;
+
+    /// key_hash → 渠道 id(在线登录重复建渠道时的回填定位;zcode_oauth
+    /// 挂渠道行,需要 id 而非名称)。无归属 None。
+    async fn find_provider_id_by_key_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<Option<String>, StoreError>;
 
     /// 代理池:新增(name/url/note;id 由实现生成)。URL 形态校验在 admin 层。
     async fn create_proxy(&self, row: NewProxyRow) -> Result<ProxyRow, StoreError>;
@@ -1667,6 +1696,87 @@ impl ChannelStore for SurrealChannels {
         Ok(set)
     }
 
+    async fn upsert_zcode_oauth(&self, row: ZcodeOauthRow) -> Result<(), StoreError> {
+        // 数组 record id 定位 UPSERT(proxy_task 同款惯例)。
+        // 绑定名避开 $token——SurrealQL 保护变量,SET 会直接报错。
+        self.handle
+            .db()
+            .query(
+                "UPSERT type::record('zcode_oauth', [type::record('provider', $pid)]) SET
+                    provider_id = $pid,
+                    business_token = $bt,
+                    refreshed_at = time::now();",
+            )
+            .bind(("pid", row.provider_id.clone()))
+            .bind(("bt", row.business_token.clone()))
+            .await
+            .map_err(qerr)?
+            .check()
+            .map_err(qerr)?;
+        Ok(())
+    }
+
+    async fn find_zcode_oauth(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<ZcodeOauthRow>, StoreError> {
+        let mut res = self
+            .handle
+            .db()
+            .query("SELECT * FROM zcode_oauth WHERE provider_id = $pid LIMIT 1")
+            .bind(("pid", provider_id))
+            .await
+            .map_err(qerr)?
+            .check()
+            .map_err(qerr)?;
+        let rows: Vec<serde_json::Value> = res.take(0).map_err(qerr)?;
+        Ok(rows.first().and_then(|r| {
+            let token = j_str(r, "business_token");
+            if token.is_empty() {
+                None
+            } else {
+                Some(ZcodeOauthRow {
+                    provider_id: j_str(r, "provider_id"),
+                    business_token: token,
+                    refreshed_at: j_str(r, "refreshed_at"),
+                })
+            }
+        }))
+    }
+
+    async fn find_provider_id_by_key_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<Option<String>, StoreError> {
+        if key_hash.is_empty() {
+            return Ok(None);
+        }
+        let mut res = self
+            .handle
+            .db()
+            .query("SELECT id FROM provider WHERE key_hash = $h LIMIT 1")
+            .bind(("h", key_hash))
+            .await
+            .map_err(qerr)?
+            .check()
+            .map_err(qerr)?;
+        let rows: Vec<serde_json::Value> = res.take(0).map_err(qerr)?;
+        Ok(rows.first().and_then(|r| {
+            // `SELECT id` 给 record 引用串(provider:xxx / ⟨provider:xxx⟩):
+            // 剥 table 前缀与转义括号,留纯 key 段。
+            r.get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| {
+                    s.rsplit(':')
+                        .next()
+                        .unwrap_or(s)
+                        .trim_matches(['⟨', '⟩'])
+                        .to_string()
+                })
+                .filter(|s| !s.is_empty())
+        }))
+    }
+
     async fn find_key_owner(
         &self,
         key_hash: &str,
@@ -2397,6 +2507,48 @@ mod tests {
             let after = store.get_provider("prov-a").await.unwrap().unwrap();
             assert_eq!(after.health_status, "degraded");
             assert!(store.provider_metrics("missing").await.unwrap().is_none());
+        });
+    }
+
+    /// zcode_oauth 侧表:upsert 覆盖 + 读回 + 未见行 None + key_hash 定位。
+    #[test]
+    fn zcode_oauth_upsert_and_find() {
+        big_stack(async {
+            let store = fixture().await;
+            let p = store
+                .create_provider(new_provider("z1", "jwt-1"))
+                .await
+                .unwrap();
+            store
+                .upsert_zcode_oauth(ZcodeOauthRow {
+                    provider_id: p.id.clone(),
+                    business_token: "enc:v1:abc".to_string(),
+                    refreshed_at: String::new(),
+                })
+                .await
+                .unwrap();
+            let row = store.find_zcode_oauth(&p.id).await.unwrap().unwrap();
+            assert_eq!(row.business_token, "enc:v1:abc");
+            // 覆盖式更新(重复登录回填)
+            store
+                .upsert_zcode_oauth(ZcodeOauthRow {
+                    provider_id: p.id.clone(),
+                    business_token: "enc:v1:def".to_string(),
+                    refreshed_at: String::new(),
+                })
+                .await
+                .unwrap();
+            let row = store.find_zcode_oauth(&p.id).await.unwrap().unwrap();
+            assert_eq!(row.business_token, "enc:v1:def");
+            assert!(store.find_zcode_oauth("missing").await.unwrap().is_none());
+            // key_hash → 渠道 id(登录重复时定位既有渠道)
+            let hash = crate::password::hash_api_key("jwt-1");
+            let id = store
+                .find_provider_id_by_key_hash(&hash)
+                .await
+                .unwrap()
+                .expect("按 hash 定位渠道 id");
+            assert_eq!(id, p.id, "record 引用串剥出纯 id 段");
         });
     }
 }

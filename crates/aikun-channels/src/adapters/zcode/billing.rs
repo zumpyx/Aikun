@@ -36,6 +36,49 @@ pub const TOUCH_PATH: &str = "/api/v1/marketing/touch";
 /// 投放确认(POST `{campaign_id, action_type:"confirm"}`)。
 pub const TOUCH_ACTION_PATH: &str = "/api/v1/marketing/touch/action";
 
+// ---- 订阅 / 额度重置(coding-plan/reset)家族 ----------------------------
+// 端点与认证形态炼化自 ZCode 桌面客户端 3.18.2(2026-11-20 活体验证):
+// reset 家族挂 zcode.z.ai(跟渠道 base 走),要求**双头认证**——
+// `Authorization: Bearer <JWT>` + `X-Bigmodel-Authorization: <JWT>`(上游
+// 接受同值 JWT;官方客户端传的是 OAuth 业务 token,两处都过)+ 必带
+// `Bigmodel-Target-Type: PERSONAL`,缺任一 3001 parameter error。
+
+/// 可用重置次数与最近使用记录(GET;零消耗,账号信息数据源)。
+pub const RESET_STATUS_PATH: &str = "/api/v1/coding-plan/reset/status";
+
+/// 使用一次重置(POST `{idempotency_key, reset_type}`;**消耗性动作**,
+/// reset_type = "FIVE_HOUR" | "WEEK",响应 `{data:{used:true}}`)。
+pub const RESET_USE_PATH: &str = "/api/v1/coding-plan/reset/use";
+
+/// reset 家族在 billing 头之上的增量头(实测缺 `Bigmodel-Target-Type`
+/// 即 3001;`X-Bigmodel-Authorization` 传 JWT 本身即过)。
+pub fn reset_extra_headers(jwt: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("X-Bigmodel-Authorization", jwt.to_string()),
+        ("Bigmodel-Target-Type", "PERSONAL".to_string()),
+    ]
+}
+
+// ---- 订阅 / 5h·周额度(bigmodel monitor 家族;国内 Coding Plan) ---------
+// 付费订阅(GLM Coding Plan Lite 等)的订阅信息与 5 小时/每周滚动额度
+// 不在 zcode.z.ai billing 里(balance 只见免费桶),而在账号家族的
+// monitor 域:国内 bigmodel.cn、国际 api.z.ai。鉴权用 OAuth 业务 token
+// (poll 响应 `data.bigmodel.access_token` / `data.zai.access_token`;
+// 官方客户端缺此字段即判授权响应无效,故在线登录渠道必有)。
+
+/// 国内(bigmodel 家族)monitor 域。
+pub const BIGMODEL_HOST: &str = "https://bigmodel.cn";
+/// 国际(zai 家族)monitor 域。
+pub const ZAI_HOST: &str = "https://api.z.ai";
+
+/// 订阅清单(GET;`data` 为订阅数组或对象,active 项含 productId /
+/// productName / billingCycle / expireTime)。
+pub const BM_SUBSCRIPTION_PATH: &str = "/api/biz/subscription/list";
+
+/// 用量额度(GET;`data:{level, limits:[{type, unit, number, usage,
+/// remaining, percentage, nextResetTime, ...}]}`,5 小时窗与周窗各一条)。
+pub const BM_QUOTA_PATH: &str = "/api/monitor/usage/quota/limit";
+
 /// billing/claim 家族的完整请求头(炼化自 Zcode2Api billingHeaders,版本
 /// 3.18.2)。与聊天伪装头(extra_headers)的差异:带 `Authorization`、
 /// `X-Device-Mid`、`X-Os-Version`(os.release() 语义,非营销名)与

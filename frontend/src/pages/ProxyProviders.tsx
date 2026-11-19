@@ -180,7 +180,7 @@ function AppPage({ appId }: { appId: AppId }) {
 
   // ---- 领取免费额度 / 账号信息 / 手动备注 ----
   const [claiming, setClaiming] = useState<Set<string>>(new Set())
-  const [fetchingInfo, setFetchingInfo] = useState<Set<string>>(new Set())
+  const [infoFor, setInfoFor] = useState<{ id: string; name: string } | null>(null)
   const [noteFor, setNoteFor] = useState<{ id: string; name: string; note: string } | null>(null)
   const [testing, setTesting] = useState<string | null>(null)
   const [editFor, setEditFor] = useState<{ id: string; name: string; priority: number; weight: number } | null>(null)
@@ -204,24 +204,8 @@ function AppPage({ appId }: { appId: AppId }) {
     else if (r.data.problems.length === 0) sonnerToast.info(`${name}:当前没有可领的额度`)
     invalidate()
   }
-  // 一键获取账号信息:token 查上游,回填名称(自动生成名)/备注摘要
-  const fetchAccountInfo = async (id: string, name: string) => {
-    setFetchingInfo((prev) => new Set(prev).add(id))
-    const r = await api<{ account_id?: string; display?: string; plan_name?: string; name_updated: boolean }>(
-      'POST', `/api/providers/${id}/zcode/account-info`)
-    setFetchingInfo((prev) => {
-      const next = new Set(prev)
-      next.delete(id)
-      return next
-    })
-    if (!r.ok) return sonnerToast.error(`${name} 获取账号信息失败:${errMsg(r)}`)
-    const parts: string[] = []
-    if (r.data.display) parts.push(r.data.display)
-    if (r.data.account_id) parts.push(`id=${r.data.account_id}`)
-    if (r.data.plan_name) parts.push(`套餐 ${r.data.plan_name}`)
-    sonnerToast.success(`${name}:${parts.join(' · ') || '已获取'}${r.data.name_updated ? '(名称已回填)' : ''}`)
-    invalidate()
-  }
+  // 账号信息:弹窗内拉取聚合(订阅/额度/重置次数);服务端顺带回填
+  // 名称与备注摘要(见 AccountInfoModal 的 name_updated toast)。
 
   // 行内测试:真实对话(model-tests),模型取渠道第一个
   const testModel = async (id: string, name: string, model: string) => {
@@ -320,6 +304,7 @@ function AppPage({ appId }: { appId: AppId }) {
           )}
 
           {batchOpen && <BatchModal appId={appId} onOpenChange={setBatchOpen} />}
+          {infoFor && <AccountInfoModal target={infoFor} onClose={() => setInfoFor(null)} onDone={invalidate} />}
           {noteFor && <NoteModal target={noteFor} onDone={invalidate} onClose={() => setNoteFor(null)} />}
           {editFor && <EditModal target={editFor} onDone={invalidate} onClose={() => setEditFor(null)} />}
           {importOpen && <ImportModal onOpenChange={setImportOpen} onDone={invalidate} />}
@@ -387,8 +372,8 @@ function AppPage({ appId }: { appId: AppId }) {
                                 </Button>
                               )}
                               {p.channel_kind === 'zcode' && (
-                                <Button size="sm" variant="outline" disabled={fetchingInfo.has(p.id)} onClick={() => void fetchAccountInfo(p.id, p.name)}>
-                                  {fetchingInfo.has(p.id) ? '获取中…' : '账号信息'}
+                                <Button size="sm" variant="outline" onClick={() => setInfoFor({ id: p.id, name: p.name })}>
+                                  账号信息
                                 </Button>
                               )}
                               <Button size="sm" variant="outline" disabled={testing === p.id} onClick={() => void testModel(p.id, p.name, pickTestModel(p.models ?? []))}>
@@ -688,6 +673,225 @@ function NoteModal({ target, onDone, onClose }: { target: { id: string; name: st
  * 免费账号会 3009 并发拒绝)。 */
 function pickTestModel(models: string[]): string {
   return models.find((m) => m.toLowerCase().includes('flash')) ?? models[0] ?? 'GLM-5.3-Flash'
+}
+
+// ---- 账号信息(订阅 / 5h·周额度 / 重置次数) ----
+
+type ZcodeAccountInfo = {
+  account_id?: string
+  display?: string
+  plan_name?: string
+  name_updated: boolean
+  plan_credentials: boolean
+  warnings: string[]
+  balance: {
+    balances?: Array<{ show_name?: string; used_units?: number; total_units?: number; remaining_units?: number; expires_at?: number }>
+  }
+  reset_status?: {
+    available_five_hour_resets?: Array<{ expire_at: number }>
+    available_week_resets?: Array<{ expire_at: number }>
+    latest_five_hour_reset_history?: { used_at: number } | null
+    latest_week_reset_history?: { used_at: number } | null
+  } | null
+  subscription?: unknown
+  quota?: { level?: string; limits?: Array<{ type?: string; unit?: number; number?: number; usage?: number; remaining?: number; percentage?: number; nextResetTime?: number }> } | null
+}
+
+/// 时间戳(s)→ 本地短时间;空值 '-'。
+function ts(v?: number | null): string {
+  return v && v > 0 ? new Date(v * (v > 1e12 ? 1 : 1000)).toLocaleString('zh-CN', { hour12: false }) : '-'
+}
+
+/// 千分位紧凑量纲(token 数常为亿级)。
+function fmtNum(v?: number | null): string {
+  if (v == null || !Number.isFinite(v)) return '-'
+  if (v >= 1e8) return `${(v / 1e8).toFixed(2)} 亿`
+  if (v >= 1e4) return `${(v / 1e4).toFixed(1)} 万`
+  return v.toLocaleString()
+}
+
+/// monitor 额度条标签(客户端 i18n 口径:5 小时提示词池/每周配额/月度)。
+function quotaLabel(l: { type?: string }): string {
+  const t = (l.type ?? '').toLowerCase()
+  if (t.includes('five') || t.includes('5h')) return '5 小时提示词池'
+  if (t.includes('week')) return '每周配额'
+  if (t.includes('time')) return '用量额度'
+  return l.type ?? '额度'
+}
+
+function AccountInfoModal({ target, onClose, onDone }: { target: { id: string; name: string }; onClose: () => void; onDone: () => void }) {
+  const qc = useQueryClient()
+  const [resetBusy, setResetBusy] = useState<string | null>(null)
+  const info = useQuery({
+    queryKey: ['zcode-account-info', target.id],
+    queryFn: async () => (await api<ZcodeAccountInfo>('POST', `/api/providers/${target.id}/zcode/account-info`)).data,
+    // 每次打开都拉新(额度/重置次数是实时值)
+    staleTime: 0, gcTime: 0, retry: false,
+  })
+
+  const useReset = async (resetType: 'FIVE_HOUR' | 'WEEK') => {
+    const label = resetType === 'FIVE_HOUR' ? '5 小时' : '每周'
+    if (!confirm(`确定使用一次「${label}额度重置」吗?\n这是消耗性动作:扣一次重置机会,把${label}额度窗清零重来。`)) return
+    setResetBusy(resetType)
+    try {
+      const r = await api<{ used: boolean; reset_status: ZcodeAccountInfo['reset_status'] }>(
+        'POST', `/api/providers/${target.id}/zcode/reset-quota`, { reset_type: resetType })
+      if (r.ok && r.data.used) {
+        sonnerToast.success(`${target.name}:${label}额度已重置`)
+        void qc.invalidateQueries({ queryKey: ['zcode-account-info', target.id] })
+        onDone()
+      } else if (r.ok) {
+        sonnerToast.warning(`${target.name}:上游未确认重置(used=false)`)
+      } else {
+        sonnerToast.error(`${target.name} 重置失败:${errMsg(r)}`)
+      }
+    } finally { setResetBusy(null) }
+  }
+
+  const d = info.data
+  // 订阅:响应可能是对象(active 项)或数组;取第一个 active
+  const subs: Array<Record<string, unknown>> = Array.isArray(d?.subscription)
+    ? d!.subscription as Array<Record<string, unknown>>
+    : d?.subscription ? [d!.subscription as Record<string, unknown>] : []
+  const activeSub = subs.find((s) => String(s.status ?? 'active').toLowerCase() === 'active') ?? subs[0]
+
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent title={`账号信息 · ${target.name}`}>
+        {info.isLoading ? (
+          <div className="py-10 text-center text-sm text-muted-foreground">查询上游中…</div>
+        ) : info.isError || !d ? (
+          <div className="space-y-3 py-6 text-center text-sm text-destructive">
+            获取失败:{errMsg(info as never)}
+            <div><Button size="sm" variant="outline" onClick={() => void info.refetch()}>重试</Button></div>
+          </div>
+        ) : (
+          <div className="max-h-[70vh] space-y-4 overflow-y-auto pr-1 text-sm">
+            {/* 账号 + 免费额度桶 */}
+            <section className="space-y-1.5">
+              <h4 className="font-medium">账号</h4>
+              <div className="grid grid-cols-[5rem_1fr] items-baseline gap-x-2 text-xs">
+                <span className="text-muted-foreground">标识</span><span className="font-mono break-all">{d.display || d.account_id || '-'}</span>
+                {d.account_id && <><span className="text-muted-foreground">ID</span><span className="font-mono break-all">{d.account_id}</span></>}
+                <span className="text-muted-foreground">当前套餐</span><span>{d.plan_name || '-'}</span>
+              </div>
+              {(d.balance?.balances ?? []).map((b, i) => (
+                <div key={i} className="rounded-md border p-2">
+                  <UsageBar label={b.show_name || '额度'} used={b.used_units} total={b.total_units} />
+                  <div className="mt-1 text-[11px] text-muted-foreground">到期 {ts(b.expires_at)}</div>
+                </div>
+              ))}
+              {d.name_updated && <p className="text-[11px] text-muted-foreground">名称已回填为账号标识</p>}
+            </section>
+
+            {/* 订阅(Lite 等付费计划;需在线登录补全的业务 token) */}
+            <section className="space-y-1.5">
+              <h4 className="font-medium">订阅</h4>
+              {!d.plan_credentials ? (
+                <p className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
+                  未持有订阅查询凭证——重新「在线登录」一次即可补全订阅与 5 小时/每周额度信息(批量粘贴 JWT 的渠道没有此凭证)
+                </p>
+              ) : activeSub ? (
+                <div className="grid grid-cols-[5rem_1fr] items-baseline gap-x-2 text-xs">
+                  <span className="text-muted-foreground">计划</span>
+                  <span>{String(activeSub.productName ?? activeSub.productId ?? '-')}</span>
+                  {activeSub.billingCycle != null && <><span className="text-muted-foreground">周期</span><span>{String(activeSub.billingCycle)}</span></>}
+                  {activeSub.expireTime != null && <><span className="text-muted-foreground">到期</span><span>{ts(Number(activeSub.expireTime))}</span></>}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">无有效订阅记录</p>
+              )}
+            </section>
+
+            {/* 5 小时 / 每周额度(monitor 域) */}
+            {d.plan_credentials && (
+              <section className="space-y-1.5">
+                <h4 className="font-medium">额度(5 小时 / 每周)</h4>
+                {d.quota?.limits?.length ? (
+                  d.quota.limits.map((l, i) => (
+                    <div key={i} className="rounded-md border p-2">
+                      <UsageBar label={quotaLabel(l)} used={l.usage} total={l.number} percentage={l.percentage} />
+                      <div className="mt-1 text-[11px] text-muted-foreground">重置于 {ts(l.nextResetTime)}</div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-xs text-muted-foreground">{d.quota ? '无额度记录(可能无付费订阅)' : '额度查询失败(见下方说明)'}</p>
+                )}
+              </section>
+            )}
+
+            {/* 重置次数 + 使用按钮 */}
+            <section className="space-y-2">
+              <h4 className="font-medium">额度重置</h4>
+              {d.reset_status ? (
+                <>
+                  <div className="flex flex-wrap gap-2">
+                    <ResetChip title="5 小时重置" count={d.reset_status.available_five_hour_resets?.length ?? 0}
+                      lastUsed={d.reset_status.latest_five_hour_reset_history?.used_at}
+                      expires={d.reset_status.available_five_hour_resets?.[0]?.expire_at} />
+                    <ResetChip title="每周重置" count={d.reset_status.available_week_resets?.length ?? 0}
+                      lastUsed={d.reset_status.latest_week_reset_history?.used_at}
+                      expires={d.reset_status.available_week_resets?.[0]?.expire_at} />
+                  </div>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="outline" disabled={(d.reset_status.available_five_hour_resets?.length ?? 0) === 0 || resetBusy !== null}
+                      onClick={() => void useReset('FIVE_HOUR')}>
+                      {resetBusy === 'FIVE_HOUR' ? '重置中…' : '使用 5 小时重置'}
+                    </Button>
+                    <Button size="sm" variant="outline" disabled={(d.reset_status.available_week_resets?.length ?? 0) === 0 || resetBusy !== null}
+                      onClick={() => void useReset('WEEK')}>
+                      {resetBusy === 'WEEK' ? '重置中…' : '使用每周重置'}
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <p className="text-xs text-muted-foreground">重置次数查询失败(见下方说明)</p>
+              )}
+            </section>
+
+            {d.warnings?.length > 0 && (
+              <p className="text-[11px] text-muted-foreground">⚠ {d.warnings.join(';')}</p>
+            )}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/// 用量进度条(used/total 或直接给 percentage)。
+function UsageBar({ label, used, total, percentage }: { label: string; used?: number; total?: number; percentage?: number }) {
+  const pct = percentage != null && percentage >= 0 ? percentage
+    : total && total > 0 && used != null ? (used / total) * 100 : 0
+  const clamped = Math.min(100, Math.max(0, pct))
+  return (
+    <div>
+      <div className="flex items-baseline justify-between text-xs">
+        <span>{label}</span>
+        <span className="font-mono text-muted-foreground">
+          {used != null && total ? `${fmtNum(used)} / ${fmtNum(total)}` : `${Math.round(clamped)}%`}
+        </span>
+      </div>
+      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+        <div className={`h-full rounded-full ${clamped > 90 ? 'bg-destructive' : clamped > 70 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${clamped}%` }} />
+      </div>
+    </div>
+  )
+}
+
+/// 重置次数徽章(可用 N 次 + 最近使用 + 过期时间)。
+function ResetChip({ title, count, lastUsed, expires }: { title: string; count: number; lastUsed?: number | null; expires?: number }) {
+  return (
+    <div className="rounded-md border p-2 text-xs">
+      <div className="flex items-center gap-2">
+        <span className="font-medium">{title}</span>
+        <Badge tone={count > 0 ? 'success' : 'warn'}>可用 {count} 次</Badge>
+      </div>
+      <div className="mt-1 text-[11px] text-muted-foreground">
+        上次使用 {ts(lastUsed)}{count > 0 && expires ? ` · 机会过期 ${ts(expires)}` : ''}
+      </div>
+    </div>
+  )
 }
 
 // ---- 编辑(优先级/权重;账号间分级管理) ----

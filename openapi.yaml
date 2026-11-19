@@ -2016,13 +2016,16 @@ paths:
     post:
       tags: [Admin]
       operationId: adminZcodeAccountInfo
-      summary: 一键获取账号信息(token 查上游,回填名称与备注)
+      summary: 一键获取账号信息(订阅/额度/重置次数聚合,回填名称与备注)
       description: |
-        用渠道 token 调上游 billing/balance(零消耗)获取账号信息:
-        套餐名、额度(entitlements)、账号标识(响应内的 id/email/
-        phone 等字段)。**自动回填**:若渠道名称仍是自动生成的
-        zcode- 前缀,则替换为账号标识(不覆盖手动命名);note 更新为
-        账号信息摘要(手动备注会被覆盖,介意者用渠道编辑)。
+        用渠道凭证查上游(全部零消耗):billing/balance(免费额度桶与
+        账号标识)+ coding-plan/reset/status(可用重置次数与最近使用
+        记录)+ monitor 域订阅与 5h/周额度(需在线登录补全的业务
+        token;批量粘贴 JWT 的渠道跳过,plan_credentials=false)。
+        子查询失败不整体报错——对应字段为 null,warnings 说明原因。
+        **自动回填**:若渠道名称仍是自动生成的 zcode- 前缀,则替换为
+        账号标识(不覆盖手动命名);note 更新为账号信息摘要(手动备注
+        会被覆盖,介意者用渠道编辑)。
       parameters:
         - $ref: '#/components/parameters/ResourceId'
       responses:
@@ -2045,7 +2048,52 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '502':
-          description: 上游查询失败
+          description: 上游 balance 查询失败(主数据源,失败即整体失败)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /api/providers/{id}/zcode/reset-quota:
+    post:
+      tags: [Admin]
+      operationId: adminZcodeResetQuota
+      summary: 使用一次额度重置(消耗性)
+      description: |
+        POST 上游 coding-plan/reset/use:扣一次重置机会,把对应额度窗
+        (FIVE_HOUR = 5 小时提示词池 / WEEK = 每周配额)清零重来。
+        **消耗性动作**——仅由管理页「使用重置」按钮触发;服务端每次
+        生成新的幂等键,同一次点击不会重复扣。成功后返回最新的重置
+        状态(可用次数已减)。
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcodeResetRequest'
+      responses:
+        '200':
+          description: 重置结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcodeResetResult'
+        '400':
+          description: 渠道 channel_kind 不是 zcode / reset_type 非法 / 上游拒绝
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          description: 上游调用失败
           content:
             application/problem+json:
               schema:
@@ -4389,17 +4437,74 @@ components:
     ZcodeAccountInfo:
       type: object
       description: |
-        token 查上游(billing/balance)得到的账号信息;name_updated =
-        是否把自动生成名替换成了账号标识(手动命名不覆盖)。
+        token 查上游得到的账号信息聚合:billing/balance(免费额度桶)+
+        coding-plan/reset/status(重置次数)+ 订阅与 5h/周额度(monitor 域,
+        需在线登录补全的业务 token;批量粘贴 JWT 的渠道没有,对应字段
+        为 null 且 plan_credentials=false)。name_updated = 是否把自动
+        生成名替换成了账号标识(手动命名不覆盖)。
       properties:
         account_id: {type: string}
         display: {type: string}
         plan_name: {type: string}
         balance:
           type: object
-          description: 上游 data 原始对象(套餐/额度/账号字段,原样)
+          description: billing/balance 的 data 原始对象(套餐/额度桶,原样)
         name_updated: {type: boolean}
-      required: [balance, name_updated]
+        reset_status:
+          type: object
+          nullable: true
+          description: |
+            coding-plan/reset/status 的 data 原样:available_five_hour_resets /
+            available_week_resets(数组,元素含 expire_at)、latest_*_reset_history
+            (used_at)、has_unread_history。查询失败为 null(warnings 有说明)。
+        subscription:
+          type: object
+          nullable: true
+          description: |
+            monitor 域 /api/biz/subscription/list 的 data 原样(订阅:
+            productId / productName / billingCycle / expireTime)。
+            无业务 token 或查询失败为 null。
+        quota:
+          type: object
+          nullable: true
+          description: |
+            monitor 域 /api/monitor/usage/quota/limit 的 data 原样
+            ({level, limits:[...]},5 小时窗与每周窗各一条:usage/
+            remaining/percentage/nextResetTime)。无业务 token 或查询
+            失败为 null。
+        plan_credentials:
+          type: boolean
+          description: 是否已持有 monitor 域业务 token(在线登录补全过)
+        warnings:
+          type: array
+          items: {type: string}
+          description: 各子查询的失败说明(整体 200,子项降级为 null)
+      required:
+        [balance, name_updated, plan_credentials, warnings]
+      additionalProperties: false
+
+    ZcodeResetRequest:
+      type: object
+      description: 使用一次额度重置(**消耗性**:扣一次重置机会)。
+      properties:
+        reset_type:
+          type: string
+          enum: [FIVE_HOUR, WEEK]
+          description: FIVE_HOUR = 重置 5 小时提示词池;WEEK = 重置每周配额
+      required: [reset_type]
+      additionalProperties: false
+
+    ZcodeResetResult:
+      type: object
+      description: |
+        重置结果:used = 是否成功消耗一次重置机会;reset_status 为
+        使用后的最新重置状态(原样透传上游 data)。
+      properties:
+        used: {type: boolean}
+        reset_status:
+          type: object
+          description: 使用后最新的 coding-plan/reset/status data
+      required: [used, reset_status]
       additionalProperties: false
 
     ProxyTaskRecord:

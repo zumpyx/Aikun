@@ -3231,12 +3231,20 @@ async fn zcode_account_info_fetch_and_backfill() {
         .unwrap();
     assert_eq!(r.status(), 200, "PATCH base→mock");
 
-    // 一键获取账号信息(balance 返回账号字段)
+    // 一键获取账号信息(balance 返回账号字段;intl 无业务 token →
+    // 顺带查 reset/status,订阅/额度跳过)
     mock.push_json(
         200,
         json!({"code": 0, "data": {"account_id": "acc-123", "email": "user@z.ai",
                "plans": [{"plan_id": "p1", "name": "Pro"}],
                "balances": []}}),
+    );
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"available_five_hour_resets": [],
+               "available_week_resets": [{"expire_at": 1797955199}],
+               "latest_five_hour_reset_history": null,
+               "latest_week_reset_history": {"used_at": 1793604157}}}),
     );
     let r = app
         .client()
@@ -3254,6 +3262,20 @@ async fn zcode_account_info_fetch_and_backfill() {
     assert_eq!(info["display"], "user@z.ai");
     assert_eq!(info["plan_name"], "Pro");
     assert_eq!(info["name_updated"], true, "自动生成名回填");
+    assert_eq!(
+        info["plan_credentials"], false,
+        "批量/无家族 token 渠道无订阅凭证"
+    );
+    assert_eq!(
+        info["reset_status"]["available_week_resets"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "周重置次数透传"
+    );
+    assert!(info["subscription"].is_null(), "无业务 token → 订阅 null");
+    assert!(info["quota"].is_null(), "无业务 token → 额度 null");
 
     // 渠道已回填
     let r = app
@@ -3288,6 +3310,11 @@ async fn zcode_account_info_fetch_and_backfill() {
         200,
         json!({"code": 0, "data": {"account_id": "acc-123", "email": "user@z.ai", "plans": [{"name": "Pro"}]}}),
     );
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"available_five_hour_resets": [],
+               "available_week_resets": []}}),
+    );
     let r = app
         .client()
         .post(format!(
@@ -3300,4 +3327,276 @@ async fn zcode_account_info_fetch_and_backfill() {
         .unwrap();
     let info: Value = r.json().await.unwrap();
     assert_eq!(info["name_updated"], false, "手动命名不覆盖");
+}
+
+/// ZCode 订阅/额度/重置三件套(Lite 等付费 Coding Plan):
+/// 国内在线登录捕获 monitor 业务 token(poll 响应 data.bigmodel.
+/// access_token)→ account-info 聚合(订阅 + 5h/周额度 + 重置次数,
+/// monitor 请求带业务 token)→ reset-quota 消耗性重置(幂等键 +
+/// 双头认证)→ 同一账号重复在线登录走「回填业务 token」而非 409。
+#[tokio::test]
+async fn zcode_plan_subscription_and_reset() {
+    let mock = MockUpstream::start().await;
+    let mock_host = format!("http://{}", mock.base.trim_start_matches("http://"));
+    let app = TestApp::spawn_with_env(&[
+        ("AIKUN_ZCODE_CAPTCHA", "skip"),
+        ("AIKUN_ZCODE_OAUTH_BASE", &mock_host),
+        ("AIKUN_ZCODE_BIGMODEL_HOST", &mock_host),
+        ("AIKUN_HEALTH_CHECK_INTERVAL", "3600"),
+    ])
+    .await;
+    let admin = app.admin_token().await;
+
+    // ---- 国内在线登录:poll ready 携带 bigmodel 业务 token ----
+    // 注意:登录建的渠道 base 是常量 zcode.z.ai(真网),ready 后 spawn
+    // 的自动领取打真网(伪 JWT → 上游拒绝 → 快照记 problems,与
+    // zcode_oauth_login_flow 同款容忍);等快照落库后 PATCH base→mock
+    // 再走后续脚本,保证队列不被后台任务竞态消费。
+    mock.push_json(
+        200,
+        json!({"data": {"flow_id": "f1", "authorize_url": "https://x"}}),
+    );
+    mock.push_json(
+        200,
+        json!({"data": {"status": "ready", "token": "jwt-cn-plan",
+               "user": {"phone": "13800000000"},
+               "bigmodel": {"access_token": "bm-token-1", "refresh_token": "r1"}}}),
+    );
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-init", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"env": "cn"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "login-init");
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-poll", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"flow_id": "f1", "poll_token": "any", "env": "cn"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "login-poll ready");
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["status"], "ready");
+    let pid = v["provider"]["id"].as_str().unwrap().to_string();
+    assert!(
+        v["provider"]["note"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("[国内]"),
+        "国内归组标记"
+    );
+
+    // 等后台自动领取结束(proxy_task 快照落库)——脚本队列 FIFO,
+    // 不等会把后续 account-info 的响应吃掉
+    for _ in 0..300 {
+        let r = app
+            .client()
+            .get(format!("{}/api/providers/zcode/tasks", app.base))
+            .bearer_auth(&admin)
+            .send()
+            .await
+            .unwrap();
+        let t: Value = r.json().await.unwrap();
+        if t["tasks"]
+            .as_array()
+            .map(|a| a.iter().any(|x| x["provider_id"] == pid.as_str()))
+            .unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // 渠道 base 切到 mock(account-info / reset / monitor 脚本全走 mock)
+    let r = app
+        .client()
+        .patch(format!("{}/api/providers/{pid}", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"openai_base_url": mock.base, "anthropic_base_url": mock.base}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "PATCH base→mock");
+
+    // ---- account-info 聚合:balance + reset/status + monitor 订阅/额度 ----
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"plans": [{"plan_id": "zcode-v3-start-plan", "name": "ZCODE GLOBAL BUILD"}],
+               "balances": [{"show_name": "GLM-5.3-Flash", "used_units": 1000, "total_units": 300000000,
+                              "expires_at": 1795136400}]}}),
+    );
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"available_five_hour_resets": [],
+               "available_week_resets": [{"expire_at": 1797955199}],
+               "latest_five_hour_reset_history": null,
+               "latest_week_reset_history": {"used_at": 1793604157}}}),
+    );
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": [{"productId": "coding-lite", "productName": "GLM Coding Plan Lite",
+               "status": "active", "billingCycle": "monthly", "expireTime": 1800000000}]}),
+    );
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"level": "lite", "limits": [
+            {"type": "TIME_LIMIT_5H", "unit": 1, "number": 120, "usage": 30, "remaining": 90,
+             "percentage": 25, "nextResetTime": 1795120000},
+            {"type": "TIME_LIMIT_WEEK", "unit": 1, "number": 600, "usage": 100, "remaining": 500,
+             "percentage": 16, "nextResetTime": 1795700000}]}}),
+    );
+    let r = app
+        .client()
+        .post(format!(
+            "{}/api/providers/{pid}/zcode/account-info",
+            app.base
+        ))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "account-info 200");
+    let info: Value = r.json().await.unwrap();
+    assert_eq!(info["plan_credentials"], true, "业务 token 已落库");
+    assert_eq!(
+        info["reset_status"]["available_week_resets"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        info["subscription"][0]["productName"],
+        "GLM Coding Plan Lite"
+    );
+    assert_eq!(info["quota"]["limits"].as_array().unwrap().len(), 2);
+    assert!(info["warnings"].as_array().unwrap().is_empty(), "{info}");
+
+    // monitor 请求带业务 token(单 authorization 头,无 Bearer 前缀)
+    let reqs = mock.requests();
+    let sub_req = reqs
+        .iter()
+        .find(|q| q.path.ends_with("/api/biz/subscription/list"))
+        .expect("订阅请求打到 monitor mock");
+    assert_eq!(
+        sub_req.authorization.as_deref().unwrap_or(""),
+        "bm-token-1",
+        "monitor 用 OAuth 业务 token"
+    );
+
+    // ---- reset-quota:消耗性重置(幂等键 + 双头认证) ----
+    mock.push_json(200, json!({"code": 0, "data": {"used": true}}));
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"available_five_hour_resets": [],
+               "available_week_resets": []}}),
+    );
+    let r = app
+        .client()
+        .post(format!(
+            "{}/api/providers/{pid}/zcode/reset-quota",
+            app.base
+        ))
+        .bearer_auth(&admin)
+        .json(&json!({"reset_type": "WEEK"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "reset-quota 200");
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["used"], true);
+    let reqs = mock.requests();
+    let use_req = reqs
+        .iter()
+        .find(|q| q.path.ends_with("/coding-plan/reset/use"))
+        .expect("reset/use 打到 mock");
+    let body: Value = serde_json::from_str(&use_req.body).unwrap();
+    assert_eq!(body["reset_type"], "WEEK");
+    assert!(
+        body["idempotency_key"].as_str().unwrap_or("").len() >= 16,
+        "幂等键随请求生成"
+    );
+    let hdr = |k: &str| {
+        use_req
+            .headers
+            .iter()
+            .find(|(hk, _)| hk == k)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(hdr("x-bigmodel-authorization"), "jwt-cn-plan", "双头认证");
+    assert_eq!(hdr("bigmodel-target-type"), "PERSONAL", "个人口径头");
+
+    // ---- 同一账号重复在线登录:回填业务 token,不报 409 ----
+    mock.push_json(
+        200,
+        json!({"data": {"flow_id": "f2", "authorize_url": "https://x"}}),
+    );
+    mock.push_json(
+        200,
+        json!({"data": {"status": "ready", "token": "jwt-cn-plan",
+               "user": {"phone": "13800000000"},
+               "bigmodel": {"access_token": "bm-token-2"}}}),
+    );
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-init", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"env": "cn"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = app
+        .client()
+        .post(format!("{}/api/providers/zcode/login-poll", app.base))
+        .bearer_auth(&admin)
+        .json(&json!({"flow_id": "f2", "poll_token": "any", "env": "cn"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "重复登录不 409");
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["status"], "ready", "{v}");
+    assert_eq!(v["provider"]["id"], pid, "定位到既有渠道");
+
+    // 回填后的业务 token 生效:account-info 的 monitor 请求用新 token
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"plans": [], "balances": []}}),
+    );
+    mock.push_json(
+        200,
+        json!({"code": 0, "data": {"available_five_hour_resets": [],
+               "available_week_resets": []}}),
+    );
+    mock.push_json(200, json!({"code": 0, "data": []}));
+    mock.push_json(200, json!({"code": 0, "data": {"limits": []}}));
+    let r = app
+        .client()
+        .post(format!(
+            "{}/api/providers/{pid}/zcode/account-info",
+            app.base
+        ))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let reqs = mock.requests();
+    let last_sub = reqs
+        .iter()
+        .rev()
+        .find(|q| q.path.ends_with("/api/biz/subscription/list"))
+        .expect("第二次订阅请求");
+    assert_eq!(
+        last_sub.authorization.as_deref().unwrap_or(""),
+        "bm-token-2",
+        "重复登录回填了新业务 token"
+    );
 }

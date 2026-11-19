@@ -1560,6 +1560,36 @@ impl providers_port::ProviderStore for SurrealProviderStore {
                 )
             }))
     }
+
+    async fn upsert_zcode_oauth(&self, provider_id: &str, token_enc: &str) -> Result<(), ()> {
+        self.store
+            .channels
+            .upsert_zcode_oauth(aikun_store::surreal::channels_store::ZcodeOauthRow {
+                provider_id: provider_id.to_string(),
+                business_token: token_enc.to_string(),
+                refreshed_at: String::new(),
+            })
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::upsert_zcode_oauth: {e}"))
+    }
+
+    async fn find_zcode_oauth(&self, provider_id: &str) -> Result<Option<String>, ()> {
+        Ok(self
+            .store
+            .channels
+            .find_zcode_oauth(provider_id)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::find_zcode_oauth: {e}"))?
+            .map(|r| r.business_token))
+    }
+
+    async fn find_provider_id_by_key_hash(&self, key_hash: &str) -> Result<Option<String>, ()> {
+        self.store
+            .channels
+            .find_provider_id_by_key_hash(key_hash)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::find_provider_id_by_key_hash: {e}"))
+    }
 }
 
 /// 从单条上游 SSE 事件 data 提取增量文本(口径同

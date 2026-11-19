@@ -173,10 +173,18 @@ pub trait AdminApi: Send + Sync + 'static {
     ///
     /// `DELETE /api/proxies/{id}`
     async fn admin_delete_proxy(&self, id: String) -> AdminDeleteProxyResponse;
-    /// 一键获取账号信息(token 查上游,回填名称与备注)
+    /// 一键获取账号信息(订阅/额度/重置次数聚合,回填名称与备注)
     ///
     /// `POST /api/providers/{id}/zcode/account-info`
     async fn admin_zcode_account_info(&self, id: String) -> AdminZcodeAccountInfoResponse;
+    /// 使用一次额度重置(消耗性)
+    ///
+    /// `POST /api/providers/{id}/zcode/reset-quota`
+    async fn admin_zcode_reset_quota(
+        &self,
+        id: String,
+        body: ZcodeResetRequest,
+    ) -> AdminZcodeResetQuotaResponse;
     /// ZCode 签到(领取)任务面板
     ///
     /// `GET /api/providers/zcode/tasks`

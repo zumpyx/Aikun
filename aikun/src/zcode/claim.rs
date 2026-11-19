@@ -20,6 +20,28 @@ impl ZcodeClaimImpl {
         format!("{}{path}", Self::origin_of(base))
     }
 
+    /// monitor 域选择:国内 bigmodel.cn / 国际 api.z.ai(常量默认;
+    /// `AIKUN_ZCODE_BIGMODEL_HOST` / `AIKUN_ZCODE_ZAI_HOST` 可覆盖——
+    /// e2e mock 与私有化部署用)。
+    fn monitor_host(domestic: bool) -> String {
+        let (key, default) = if domestic {
+            (
+                "AIKUN_ZCODE_BIGMODEL_HOST",
+                aikun_channels::adapters::zcode::BIGMODEL_HOST,
+            )
+        } else {
+            (
+                "AIKUN_ZCODE_ZAI_HOST",
+                aikun_channels::adapters::zcode::ZAI_HOST,
+            )
+        };
+        std::env::var(key)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    }
+
     /// billing 家族通用请求:billing_request_headers + JSON 体,20s 超时。
     /// 返回 (status, 解析后的 body);网络失败 Err。
     async fn request_json(
@@ -69,6 +91,47 @@ impl ZcodeClaimImpl {
         let status = resp.status().as_u16();
         let parsed: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
         Ok((status, parsed))
+    }
+
+    /// monitor 域 GET(订阅/额度;鉴权 = OAuth 业务 token,单 authorization 头)。
+    /// 信封口径同官方客户端:`success !== false` 且 code ∈ {null,0,200} 才算过。
+    async fn monitor_get(
+        &self,
+        host: &str,
+        token: &str,
+        path: &str,
+    ) -> Result<serde_json::Value, String> {
+        let url = Self::url_for(host, path);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;
+        let resp = client
+            .get(&url)
+            .header("authorization", token)
+            .header("accept", "application/json, text/plain, */*")
+            .header("user-agent", "ZCode/3.18.2")
+            .send()
+            .await
+            .map_err(|e| format!("请求失败: {}", e.without_url()))?;
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        if status != 200 {
+            return Err(format!(
+                "monitor HTTP {status} {}",
+                body["msg"].as_str().unwrap_or_default()
+            ));
+        }
+        if body["success"].as_bool() == Some(false)
+            || !matches!(body["code"].as_i64(), None | Some(0) | Some(200))
+        {
+            return Err(format!(
+                "monitor code {} {}",
+                body["code"].as_i64().unwrap_or(-1),
+                body["msg"].as_str().unwrap_or_default()
+            ));
+        }
+        Ok(body["data"].clone())
     }
 }
 
@@ -374,5 +437,89 @@ impl aikun_admin::admin_providers::ZcodeClaimPort for ZcodeClaimImpl {
             ));
         }
         Ok(())
+    }
+
+    async fn reset_status(&self, base: &str, jwt: &str) -> Result<serde_json::Value, String> {
+        use aikun_channels::adapters::zcode::{
+            BILLING_CLIENT_VERSION, RESET_STATUS_PATH, reset_extra_headers,
+        };
+        let path = format!("{RESET_STATUS_PATH}?app_version={BILLING_CLIENT_VERSION}");
+        let (status, resp) = self
+            .request_json_extra(
+                reqwest::Method::GET,
+                base,
+                &path,
+                jwt,
+                None,
+                &reset_extra_headers(jwt),
+            )
+            .await?;
+        if status != 200 {
+            return Err(format!("reset/status HTTP {status}"));
+        }
+        if resp["code"].as_i64() != Some(0) {
+            return Err(format!(
+                "reset/status code {} {}",
+                resp["code"].as_i64().unwrap_or(-1),
+                resp["msg"].as_str().unwrap_or_default()
+            ));
+        }
+        Ok(resp["data"].clone())
+    }
+
+    async fn reset_use(
+        &self,
+        base: &str,
+        jwt: &str,
+        reset_type: &str,
+    ) -> Result<serde_json::Value, String> {
+        use aikun_channels::adapters::zcode::{RESET_USE_PATH, reset_extra_headers};
+        // idempotency_key:官方客户端语义(≤64 字符随机串,防重放重扣);
+        // 每次点击生成新 key——同一 key 重试不会重复扣次数。
+        let body = serde_json::json!({
+            "idempotency_key": uuid::Uuid::new_v4().to_string(),
+            "reset_type": reset_type,
+        });
+        let (status, resp) = self
+            .request_json_extra(
+                reqwest::Method::POST,
+                base,
+                RESET_USE_PATH,
+                jwt,
+                Some(&body),
+                &reset_extra_headers(jwt),
+            )
+            .await?;
+        if status != 200 {
+            return Err(format!(
+                "reset/use HTTP {status} code {} {}",
+                resp["code"].as_i64().unwrap_or(-1),
+                resp["msg"].as_str().unwrap_or_default()
+            ));
+        }
+        match resp["code"].as_i64() {
+            Some(0) => Ok(resp["data"].clone()),
+            Some(code) => Err(format!(
+                "reset/use code {code} {}",
+                resp["msg"].as_str().unwrap_or_default()
+            )),
+            None => Err("reset/use 响应无 code".to_string()),
+        }
+    }
+
+    async fn fetch_subscription(
+        &self,
+        domestic: bool,
+        token: &str,
+    ) -> Result<serde_json::Value, String> {
+        use aikun_channels::adapters::zcode::BM_SUBSCRIPTION_PATH;
+        let host = Self::monitor_host(domestic);
+        self.monitor_get(&host, token, BM_SUBSCRIPTION_PATH).await
+    }
+
+    async fn fetch_quota(&self, domestic: bool, token: &str) -> Result<serde_json::Value, String> {
+        use aikun_channels::adapters::zcode::BM_QUOTA_PATH;
+        let host = Self::monitor_host(domestic);
+        self.monitor_get(&host, token, BM_QUOTA_PATH).await
     }
 }

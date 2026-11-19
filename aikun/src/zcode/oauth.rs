@@ -101,6 +101,17 @@ impl aikun_admin::admin_providers::ZcodeOAuth for ZcodeOAuthImpl {
                     .find_map(|k| data["user"][k].as_str().filter(|v| !v.trim().is_empty()))
                     .unwrap_or("zcode-user")
                     .to_string(),
+                // 家族业务 token(monitor 域订阅/5h·周额度查询用;国内
+                // bigmodel / 国际 zai 各自的 access_token,命名两种口径都收)。
+                business_token: ["bigmodel", "zai"].iter().find_map(|family| {
+                    let f = &data[family];
+                    ["access_token", "accessToken"].iter().find_map(|k| {
+                        f[*k]
+                            .as_str()
+                            .filter(|v| !v.trim().is_empty())
+                            .map(str::to_string)
+                    })
+                }),
             },
             "expired" => ZcodePollStatus::Expired,
             "failed" => {

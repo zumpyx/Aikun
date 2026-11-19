@@ -250,6 +250,13 @@ impl AdminApi for AdminService {
     ) -> aikun_openapi::openapi::server::errors::AdminZcodeAccountInfoResponse {
         self.providers.admin_zcode_account_info(id).await
     }
+    async fn admin_zcode_reset_quota(
+        &self,
+        id: String,
+        body: aikun_openapi::openapi::types::ZcodeResetRequest,
+    ) -> aikun_openapi::openapi::server::errors::AdminZcodeResetQuotaResponse {
+        self.providers.admin_zcode_reset_quota(id, body).await
+    }
     async fn admin_zcode_claim_quota(
         &self,
         id: String,

@@ -21,6 +21,39 @@ mod tri_state_serde {
         T::deserialize(de).map(Some)
     }
 }
+///使用一次额度重置(**消耗性**:扣一次重置机会)。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ZcodeResetRequest {
+    ///FIVE_HOUR = 重置 5 小时提示词池;WEEK = 重置每周配额
+    pub reset_type: ZcodeResetRequestResetType,
+}
+///FIVE_HOUR = 重置 5 小时提示词池;WEEK = 重置每周配额
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ZcodeResetRequestResetType {
+    #[default]
+    #[serde(rename = "FIVE_HOUR")]
+    FiveHour,
+    #[serde(rename = "WEEK")]
+    Week,
+}
+impl ZcodeResetRequestResetType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FiveHour => "FIVE_HOUR",
+            Self::Week => "WEEK",
+        }
+    }
+}
+impl ::std::fmt::Display for ZcodeResetRequestResetType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ZcodeResetRequestResetType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 /**status = ready(渠道已创建,provider 为出参形状)/ pending /
 expired / failed。ready 时 email 为授权账号。
 */
@@ -2887,20 +2920,58 @@ pub struct UpsertPriceRequest {
 pub struct VersionInfo {
     pub version: String,
 }
-/**token 查上游(billing/balance)得到的账号信息;name_updated =
-是否把自动生成名替换成了账号标识(手动命名不覆盖)。
+/**token 查上游得到的账号信息聚合:billing/balance(免费额度桶)+
+coding-plan/reset/status(重置次数)+ 订阅与 5h/周额度(monitor 域,
+需在线登录补全的业务 token;批量粘贴 JWT 的渠道没有,对应字段
+为 null 且 plan_credentials=false)。name_updated = 是否把自动
+生成名替换成了账号标识(手动命名不覆盖)。
 */
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ZcodeAccountInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
-    ///上游 data 原始对象(套餐/额度/账号字段,原样)
+    ///billing/balance 的 data 原始对象(套餐/额度桶,原样)
     pub balance: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
     pub name_updated: bool,
+    ///是否已持有 monitor 域业务 token(在线登录补全过)
+    pub plan_credentials: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_name: Option<String>,
+    /**monitor 域 /api/monitor/usage/quota/limit 的 data 原样
+    ({level, limits:[...]},5 小时窗与每周窗各一条:usage/
+    remaining/percentage/nextResetTime)。无业务 token 或查询
+    失败为 null。
+    */
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub quota: Option<Option<serde_json::Value>>,
+    /**coding-plan/reset/status 的 data 原样:available_five_hour_resets /
+    available_week_resets(数组,元素含 expire_at)、latest_*_reset_history
+    (used_at)、has_unread_history。查询失败为 null(warnings 有说明)。
+    */
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub reset_status: Option<Option<serde_json::Value>>,
+    /**monitor 域 /api/biz/subscription/list 的 data 原样(订阅:
+    productId / productName / billingCycle / expireTime)。
+    无业务 token 或查询失败为 null。
+    */
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub subscription: Option<Option<serde_json::Value>>,
+    ///各子查询的失败说明(整体 200,子项降级为 null)
+    pub warnings: Vec<String>,
 }
 ///OAuth 授权流已发起;authorize_url 交给浏览器打开。
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2908,4 +2979,13 @@ pub struct ZcodeLoginInitResult {
     pub authorize_url: String,
     pub flow_id: String,
     pub poll_token: String,
+}
+/**重置结果:used = 是否成功消耗一次重置机会;reset_status 为
+使用后的最新重置状态(原样透传上游 data)。
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ZcodeResetResult {
+    ///使用后最新的 coding-plan/reset/status data
+    pub reset_status: serde_json::Value,
+    pub used: bool,
 }
