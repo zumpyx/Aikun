@@ -391,7 +391,7 @@ function AppPage({ appId }: { appId: AppId }) {
                                   {fetchingInfo.has(p.id) ? '获取中…' : '账号信息'}
                                 </Button>
                               )}
-                              <Button size="sm" variant="outline" disabled={testing === p.id} onClick={() => void testModel(p.id, p.name, (p.models ?? [])[0] ?? 'GLM-5.3-Flash')}>
+                              <Button size="sm" variant="outline" disabled={testing === p.id} onClick={() => void testModel(p.id, p.name, pickTestModel(p.models ?? []))}>
                                 {testing === p.id ? '测试中…' : '测试'}
                               </Button>
                               <Button size="sm" variant="outline" onClick={() => setEditFor({ id: p.id, name: p.name, priority: p.priority, weight: p.weight })}>
@@ -682,6 +682,13 @@ function NoteModal({ target, onDone, onClose }: { target: { id: string; name: st
   )
 }
 
+
+
+/** 行内测试默认模型:优先 flash(免费窗口可用;大杯需付费套餐,
+ * 免费账号会 3009 并发拒绝)。 */
+function pickTestModel(models: string[]): string {
+  return models.find((m) => m.toLowerCase().includes('flash')) ?? models[0] ?? 'GLM-5.3-Flash'
+}
 
 // ---- 编辑(优先级/权重;账号间分级管理) ----
 
