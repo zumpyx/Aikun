@@ -81,6 +81,17 @@
   `/data/aikun.surreal`);迁移工具默认目标同步。
 
 ## [Unreleased]
+### 变更(配置面重构:env 模板 + 默认库 ./data/data)
+
+- **默认数据库端点** → `surrealkv://./data/data`(嵌入式 SurrealKV,
+  进程内读写零网络往返=速度上限,数据本地持久);旧默认位置
+  (data/aikun.surreal、aikun.surreal)自动沿用不落空库。`mem://`
+  纯内存=最快但重启丢数据(模板注明适用场景)。
+- **env.example 全量重构**:基础/数据库/上游请求/健康熔断/日志运维/
+  响应缓存/ZCode 七组带注释模板;`.env`(本地实际值)gitignore。
+- Dockerfile 默认端点同步 `surrealkv:///data/data`。
+
+## [Unreleased]
 ### 修复(ZCode 模型调用分析 + 免费额度语义)
 
 - **诊断结论**(2026-11-20 实测):GLM-5.3-Flash 在免费窗口内**可正常

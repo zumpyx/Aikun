@@ -28,7 +28,7 @@ services:
       # 必须监听 0.0.0.0 才能接受宿主机端口转发;嵌入式 SurrealKV 数据
       # 目录必须落在 /data 卷中(阶段 S 默认切换)。
       AIKUN_HOST: 0.0.0.0:3000
-      AIKUN_SURREAL_URL: surrealkv:///data/aikun.surreal
+      AIKUN_SURREAL_URL: surrealkv:///data/data
       # 其余配置项见 env.example(全部 AIKUN_ 前缀),写进 .env 即生效,
       # 也可在这里直接取消注释覆盖:
       # AIKUN_LOG_RETENTION_DAYS: "30"

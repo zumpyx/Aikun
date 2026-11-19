@@ -84,7 +84,7 @@ docker run -d --name aikun --restart unless-stopped \
   ghcr.io/zumpyx/aikun:latest
 ```
 
-容器内配置通过 `AIKUN_*` 环境变量注入(见下方配置表),嵌入式 SurrealDB 数据目录直接落在 `./data/aikun.surreal/`(bind 挂载;备份=停机后整目录拷贝,详见「数据与升级」),容器默认监听 `0.0.0.0:3000`,宿主机端口改 `docker-compose.yml` 端口映射左侧即可。`--user`/compose 的 `user:` 用于让容器以宿主机用户身份写入 `./data`,uid 非 1000 时请对应修改。本地构建镜像:`docker compose build`(镜像同时内置 `aikun-migrate` 存量迁移工具)。
+容器内配置通过 `AIKUN_*` 环境变量注入(见下方配置表),嵌入式 SurrealDB 数据目录直接落在 `./data/data/`(bind 挂载;备份=停机后整目录拷贝,详见「数据与升级」),容器默认监听 `0.0.0.0:3000`,宿主机端口改 `docker-compose.yml` 端口映射左侧即可。`--user`/compose 的 `user:` 用于让容器以宿主机用户身份写入 `./data`,uid 非 1000 时请对应修改。本地构建镜像:`docker compose build`(镜像同时内置 `aikun-migrate` 存量迁移工具)。
 
 配置加载口径:**裸机启动自动加载工作目录的 `.env`;Docker 部署经 compose 的 `env_file: .env` 注入容器**(也可直接写在 compose 的 `environment` 里,同名项 `environment` 优先)。
 
@@ -123,7 +123,7 @@ export AIKUN_JWT_SECRET=$(openssl rand -hex 32)
 | `--jwt-secret` | `AIKUN_JWT_SECRET` | (公开默认值,**必须修改**) | JWT 签名密钥 |
 | `--encryption-key` | `AIKUN_ENCRYPTION_KEY` | (空,派生自 JWT secret) | 渠道 key 静态加密密钥 |
 | `--jwt-expires-in` | `AIKUN_JWT_EXPIRES_IN` | `604800` | JWT 有效期(秒) |
-| `--database-url` / `--surreal-url` | `AIKUN_DATABASE_URL` / `AIKUN_SURREAL_URL`(等价,后者优先) | `surrealkv://./data/aikun.surreal` | SurrealDB 端点:嵌入式 `surrealkv://<目录>` / 远程 `ws://` `wss://` `http://` `https://`(可带 `?ns=&db=&user=&pass=`) |
+| `--database-url` / `--surreal-url` | `AIKUN_DATABASE_URL` / `AIKUN_SURREAL_URL`(等价,后者优先) | `surrealkv://./data/data` | SurrealDB 端点:嵌入式 `surrealkv://<目录>`(进程内零网络,速度优先)/ 纯内存 `mem://`(最快,重启丢数据)/ 远程 `ws://` `wss://` `http://` `https://`(可带 `?ns=&db=&user=&pass=`) |
 | `--database-url` | `AIKUN_DATABASE_URL` | (过渡期) | 旧 SQLite 库位置:迁移工具 `aikun-migrate` 读取;且 `AIKUN_SURREAL_URL` 未显式设置时,主程序据此推导嵌入式数据目录(旧库同目录)。**显式配置 `AIKUN_SURREAL_URL` 后方可删除本变量**(见「数据与升级」) |
 | `--health-check-interval` | `AIKUN_HEALTH_CHECK_INTERVAL` | `30` | 健康检查间隔(秒) |
 | `--max-retries` | `AIKUN_MAX_RETRIES` | `3` | 单请求最大渠道尝试次数 |
@@ -231,8 +231,8 @@ crates/
 
 ## 数据与升级
 
-- v0.6 起存储为 **SurrealDB**(默认嵌入式 SurrealKV,数据目录默认 `./data/aikun.surreal/`;容器内 `/data/aikun.surreal`)。schema 在启动时自动初始化(幂等);**升级前建议先备份数据目录**。
-  v0.6–0.7 旧部署的工作目录 `./aikun.surreal/` 会被自动沿用(不迁移);要收进 `data/` 就把目录移动过来或显式设置 `AIKUN_SURREAL_URL`
+- v0.6 起存储为 **SurrealDB**(默认嵌入式 SurrealKV,数据目录默认 `./data/data/`;容器内 `/data/data`)。schema 在启动时自动初始化(幂等);**升级前建议先备份数据目录**。
+  v0.6–0.7 旧默认位置(`./data/aikun.surreal/`、`./aikun.surreal/`)会被自动沿用(不迁移);要切换新默认(`./data/data/`)就把目录改名过来或显式设置 `AIKUN_SURREAL_URL`
 - 备份:嵌入式部署停机后整目录拷贝,或 `surreal export`(远程部署用 `surreal export` / `surreal import`)
 - 降级保护:库的 schema 版本(元数据表 `store_meta:schema.version`,替代旧 `PRAGMA user_version`)比二进制新时拒绝启动,防止旧代码读错新格式数据
 - **从 0.5.x(SQLite)升级**:停旧服务后执行一次迁移工具(幂等可重跑,完成后打印各表行数对照):

@@ -139,7 +139,7 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     (
         "surreal-url",
         "AIKUN_SURREAL_URL",
-        "SurrealDB 端点(未设默认嵌入式 surrealkv://./data/aikun.surreal;远程如 ws://host:8000,可带 ?ns=&db=&user=&pass=)",
+        "SurrealDB 端点(未设默认嵌入式 surrealkv://./data/data(mem://=纯内存最快,重启丢数据);远程如 ws://host:8000,可带 ?ns=&db=&user=&pass=)",
     ),
     (
         "health-check-interval",
@@ -496,17 +496,19 @@ fn resolve_surreal_endpoint(
 /// 目录移动过来(或显式设 AIKUN_SURREAL_URL)。多级目录由 SurrealKV
 /// 引擎自动创建(实测),无需手工 mkdir。
 fn default_surreal_url() -> String {
-    if std::path::Path::new("./aikun.surreal").exists()
-        && !std::path::Path::new("./data/aikun.surreal").exists()
-    {
-        tracing::info!(
-            "检测到旧默认数据目录 ./aikun.surreal,继续沿用(不迁移);\
-             如需收进 data/ 请移动目录或显式设置 AIKUN_SURREAL_URL"
-        );
-        "surrealkv://./aikun.surreal".to_string()
-    } else {
-        "surrealkv://./data/aikun.surreal".to_string()
+    // 兼容沿用(升级不落回空库):按世代依次探测旧默认位置,只有旧位置
+    // 存在且新默认(data/data)不存在时才沿用;要切换就把目录改名或
+    // 显式设 AIKUN_SURREAL_URL。
+    const NEW_DEFAULT: &str = "surrealkv://./data/data";
+    for legacy in ["./data/aikun.surreal", "./aikun.surreal"] {
+        if std::path::Path::new(legacy).exists() && !std::path::Path::new("./data/data").exists() {
+            tracing::info!(
+                "检测到旧默认数据目录 {legacy},继续沿用(不迁移);                 如需切换新默认请把目录改名为 data/data 或显式设置 AIKUN_SURREAL_URL"
+            );
+            return format!("surrealkv://{legacy}");
+        }
     }
+    NEW_DEFAULT.to_string()
 }
 
 fn sqlite_dir_of(database_url: &str) -> Option<String> {
@@ -678,8 +680,8 @@ mod tests {
         if !std::path::Path::new("./aikun.surreal").exists() {
             assert_eq!(
                 default_surreal_url(),
-                "surrealkv://./data/aikun.surreal",
-                "全新部署 → data/ 目录"
+                "surrealkv://./data/data",
+                "全新部署 → data/data"
             );
         }
         // 常量锁定:两处路径不漂移

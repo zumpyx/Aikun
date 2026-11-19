@@ -42,7 +42,7 @@ WORKDIR /data
 # 容器内必须监听 0.0.0.0 才能接受宿主机转发;嵌入式 SurrealKV 数据目录
 # 落在 /data 卷中持久化(阶段 S 默认切换,docs/surreal-migration.md §二)。
 ENV AIKUN_HOST=0.0.0.0:3000 \
-    AIKUN_SURREAL_URL=surrealkv:///data/aikun.surreal
+    AIKUN_SURREAL_URL=surrealkv:///data/data
 EXPOSE 3000
 VOLUME ["/data"]
 
