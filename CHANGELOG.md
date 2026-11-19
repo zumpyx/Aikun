@@ -81,6 +81,25 @@
   `/data/aikun.surreal`);迁移工具默认目标同步。
 
 ## [Unreleased]
+### 修复(ZCode 上游客户端校验破解:chat 3012 / claim 3007)
+
+国内账号实测两道校验(2026-11-19,炼化自 Zcode2Api):
+- **chat 405+3012 "client not supported"**:上游做**内容检查**——
+  请求体必须带官方 3 个 system 身份块(23mac.har,恰 3 块,第 4 块
+  3012)+ `metadata.user_id` 设备 JSON + string content 转 text block +
+  末块 cache_control ephemeral。zcode 适配器 `prepare_request` 实现
+  body 伪装(客户端 system 拼进官方末块);extra_headers 补会话族头
+  (x-zcode-query-source/x-session-type/x-query-id/x-request-id)。
+  实测:200 + 真实推理通过。
+- **claim 3007 captcha verify failed**:领取需阿里验证码——嵌入
+  Zcode2Api 的 node solver(happy-dom 跑设备指纹 VM,solver.js+
+  package.json include_str! 进二进制,首次使用释放到
+  `<data>/captcha_node/` 并 npm install,需 node ≥ 20;pe-stall 重试)。
+  claim 带 X-Aliyun-Captcha-Verify-Param 头,3007 换 param 重试。
+  实测:领取成功(ZCODE GLOBAL BUILD,3 亿 token,glm-5.3-flash,
+  免费 23:00 窗口生效)。`AIKUN_ZCODE_CAPTCHA=skip` 为测试钩子。
+
+## [Unreleased]
 ### 变更(领取闲时额度 = 国内专属)
 
 - **「领取闲时额度」按钮只在国内 ZCode 页**(用户口径:免费额度只有

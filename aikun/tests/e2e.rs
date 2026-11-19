@@ -2350,6 +2350,7 @@ async fn providers_export_import_roundtrip() {
 async fn zcode_oauth_login_flow() {
     let oauth = MockUpstream::start().await;
     let app = TestApp::spawn_with_env(&[
+        ("AIKUN_ZCODE_CAPTCHA", "skip"),
         (
             "AIKUN_ZCODE_OAUTH_BASE",
             &format!("http://{}", oauth.base.trim_start_matches("http://")),
@@ -2467,6 +2468,7 @@ async fn zcode_oauth_login_flow() {
 async fn zcode_claim_free_quota() {
     let mock = MockUpstream::start().await;
     let app = TestApp::spawn_with_env(&[
+        ("AIKUN_ZCODE_CAPTCHA", "skip"),
         (
             "AIKUN_ZCODE_OAUTH_BASE",
             &format!("http://{}", mock.base.trim_start_matches("http://")),
@@ -2731,6 +2733,7 @@ async fn mcp_passthrough_end_to_end() {
 async fn providers_kind_filter_and_claim_tasks() {
     let mock = MockUpstream::start().await;
     let app = TestApp::spawn_with_env(&[
+        ("AIKUN_ZCODE_CAPTCHA", "skip"),
         (
             "AIKUN_ZCODE_OAUTH_BASE",
             &format!("http://{}", mock.base.trim_start_matches("http://")),
@@ -3026,6 +3029,7 @@ async fn proxy_pool_crud_and_channel_pick() {
 async fn zcode_oauth_login_cn_env() {
     let oauth = MockUpstream::start().await;
     let app = TestApp::spawn_with_env(&[
+        ("AIKUN_ZCODE_CAPTCHA", "skip"),
         (
             "AIKUN_ZCODE_OAUTH_BASE",
             &format!("http://{}", oauth.base.trim_start_matches("http://")),
@@ -3093,6 +3097,7 @@ async fn zcode_oauth_login_cn_env() {
 async fn zcode_oauth_login_cn_empty_email_falls_back() {
     let oauth = MockUpstream::start().await;
     let app = TestApp::spawn_with_env(&[
+        ("AIKUN_ZCODE_CAPTCHA", "skip"),
         (
             "AIKUN_ZCODE_OAUTH_BASE",
             &format!("http://{}", oauth.base.trim_start_matches("http://")),
@@ -3171,6 +3176,7 @@ async fn zcode_oauth_login_cn_empty_email_falls_back() {
 async fn zcode_account_info_fetch_and_backfill() {
     let mock = MockUpstream::start().await;
     let app = TestApp::spawn_with_env(&[
+        ("AIKUN_ZCODE_CAPTCHA", "skip"),
         (
             "AIKUN_ZCODE_OAUTH_BASE",
             &format!("http://{}", mock.base.trim_start_matches("http://")),

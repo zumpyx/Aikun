@@ -30,6 +30,20 @@ impl ZcodeClaimImpl {
         jwt: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<(u16, serde_json::Value), String> {
+        self.request_json_extra(method, base, path, jwt, body, &[])
+            .await
+    }
+
+    /// [`request_json`] + 额外头(claim 的阿里验证码头)。
+    async fn request_json_extra(
+        &self,
+        method: reqwest::Method,
+        base: &str,
+        path: &str,
+        jwt: &str,
+        body: Option<&serde_json::Value>,
+        extra: &[(&str, String)],
+    ) -> Result<(u16, serde_json::Value), String> {
         use aikun_channels::adapters::zcode::{billing_request_headers, device_mid_for};
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
@@ -41,6 +55,9 @@ impl ZcodeClaimImpl {
         let mut req = client.request(method, &url);
         for (k, v) in billing_request_headers(jwt, &mid, &rid) {
             req = req.header(k, v.as_str());
+        }
+        for (k, v) in extra {
+            req = req.header(*k, v.as_str());
         }
         if let Some(b) = body {
             req = req.json(b);
@@ -254,13 +271,50 @@ impl aikun_admin::admin_providers::ZcodeClaimPort for ZcodeClaimImpl {
 
     async fn claim_plan(&self, base: &str, jwt: &str, plan_id: &str) -> Result<bool, String> {
         use aikun_channels::adapters::zcode::CLAIM_PATH;
+        // 国内账号 claim 需要阿里验证码(3007;2026-11-19 实测,mint +
+        // 完整 billing 头 → 200)。Zcode2Api 口径:3007 重试时重新 mint。
         let body = serde_json::json!({"plan_id": plan_id});
-        let (status, resp) = self
-            .request_json(reqwest::Method::POST, base, CLAIM_PATH, jwt, Some(&body))
-            .await?;
-        // 401/403 带错误体 code(与 Zcode2Api 同口径);其余非 200 直接报。
+        let (mut status, mut resp) = (0u16, serde_json::Value::Null);
+        for attempt in 1..=2u8 {
+            // AIKUN_ZCODE_CAPTCHA=skip:测试钩子——不解验证码直接裸请求
+            // (e2e mock 上游不校验;生产勿用)。
+            let skip = std::env::var("AIKUN_ZCODE_CAPTCHA").as_deref() == Ok("skip");
+            let extra: Vec<(&str, String)> = if skip {
+                Vec::new()
+            } else {
+                match super::captcha::solve(base, 4).await {
+                    Ok((param, region)) => vec![
+                        ("X-Aliyun-Captcha-Verify-Param", param),
+                        ("X-Aliyun-Captcha-Verify-Region", region),
+                    ],
+                    // node/npm 不可用等环境问题:明确报出,不吞
+                    Err(e) => return Err(format!("captcha: {e}")),
+                }
+            };
+            let r = self
+                .request_json_extra(
+                    reqwest::Method::POST,
+                    base,
+                    CLAIM_PATH,
+                    jwt,
+                    Some(&body),
+                    &extra,
+                )
+                .await?;
+            status = r.0;
+            resp = r.1;
+            let code = resp["code"].as_i64().unwrap_or(-1);
+            if code != 3007 || attempt == 2 {
+                break;
+            }
+            tracing::debug!("claim {plan_id} code 3007(captcha 被拒),换新 param 重试");
+        }
         if status != 200 && status != 401 && status != 403 {
-            return Err(format!("claim HTTP {status}"));
+            return Err(format!(
+                "claim HTTP {status} code {} {}",
+                resp["code"].as_i64().unwrap_or(-1),
+                resp["msg"].as_str().unwrap_or_default()
+            ));
         }
         match resp["code"].as_i64() {
             Some(0) => Ok(true),

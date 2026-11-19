@@ -35,6 +35,9 @@ pub use billing::{
 pub use mcp::{MCP_FORWARDED_HEADERS, MCP_SERVER_PATH_PREFIX, MCP_SERVERS};
 
 use aikun_protocol::Protocol;
+use serde_json::Value;
+
+use crate::provider::Provider;
 
 use crate::ChannelAdapter;
 
@@ -94,6 +97,16 @@ impl ChannelAdapter for ZcodeAdapter {
         )
     }
 
+    /// 请求体伪装(3012 内容检查的破解,炼化自 Zcode2Api normalizeBody;
+    /// 2026-11-19 国内账号实测:缺失 → 405+3012 "client not supported"):
+    /// 官方 3 个 system 身份块(23mac.har,嵌入 system.json;恰好第 4 块
+    /// 会 3012)+ metadata.user_id 设备 JSON + string content 转 text
+    /// block + 末块 cache_control ephemeral。客户端 system 文本拼进官方
+    /// 最后一块(参考实现 splice 口径)。
+    fn prepare_request(&self, _provider: &Provider, _protocol: Protocol, body: &mut Value) {
+        normalize_body(body);
+    }
+
     fn extra_headers(&self, protocol: Protocol) -> Vec<(&'static str, String)> {
         if protocol != Protocol::Anthropic {
             return Vec::new();
@@ -117,8 +130,116 @@ impl ChannelAdapter for ZcodeAdapter {
             ("X-Client-Language", "en-US".to_string()),
             ("X-Client-Timezone", "Asia/Shanghai".to_string()),
             ("X-Os-Category", "Mac".to_string()),
+            // 会话族头(2026-11-19 国内账号实测必需:缺失 → 405):
+            // query-source/session-type 静态;query-id/request-id 进程级
+            // 随机(session-id 由上游按 device 聚合,同进程稳定即可)。
+            ("x-zcode-query-source", "main_turn".to_string()),
+            ("x-zcode-session-type", "main".to_string()),
+            ("x-query-id", mint_hex_uuid(0x51ed_270b)),
+            ("x-request-id", mint_hex_uuid(0x0fc1_ce77)),
         ]
     }
+}
+
+/// 进程级伪 UUID(时间熵 xorshift;本 crate 无 rand 依赖,上游对这两个
+/// 头只要求非空 UUID 形态,进程内稳定即可——session 语义由 device 维聚)。
+fn mint_hex_uuid(salt: u64) -> String {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<std::collections::HashMap<u64, String>> = OnceLock::new();
+    let cache = CACHE.get_or_init(std::collections::HashMap::new);
+    if let Some(v) = cache.get(&salt) {
+        return v.clone();
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs().wrapping_mul(salt))
+        .unwrap_or(0x9e37_79b9 ^ salt);
+    let mut x = nanos.rotate_left(32) ^ salt;
+    let hex: String = (0..32)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            format!("{:x}", x & 0xf)
+        })
+        .collect();
+    format!(
+        "{}-{}-4{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[13..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// 官方 system 身份块(23mac.har;恰 3 块——第 4 块 3012)。
+const ZCODE_SYSTEM: &str = include_str!("system.json");
+
+/// 会话/设备标识的确定性派生(FNV-1a;上游按 device 聚合 session,
+/// 稳定即可,与参考 SessionIDFor 同语义)。
+fn derived_hex(seed: &str, salt: u64) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ salt;
+    for b in seed.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("{h:016x}{h:016x}")
+}
+
+fn normalize_body(body: &mut Value) {
+    use serde_json::json;
+
+    // 1) messages:string content → text block
+    if let Some(msgs) = body["messages"].as_array_mut() {
+        for m in msgs.iter_mut() {
+            if let Some(text) = m["content"].as_str().map(str::to_string) {
+                m["content"] = json!([{ "type": "text", "text": text }]);
+            }
+        }
+    }
+
+    // 2) system:官方 3 块;客户端 system 文本拼进最后一块文本尾
+    let client_sys: Vec<String> = match &body["system"] {
+        Value::String(t) if !t.trim().is_empty() => vec![t.trim().to_string()],
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && !t.starts_with("x-anthropic-billing-header:"))
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    if let Ok(mut official) = serde_json::from_str::<Vec<Value>>(ZCODE_SYSTEM) {
+        if !client_sys.is_empty()
+            && let Some(last) = official.last_mut()
+            && let Some(t) = last["text"].as_str().map(str::to_string)
+        {
+            last["text"] = Value::String(format!("{t}\n\n{}", client_sys.join("\n\n")));
+        }
+        body["system"] = Value::Array(official);
+    }
+
+    // 3) cache_control ephemeral:最后一条非 system 消息的最后一个
+    //    content block
+    if let Some(msgs) = body["messages"].as_array_mut()
+        && let Some(last) = msgs.last_mut()
+        && let Some(blocks) = last["content"].as_array_mut()
+        && let Some(cb) = blocks.last_mut()
+    {
+        cb["cache_control"] = json!({ "type": "ephemeral" });
+    }
+
+    // 4) metadata.user_id = 设备 JSON(参考 23mac.har:字符串而非 sub)
+    // 设备 ID 在此层拿不到 JWT(发送层才有);用进程级稳定派生
+    let mid = mint_hex_uuid(0x6d69_6400);
+    let sid = derived_hex(&mid, 0x7369_6400);
+    body["metadata"] = json!({
+        "user_id": format!(
+            "{{\"device_id\":\"{mid}\",\"account_uuid\":\"\",\"session_id\":\"{sid}\"}}"
+        )
+    });
 }
 
 /// 绝对路径拼接:base 去尾斜杠后直接接 path(保留 base 自带 query 的场景
