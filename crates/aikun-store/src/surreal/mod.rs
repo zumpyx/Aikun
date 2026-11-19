@@ -62,7 +62,8 @@ pub const SUPPORTED_SCHEMA_VERSION: i64 = 1;
 /// 输入(见 `engine/any` 的 connect),二者由 [`Endpoint::parse`] 保证一致。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
-    /// Any 引擎可消费的连接地址(query 参数已剥离)。
+    /// Any 引擎可消费的连接地址(ns/db/user/pass 已剥离;`sync` 参数
+    /// 仅对嵌入式 SurrealKV 有意义,会拼回地址)。
     pub address: String,
     /// 命名空间(默认 [`DEFAULT_NAMESPACE`])。
     pub ns: String,
@@ -70,6 +71,12 @@ pub struct Endpoint {
     pub db: String,
     /// 远程 root 登录凭据(`?user=&pass=`;嵌入式/内存库忽略)。
     pub auth: Option<(String, String)>,
+    /// 落盘节奏(`?sync=`,仅 SurrealKV):`Some("60s")` 等时长 =
+    /// 仅快照模式(提交不 fsync,后台按间隔 flush;崩溃丢最近一个
+    /// 间隔内的写入,优雅关闭不丢)、`Some("every")` = 每次提交
+    /// fsync(最稳最慢)、`Some("never")` = 交给 OS。None = 引擎默认
+    /// (every)。
+    pub sync: Option<String>,
     /// 引擎类别(日志与校验用)。
     pub kind: EndpointKind,
 }
@@ -96,10 +103,13 @@ impl Endpoint {
     /// * `surrealkv://<目录路径>`(嵌入式;如 `surrealkv://./aikun.surreal`)
     /// * `mem://` 或 `memory`(进程内内存库,测试用)
     /// * `ws://host:port` / `wss://host:port` / `http://…` / `https://…`(远程)
-    /// * 以上任一形式可带 `?ns=<ns>&db=<db>[&user=<u>&pass=<p>]`
+    /// * 以上任一形式可带 `?ns=<ns>&db=<db>[&user=<u>&pass=<p>]`;
+    ///   嵌入式 SurrealKV 另支持 `&sync=<every|never|时长>`(落盘节奏,
+    ///   默认 every;`60s` = 仅快照模式,见 [`Endpoint::sync`])
     ///
-    /// 非法 scheme、空嵌入式路径、只给 user 不给 pass(或反之)均为
-    /// `Err`;调用方(config.rs)以此**拒绝启动**,不静默回退。
+    /// 非法 scheme、空嵌入式路径、只给 user 不给 pass(或反之)、非法
+    /// sync 值、对非嵌入式端点给 sync 均为 `Err`;调用方(config.rs)
+    /// 以此**拒绝启动**,不静默回退。
     pub fn parse(raw: &str) -> Result<Self, String> {
         let raw = raw.trim();
         let (base, query) = match raw.split_once('?') {
@@ -114,6 +124,7 @@ impl Endpoint {
         let mut db = DEFAULT_DATABASE.to_string();
         let mut user: Option<String> = None;
         let mut pass: Option<String> = None;
+        let mut sync: Option<String> = None;
         for pair in query.split('&').filter(|s| !s.is_empty()) {
             let (k, v) = pair
                 .split_once('=')
@@ -123,9 +134,17 @@ impl Endpoint {
                 "db" => db = v.to_string(),
                 "user" => user = Some(v.to_string()),
                 "pass" => pass = Some(v.to_string()),
+                "sync" => {
+                    if !is_valid_sync(v) {
+                        return Err(format!(
+                            "SurrealDB 端点 sync 参数非法:{v:?}(可用:every | never | 时长如 60s/5m/200ms)"
+                        ));
+                    }
+                    sync = Some(v.to_string());
+                }
                 other => {
                     return Err(format!(
-                        "SurrealDB 端点不支持 query 参数 {other:?}(可用:ns/db/user/pass)"
+                        "SurrealDB 端点不支持 query 参数 {other:?}(可用:ns/db/user/pass[/sync])"
                     ));
                 }
             }
@@ -149,7 +168,12 @@ impl Endpoint {
                     "surrealkv:// 端点缺少目录路径(如 surrealkv://./aikun.surreal)".to_string(),
                 );
             }
-            (EndpointKind::SurrealKv, format!("surrealkv://{path}"))
+            // sync 原样拼回地址:任何引擎按 URL 处理时它属于引擎自身参数
+            let address = match &sync {
+                Some(s) => format!("surrealkv://{path}?sync={s}"),
+                None => format!("surrealkv://{path}"),
+            };
+            (EndpointKind::SurrealKv, address)
         } else if lower.starts_with("ws://") {
             (EndpointKind::Ws, base.to_string())
         } else if lower.starts_with("wss://") {
@@ -163,11 +187,20 @@ impl Endpoint {
                 "SurrealDB 端点 scheme 非法:{base:?}(可用:surrealkv://<目录> | mem:// | ws:// | wss:// | http:// | https://)"
             ));
         };
+        // sync 只对嵌入式 SurrealKV 有意义:远程/内存端点带上会被
+        // 对端或引擎按未知参数处理,直接在配置面报清。
+        if sync.is_some() && kind != EndpointKind::SurrealKv {
+            return Err(
+                "SurrealDB 端点 sync 参数仅适用于嵌入式 surrealkv://(远程/内存端点无此概念)"
+                    .to_string(),
+            );
+        }
         Ok(Self {
             address,
             ns,
             db,
             auth,
+            sync,
             kind,
         })
     }
@@ -175,16 +208,28 @@ impl Endpoint {
     /// 嵌入式默认端点:工作目录下的 `./data/aikun.surreal` 目录
     /// (2026-11-18 起数据统一收进 data/;config.rs 对旧默认位置
     /// `./aikun.surreal` 有升级兼容,以二进制的 config 为准——本方法
-    /// 仅供无 config 上下文的调用方取"某个嵌入式默认")。
+    /// 仅供无 config 上下文的调用方取"某个嵌入式默认")。落盘节奏
+    /// 同 config 默认(仅快照,每分钟)。
     pub fn embedded_default() -> Self {
         Self {
-            address: "surrealkv://./data/aikun.surreal".to_string(),
+            address: "surrealkv://./data/aikun.surreal?sync=60s".to_string(),
             ns: DEFAULT_NAMESPACE.to_string(),
             db: DEFAULT_DATABASE.to_string(),
             auth: None,
+            sync: Some("60s".to_string()),
             kind: EndpointKind::SurrealKv,
         }
     }
+}
+
+/// `sync` 参数白名单:`every` / `never` / 时长(数字 + ms/s/m/h/d 单位,
+/// 与 SurrealDB 的 duration 解析口径一致,如 `60s`、`5m`、`200ms`)。
+fn is_valid_sync(v: &str) -> bool {
+    if v == "every" || v == "never" {
+        return true;
+    }
+    let digits_len = v.chars().take_while(|c| c.is_ascii_digit()).count();
+    digits_len > 0 && matches!(&v[digits_len..], "ms" | "s" | "m" | "h" | "d")
 }
 
 // ---------- 连接管理 ----------
@@ -232,6 +277,14 @@ impl SurrealHandle {
     /// 解析出的端点(日志/校验用)。
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
+    }
+
+    /// 显式优雅关闭(SDK `shutdown`:flush WAL → 关库)。仅快照模式
+    /// (`sync=<间隔>`)下这是"正常退出不丢数据"的保证——提交只在
+    /// 内存/WAL 缓冲,关闭前的最终 flush 把它们全部落盘;不调用则
+    /// 依赖 Drop 时机,进程退出路径上不可靠。关闭后的句柄不可再用。
+    pub async fn shutdown(&self) -> Result<(), surrealdb::Error> {
+        self.db.shutdown().await
     }
 
     /// 启动期 schema 工作:版本闸门(降级拒绝)→ 幂等 DDL → 首启写版本。
@@ -547,6 +600,113 @@ mod tests {
             Endpoint::parse("ws://h?shard=1").is_err(),
             "未知 query 参数拒绝"
         );
+    }
+
+    /// sync 参数:白名单(every/never/时长)透传拼回地址;非法值与
+    /// 非嵌入式端点拒绝。
+    #[test]
+    fn parse_sync_param() {
+        let ep = Endpoint::parse("surrealkv://./data/data?sync=60s").unwrap();
+        assert_eq!(ep.sync.as_deref(), Some("60s"));
+        assert_eq!(ep.address, "surrealkv://./data/data?sync=60s");
+
+        // 与 ns/db 共存(两者不进地址,只有 sync 拼回)
+        let ep = Endpoint::parse("surrealkv://./d?ns=x&db=y&sync=5m").unwrap();
+        assert_eq!((ep.ns.as_str(), ep.db.as_str()), ("x", "y"));
+        assert_eq!(ep.address, "surrealkv://./d?sync=5m");
+
+        assert_eq!(
+            Endpoint::parse("surrealkv://./d?sync=every")
+                .unwrap()
+                .sync
+                .as_deref(),
+            Some("every")
+        );
+        assert_eq!(
+            Endpoint::parse("surrealkv://./d?sync=never")
+                .unwrap()
+                .sync
+                .as_deref(),
+            Some("never")
+        );
+        assert_eq!(
+            Endpoint::parse("surrealkv://./d?sync=200ms")
+                .unwrap()
+                .sync
+                .as_deref(),
+            Some("200ms")
+        );
+
+        assert!(
+            Endpoint::parse("surrealkv://./d?sync=60").is_err(),
+            "缺单位"
+        );
+        assert!(
+            Endpoint::parse("surrealkv://./d?sync=fast").is_err(),
+            "非法值"
+        );
+        assert!(Endpoint::parse("surrealkv://./d?sync=").is_err(), "空值");
+        // 远程/内存端点无此概念
+        assert!(Endpoint::parse("ws://h?sync=60s").is_err());
+        assert!(Endpoint::parse("mem://?sync=60s").is_err());
+        // 未带 sync:None 且地址原样(引擎默认 every)
+        let ep = Endpoint::parse("surrealkv://./d").unwrap();
+        assert!(ep.sync.is_none());
+        assert_eq!(ep.address, "surrealkv://./d");
+    }
+
+    /// 仅快照模式端到端:`?sync=60s` 连接 → 写入(不落盘间隔内)→
+    /// 显式 shutdown(WAL flush)→ 重开同一目录数据仍在。这是
+    /// "优雅关闭零丢失"契约的可执行证明(崩溃窗口语义由引擎保证,
+    /// 不在测试可达范围)。
+    #[test]
+    fn snapshot_mode_shutdown_roundtrip() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime");
+                rt.block_on(async {
+                    let dir = std::env::temp_dir()
+                        .join(format!("aikun-snap-test-{}", std::process::id()));
+                    let _ = std::fs::remove_dir_all(&dir);
+                    let url = format!("surrealkv://{}?sync=60s", dir.display());
+
+                    let ep = Endpoint::parse(&url).unwrap();
+                    let h = SurrealHandle::connect(&ep)
+                        .await
+                        .expect("connect snapshot mode");
+                    h.ensure_schema().await.expect("schema");
+                    h.db()
+                        .query("CREATE store_meta:snap_probe SET version = $v")
+                        .bind(("v", SUPPORTED_SCHEMA_VERSION))
+                        .await
+                        .unwrap();
+                    // 60s 间隔内 shutdown:数据只能靠关闭时的最终 flush
+                    h.shutdown().await.expect("shutdown flush");
+
+                    let h2 = SurrealHandle::connect(&ep).await.expect("reopen");
+                    let mut resp = h2
+                        .db()
+                        .query("SELECT version FROM store_meta:snap_probe")
+                        .await
+                        .expect("reopen select");
+                    let rows: Vec<serde_json::Value> = resp.take(0).unwrap();
+                    let v = rows.first().and_then(|r| r["version"].as_i64());
+                    assert_eq!(
+                        v,
+                        Some(SUPPORTED_SCHEMA_VERSION),
+                        "shutdown flush 后重开可见"
+                    );
+                    h2.shutdown().await.ok();
+                    let _ = std::fs::remove_dir_all(&dir);
+                });
+            })
+            .expect("spawn big-stack thread")
+            .join()
+            .expect("join test thread");
     }
 
     /// 骨架级连通性验证:Any 引擎 + mem:// + ensure_schema + 版本闸门。

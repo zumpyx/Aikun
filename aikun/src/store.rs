@@ -20,6 +20,8 @@ pub struct AppStore {
     pub channels: Arc<dyn ChannelStore>,
     pub billing: Arc<dyn BillingStore>,
     pub cipher: KeyCipher,
+    /// 原始 SDK 句柄(优雅关闭用;三域能力共享同一连接)。
+    pub handle: SurrealHandle,
     /// 本实例序号(缓存一致性比对的 owner 维;单实例部署恒定,
     /// 测试多实例时不共享命中)。
     pub id: u64,
@@ -53,7 +55,7 @@ pub async fn init(config: &AppConfig) -> Result<AppStore, String> {
     let identity = Arc::new(SurrealIdentity::new(handle.clone()));
     let cipher = crate::crypto::cipher_from_config(config);
     let channels = Arc::new(SurrealChannels::new(handle.clone(), cipher.clone()));
-    let billing = Arc::new(SurrealBilling::new(handle));
+    let billing = Arc::new(SurrealBilling::new(handle.clone()));
 
     // 价格表为空时播种内置默认价(空表→非空之间的中断留给下次启动)。
     match billing.seed_default_prices_if_empty().await {
@@ -81,8 +83,23 @@ pub async fn init(config: &AppConfig) -> Result<AppStore, String> {
         channels,
         billing,
         cipher,
+        handle,
         id: STORE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     })
+}
+
+impl AppStore {
+    /// 优雅关闭:flush WAL(仅快照模式下把内存中的已提交写入全部落盘,
+    /// 见 `Endpoint::sync` 文档)→ 关库。main 在 HTTP 排空后调用;
+    /// 之后任何写都会被 SDK 以 Shutdown 拒绝。
+    pub async fn shutdown(&self) {
+        match self.handle.shutdown().await {
+            Ok(()) => tracing::info!("SurrealDB 已优雅关闭(数据已落盘)"),
+            Err(e) => {
+                tracing::error!("SurrealDB 优雅关闭失败(仅快照模式下最后一段写入可能丢失): {e}")
+            }
+        }
+    }
 }
 
 /// 库中没有 role='admin' 的用户时播种默认 admin(密码只打印一次)。

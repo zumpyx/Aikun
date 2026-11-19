@@ -6,6 +6,21 @@
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
 ## [Unreleased]
+### 变更(数据库)
+
+- **默认嵌入式 SurrealKV 改为仅快照模式(速度优先)**:默认端点
+  `surrealkv://./data/data` → `surrealkv://./data/data?sync=60s`(SurrealDB
+  4.0 引擎原生 `sync` 参数)。提交不再逐条 fsync,后台每 60 秒落盘一次;
+  **正常停止(Ctrl-C/SIGTERM)在 HTTP 排空后显式关库**(flush WAL →
+  close,15s 兜底),已提交写入全部落盘、零丢失;仅崩溃/断电可能丢
+  最近一分钟内的写入(调用日志/用量明细级——渠道与反代凭证靠优雅
+  关闭保全)。落盘节奏可调:`?sync=every`(全持久化,旧行为)/
+  `?sync=never` / `?sync=5m` 等时长;`mem://` 纯内存与远程端点切换
+  不受影响(sync 参数仅嵌入式有效,给远程端点会拒绝启动)。端点
+  解析白名单新增 sync(非法值/非嵌入式直接拒绝启动);新增
+  `snapshot_mode_shutdown_roundtrip` 单测证明"shutdown flush 后重开
+  可见"。旧默认目录(`./data/aikun.surreal`/`./aikun.surreal`)沿用
+  分支同样带上 `?sync=60s`。
 ### 新增(ZCode 订阅/额度/重置)
 
 - **账号信息弹窗(订阅 + 5h/周额度 + 重置次数)**:反代页「账号信息」

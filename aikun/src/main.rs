@@ -352,6 +352,15 @@ async fn async_main() {
     .with_graceful_shutdown(shutdown_signal(shutdown_token))
     .await
     .expect("Server failed");
+
+    // HTTP 排空后显式关库:flush WAL → close。仅快照模式(sync=<间隔>,
+    // 默认配置)下这是"正常重启零丢失"的保证——已提交但还在内存/WAL
+    // 缓冲的写入在此全部落盘;不调用则依赖 Drop 时机,进程退出路径上
+    // 不可靠。上游关库自带超时语义,这里再兜 15s 防拖死退出。
+    match tokio::time::timeout(std::time::Duration::from_secs(15), store.shutdown()).await {
+        Ok(()) => {}
+        Err(_) => tracing::error!("SurrealDB 优雅关闭超时(15s),仅快照模式下最后一段写入可能丢失"),
+    }
 }
 
 /// Resolve when a shutdown signal arrives: Ctrl-C (SIGINT) or SIGTERM (the

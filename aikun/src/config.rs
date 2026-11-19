@@ -15,11 +15,12 @@ pub struct AppConfig {
     pub database_url: String,
     /// SurrealDB 连接端点(阶段 S):嵌入式 `surrealkv://<目录>` /
     /// 远程 `ws://`/`wss://`/`http://`/`https://`,可带
-    /// `?ns=&db=&user=&pass=`。未设置 = 嵌入式 SurrealKV 默认
-    /// `surrealkv://./data/aikun.surreal`(数据统一收进 `data/` 目录;
-    /// 旧默认位置 `./aikun.surreal` 存在时自动沿用,见
-    /// [`default_surreal_url`])。解析与校验见
-    /// `aikun_store::surreal::Endpoint::parse`(非法即拒绝启动)。
+    /// `?ns=&db=&user=&pass=`;嵌入式另支持 `&sync=<every|never|时长>`
+    /// (落盘节奏)。未设置 = 嵌入式 SurrealKV 默认
+    /// `surrealkv://./data/data?sync=60s`(仅快照:每分钟落盘,优雅
+    /// 关闭不丢数据,崩溃丢最近一分钟;数据统一收进 `data/` 目录;
+    /// 旧默认位置存在时自动沿用,见 [`default_surreal_url`])。解析
+    /// 与校验见 `aikun_store::surreal::Endpoint::parse`(非法即拒绝启动)。
     pub surreal_url: String,
     pub health_check_interval: u64, // seconds
     pub max_retries: u32,
@@ -134,12 +135,12 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     (
         "database-url",
         "AIKUN_DATABASE_URL",
-        "数据库端点(与 surreal-url 等价,surreal-url 优先):surrealkv://<目录> 或远程 ws:// 等;sqlite:// 旧值=源库位置随迁",
+        "数据库端点(与 surreal-url 等价,surreal-url 优先):surrealkv://<目录>[?sync=60s] 或远程 ws:// 等;sqlite:// 旧值=源库位置随迁",
     ),
     (
         "surreal-url",
         "AIKUN_SURREAL_URL",
-        "SurrealDB 端点(未设默认嵌入式 surrealkv://./data/data(mem://=纯内存最快,重启丢数据);远程如 ws://host:8000,可带 ?ns=&db=&user=&pass=)",
+        "SurrealDB 端点(未设默认 surrealkv://./data/data?sync=60s 仅快照:每分钟落盘、优雅关闭不丢、崩溃丢最近一分钟;mem://=纯内存;?sync=every 全持久化;远程如 ws://host:8000 可带 ?ns=&db=&user=&pass=)",
     ),
     (
         "health-check-interval",
@@ -306,7 +307,7 @@ impl AppConfig {
                 // 非默认位置(如 docker 卷挂载)时,嵌入式 SurrealKV 目录
                 // 取旧库同目录,数据位置随迁、不落回工作目录。
                 if let Some(dir) = sqlite_dir_of(&config.database_url) {
-                    config.surreal_url = format!("surrealkv://{dir}/aikun.surreal");
+                    config.surreal_url = format!("surrealkv://{dir}/aikun.surreal?sync=60s");
                 }
             }
             EndpointChoice::Default => {}
@@ -499,13 +500,17 @@ fn default_surreal_url() -> String {
     // 兼容沿用(升级不落回空库):按世代依次探测旧默认位置,只有旧位置
     // 存在且新默认(data/data)不存在时才沿用;要切换就把目录改名或
     // 显式设 AIKUN_SURREAL_URL。
-    const NEW_DEFAULT: &str = "surrealkv://./data/data";
+    // 仅快照模式(2026-11-20 用户裁决):提交不 fsync、每分钟后台落盘
+    // 一次——最重要的数据(渠道/反代凭证)靠优雅关闭的最终 flush 保住
+    // 全量,崩溃最多丢最近一分钟的调用日志/用量明细。要全持久化就显式
+    // 设 ?sync=every(或去掉 sync)。
+    const NEW_DEFAULT: &str = "surrealkv://./data/data?sync=60s";
     for legacy in ["./data/aikun.surreal", "./aikun.surreal"] {
         if std::path::Path::new(legacy).exists() && !std::path::Path::new("./data/data").exists() {
             tracing::info!(
                 "检测到旧默认数据目录 {legacy},继续沿用(不迁移);                 如需切换新默认请把目录改名为 data/data 或显式设置 AIKUN_SURREAL_URL"
             );
-            return format!("surrealkv://{legacy}");
+            return format!("surrealkv://{legacy}?sync=60s");
         }
     }
     NEW_DEFAULT.to_string()
@@ -680,8 +685,8 @@ mod tests {
         if !std::path::Path::new("./aikun.surreal").exists() {
             assert_eq!(
                 default_surreal_url(),
-                "surrealkv://./data/data",
-                "全新部署 → data/data"
+                "surrealkv://./data/data?sync=60s",
+                "全新部署 → data/data(仅快照,每分钟落盘)"
             );
         }
         // 常量锁定:两处路径不漂移
