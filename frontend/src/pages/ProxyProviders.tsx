@@ -100,7 +100,7 @@ function AppPage({ appId }: { appId: AppId }) {
   const tasks = useQuery({
     queryKey: ['zcode-tasks'],
     queryFn: async () => (await api<{ tasks: ClaimTask[] }>('GET', '/api/providers/zcode/tasks')).data,
-    enabled: appId === 'zcode',
+    enabled: appId === 'zcode-cn',
   })
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: ['proxies'] })
@@ -223,7 +223,7 @@ function AppPage({ appId }: { appId: AppId }) {
 
   const claimAll = async () => {
     const targets = (list.data?.items ?? []).filter((p) => p.channel_kind === 'zcode')
-    if (targets.length === 0) return sonnerToast.info('没有可领取的 ZCode 订阅渠道')
+    if (targets.length === 0) return sonnerToast.info('没有可领取的国内 ZCode 订阅渠道')
     sonnerToast.info(`开始领取 ${targets.length} 个渠道的免费额度…`)
     for (const p of targets) await doClaim(p.id, p.name)
   }
@@ -276,13 +276,13 @@ function AppPage({ appId }: { appId: AppId }) {
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => void doExport()}>导出</Button>
             <Button variant="outline" onClick={() => setImportOpen(true)}>导入</Button>
-            {appId === 'zcode' && <Button onClick={() => void claimAll()}>全部领取免费额度</Button>}
             {appId.startsWith('zcode') && (
               <Button variant="outline" onClick={() => void startLogin()} disabled={login.state === 'waiting'}>
                 {login.state === 'waiting' ? '授权中…' : '在线登录'}
               </Button>
             )}
             <Button onClick={() => setBatchOpen(true)}>+ 批量添加</Button>
+            {appId === 'zcode-cn' && <Button onClick={() => void claimAll()}>领取闲时额度</Button>}
           </div>
 
           {login.state !== 'idle' && (
@@ -329,13 +329,13 @@ function AppPage({ appId }: { appId: AppId }) {
                     <TR>
                       <TH className="w-8"><Checkbox checked={allChecked} onChange={toggleAll} aria-label="全选" /></TH>
                       <TH>名称</TH><TH>类型</TH><TH>模型</TH><TH>状态</TH><TH>延迟</TH><TH>优先级</TH><TH>权重</TH>
-                      {appId === 'zcode' && <TH>上次领取</TH>}
+                      {appId === 'zcode-cn' && <TH>上次领取</TH>}
                       <TH>操作</TH>
                     </TR>
                   </THead>
                   <TBody>
                     {data.map((p) => {
-                      const t = appId === 'zcode' ? taskOf(p.id) : undefined
+                      const t = appId === 'zcode-cn' ? taskOf(p.id) : undefined
                       return (
                         <TR key={p.id} className={selected.has(p.id) ? 'bg-primary/5' : undefined}>
                           <TD><Checkbox checked={selected.has(p.id)} onChange={() => toggleOne(p.id)} aria-label={`选择 ${p.name}`} /></TD>
@@ -361,7 +361,7 @@ function AppPage({ appId }: { appId: AppId }) {
                             </TD>
                           )}
                           <TD>
-                            {p.channel_kind === 'zcode' ? (
+                            {appId === 'zcode-cn' && p.channel_kind === 'zcode' ? (
                               <div className="flex gap-1">
                                 <Button size="sm" variant="outline" disabled={claiming.has(p.id)} onClick={() => void doClaim(p.id, p.name)}>
                                   {claiming.has(p.id) ? '领取中…' : '领取'}
@@ -384,9 +384,9 @@ function AppPage({ appId }: { appId: AppId }) {
             </CardContent>
           </Card>
 
-          {appId === 'zcode' && (
+          {appId === 'zcode-cn' && (
             <p className="text-xs text-muted-foreground">
-              领取 = 领取官方免费额度(不自动到账):工作日窗口(晚 23:00–次日 09:00)3 亿 tokens,周末窗口(周五 23:00–周一 09:00,含周末全天)5 亿。
+              领取闲时额度(仅国内账号有;不自动到账):工作日窗口(晚 23:00–次日 09:00)3 亿 tokens,周末窗口(周五 23:00–周一 09:00,含周末全天)5 亿。
               服务端每日北京时间 07:10 自动领取(工作日早 7 点领当晚额度,周五领周末 5 亿;AIKUN_ZCODE_AUTO_CLAIM / AIKUN_ZCODE_CLAIM_HOUR 可调);
               API Key 形态(zai-plan / bigmodel-plan)无领取序列。
             </p>

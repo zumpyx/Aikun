@@ -4,9 +4,9 @@
 //! 每天在北京时间 `zcode_claim_hour` 点 10 分(默认 7:工作日早 7 点领取,
 //! 错开整点发放竞态)对全部活跃 zcode 渠道串行跑一遍领取序列(渠道间 2s
 //! 间隔,降低上游风控/限流压力——Zcode2Api 对 mass claim 的警告),结果
-//! 写 proxy_task 快照(source=auto),领取面板与管理日志可见。免费额度
-//! 口径(2026-11-19):工作日窗口(晚 23–09)3 亿,周末窗口(周五 23–
-//! 周一 09,含周末全天)5 亿;领取幂等(1003=已领取),每天跑即可。
+//! 写 proxy_task 快照(source=auto),领取面板与管理日志可见。闲时额度
+//! 口径(2026-11-19,仅国内账号有):工作日窗口(晚 23–09)3 亿,周末
+//! 窗口(周五 23–周一 09,含周末全天)5 亿;领取幂等(1003=已领取)。
 //! `AIKUN_ZCODE_AUTO_CLAIM=false` 可整体关闭。
 //!
 //! 只跑 `channel_kind = zcode`(JWT 订阅形态):zai-plan / bigmodel-plan
@@ -51,9 +51,14 @@ async fn run_once(store: &Arc<AppStore>, admin: &aikun_admin::AdminService) {
             return;
         }
     };
+    // 领取闲时额度只有国内账号有(用户口径 2026-11-19):note 前缀 [国内]
+    // 是登录/批量建渠道时写入的归组标记(账号信息回填保留)。
     let targets: Vec<String> = providers
         .into_iter()
-        .filter(|p| p.channel_kind.trim() == aikun_channels::adapters::zcode::KIND)
+        .filter(|p| {
+            p.channel_kind.trim() == aikun_channels::adapters::zcode::KIND
+                && p.note.trim().starts_with("[国内]")
+        })
         .map(|p| p.id)
         .collect();
     if targets.is_empty() {
