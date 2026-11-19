@@ -430,7 +430,10 @@ impl AdminProvidersService {
                 self.zcode_claim.fetch_quota(domestic, t).await,
             ),
             None => {
-                warnings.push("订阅与 5h/周额度未查询:该渠道无 monitor 业务 token(重新在线登录即可补全)".to_string());
+                warnings.push(
+                    "订阅与 5h/周额度未查询:该渠道无 monitor 业务 token(重新在线登录即可补全)"
+                        .to_string(),
+                );
                 (Ok(serde_json::Value::Null), Ok(serde_json::Value::Null))
             }
         };
