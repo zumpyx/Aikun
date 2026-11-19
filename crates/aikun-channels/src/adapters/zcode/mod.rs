@@ -69,10 +69,9 @@ impl ChannelAdapter for ZcodeAdapter {
 
     fn description(&self) -> &'static str {
         "智谱 ZCode 订阅渠道:API Key 填 ZCode 客户端 JWT(登录后从客户端复制),\
-         只勾选 Anthropic 协议。国内/国外双环境:国际(Z.ai 账号)Base 填\
-         https://zcode.z.ai;国内(智谱 BigModel 账号)Base 填\
-         https://zcode.bigmodel.cn(域名实测存在,路径族同构),两侧凭证互不通用。\
-         个人订阅额度与免费每日额度共用同一凭证,闲时(23:00-09:00)Flash 零计费"
+         只勾选 Anthropic 协议,Base URL 填 https://zcode.z.ai。国内/国外账号\
+         (z.ai / 智谱 BigModel)都打同一 API 域(实测 zcode.bigmodel.cn 的 API\
+         全部 301 不可用);凭证互不通用,免费窗口 Flash 零计费"
     }
 
     fn endpoint_path(&self, _protocol: Protocol) -> &'static str {

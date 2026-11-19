@@ -49,7 +49,7 @@ const APPS = {
     label: 'ZCode',
     kinds: 'zcode,bigmodel-plan',
     regionFilter: 'cn' as const,
-    desc: 'GLM Coding Plan·国内(智谱 BigModel):订阅 JWT(zcode.bigmodel.cn)与 API Key(open.bigmodel.cn);凭证与国际 z.ai 互不通用',
+    desc: 'GLM Coding Plan·国内(智谱 BigModel):订阅 JWT(API 走 zcode.z.ai)与 API Key(open.bigmodel.cn);凭证与国际 z.ai 互不通用',
   },
 } as const
 
@@ -59,9 +59,10 @@ const REGION_ROWS: { label: string; apps: AppId[] }[] = [
   { label: '国内', apps: ['zcode-cn'] },
 ]
 
-/** 渠道是否国内域(base 含 bigmodel)。 */
+/** 渠道是否国内(API 统一走 zcode.z.ai,分域看 kind/note 标记:
+ * bigmodel-plan 自带;zcode JWT 形态看 note 的 [国内] 前缀)。 */
 const isDomestic = (p: ProviderDetail) =>
-  `${p.anthropic_base_url ?? ''}${p.openai_base_url ?? ''}`.includes('bigmodel')
+  p.channel_kind === 'bigmodel-plan' || (p.note ?? '').trim().startsWith('[国内]')
 
 type AppId = keyof typeof APPS
 
@@ -409,9 +410,9 @@ const PROXY_PRESETS: { id: string; kind: string; name: string; website_url: stri
   {
     id: 'zcode-cn', kind: 'zcode', name: 'ZCode 订阅·国内', website_url: 'https://bigmodel.cn',
     docs_url: 'https://bigmodel.cn/glm-coding', protocols: ['anthropic'], default_protocol: 'anthropic',
-    openai_base_url: 'https://zcode.bigmodel.cn', anthropic_base_url: 'https://zcode.bigmodel.cn',
+    openai_base_url: 'https://zcode.z.ai', anthropic_base_url: 'https://zcode.z.ai',
     key_placeholder: 'ZCode 客户端 JWT(智谱 BigModel 国内账号),每行一个',
-    hint: '国内版客户端(「连接 BigModel」登录)复制 JWT;凭证与国际 z.ai 互不通用。',
+    hint: '国内版客户端(「连接 BigModel」登录)复制 JWT;API 同样走 zcode.z.ai(实测国内域 API 不可用),凭证与国际 z.ai 互不通用。',
     apps: ['zcode-cn'],
   },
   {
@@ -474,6 +475,7 @@ function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: b
         openai_base_url: preset.openai_base_url,
         anthropic_base_url: preset.anthropic_base_url,
         api_keys: keyList,
+        note: preset.kind === 'zcode' && preset.id === 'zcode-cn' ? '[国内] 手动添加' : undefined,
         proxy_url: proxyUrl,
         models: models.split(',').map((s) => s.trim()).filter(Boolean),
         priority: parseInt(priority, 10) || 0,

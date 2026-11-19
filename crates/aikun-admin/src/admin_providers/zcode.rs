@@ -168,9 +168,12 @@ impl AdminProvidersService {
                     .map(|n| n.trim().to_string())
                     .filter(|n| !n.is_empty())
                     .unwrap_or_else(|| format!("zcode-{}", random_hex6()));
-                // 建渠道 base 与登录账号体系同环境(凭证互不通用)
+                // API 端点统一走 zcode.z.ai(2026-11-19 实测:zcode.bigmodel.cn
+                // 的 API 路径全部 301 到 bigmodel.cn 营销页,不可用;OAuth 与
+                // API 同源,国内 BigModel 账号的 JWT 同样打 zcode.z.ai)。
+                // 国内标记进 note 前缀([国内],分页归组用;账号信息回填保留)。
                 let (base, origin_note) = if env == "cn" {
-                    ("https://zcode.bigmodel.cn", "国内 BigModel 账号")
+                    ("https://zcode.z.ai", "[国内] BigModel 账号")
                 } else {
                     ("https://zcode.z.ai", "国际 z.ai 账号")
                 };
@@ -189,7 +192,7 @@ impl AdminProvidersService {
                     model_mapping: Default::default(),
                     protocols: Some(vec!["anthropic".into()]),
                     default_protocol: Some("anthropic".into()),
-                    note: Some(format!("在线登录自动创建({origin_note},{email})")),
+                    note: Some(format!("{origin_note}|在线登录自动创建({email})")),
                     website_url: Some(
                         if env == "cn" {
                             "https://bigmodel.cn"
@@ -339,7 +342,12 @@ impl AdminProvidersService {
         let mut name_updated = false;
         let patch = super::ProviderPatch {
             note: Some(format!(
-                "账号信息:{}{}{}",
+                "{}账号信息:{}{}{}",
+                if row.note.trim().starts_with("[国内]") {
+                    "[国内] "
+                } else {
+                    ""
+                },
                 display.clone().unwrap_or_default(),
                 account_id
                     .as_ref()

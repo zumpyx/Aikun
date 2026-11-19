@@ -81,6 +81,18 @@
   `/data/aikun.surreal`);迁移工具默认目标同步。
 
 ## [Unreleased]
+### 修复(国内渠道"无法使用":API 域 301)
+
+- **根因**(2026-11-19 实测):`zcode.bigmodel.cn` 的全部 API 路径
+  301 → bigmodel.cn 营销页——国内域没有部署 zcode-plan API。国内
+  (BigModel 账号)登录建出的渠道 base 指向该域,聊天/领取/账号
+  信息/健康检查全部失败。
+- **修复**:国内渠道 API base 统一改回 `https://zcode.z.ai`(OAuth
+  与 API 同源,账号体系差异只在登录侧);国内标记移到渠道 note
+  前缀 `[国内]`(登录建渠道写入、账号信息回填保留、批量添加国内
+  预设同),应用中心国内页按 note 前缀归组(base 不再区分)。
+
+## [Unreleased]
 ### 变更(账号 = token 唯一必需 + 一键获取账号信息 + 手动备注)
 
 用户裁决(2026-11-19):账号必须的部分只有 token;名称/账号 id 添加后

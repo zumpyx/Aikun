@@ -3065,7 +3065,17 @@ async fn zcode_oauth_login_cn_env() {
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["status"], "ready");
     let base = v["provider"]["anthropic_base_url"].as_str().unwrap();
-    assert_eq!(base, "https://zcode.bigmodel.cn", "国内登录建国内渠道");
+    assert_eq!(
+        base, "https://zcode.z.ai",
+        "国内登录 API 也走 zcode.z.ai(bigmodel.cn 不可用)"
+    );
+    assert!(
+        v["provider"]["note"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("[国内]"),
+        "国内标记进 note 前缀"
+    );
 
     // init 请求体带 provider=bigmodel
     let reqs = oauth.requests();
