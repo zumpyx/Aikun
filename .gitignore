@@ -8,3 +8,6 @@
 *.log
 REVIEW.md
 aikun.surreal/
+
+# 运行数据(库文件/验证码 solver 安装;本地工作环境)
+data/
