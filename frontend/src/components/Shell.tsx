@@ -2,7 +2,7 @@
 import { NavLink, useNavigate } from 'react-router-dom'
 import {
   Activity, ArrowLeftRight, BookOpen, Coins, Gauge, Globe, KeyRound, ScrollText,
-  Settings2, Users, Zap, FlaskConical, Boxes,
+  Settings2, Users, Zap, Boxes,
 } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { Button } from '@/components/ui/button'
@@ -18,7 +18,6 @@ const NAV = [
   { to: '/proxies', label: '反代', icon: ArrowLeftRight, admin: true },
   { to: '/proxy-pool', label: '代理', icon: Globe, admin: true },
   { to: '/models', label: '模型', icon: Zap, admin: true },
-  { to: '/test', label: '测试', icon: FlaskConical, admin: true },
   { to: '/users', label: '用户', icon: Users, admin: true },
   { to: '/billing', label: '价格', icon: Activity, admin: true },
 ]

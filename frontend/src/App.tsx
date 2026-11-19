@@ -15,7 +15,6 @@ const Users = lazy(() => import('./pages/Users'))
 const Billing = lazy(() => import('./pages/Billing'))
 const Keys = lazy(() => import('./pages/Keys'))
 const Models = lazy(() => import('./pages/Models'))
-const Test = lazy(() => import('./pages/Test'))
 const Logs = lazy(() => import('./pages/Logs'))
 const Docs = lazy(() => import('./pages/Docs'))
 
@@ -59,7 +58,6 @@ function LoginGate() {
           <Route path="/users" element={<AdminRoute><Users /></AdminRoute>} />
           <Route path="/billing" element={<AdminRoute><Billing /></AdminRoute>} />
           <Route path="/models" element={<AdminRoute><Models /></AdminRoute>} />
-          <Route path="/test" element={<AdminRoute><Test /></AdminRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>

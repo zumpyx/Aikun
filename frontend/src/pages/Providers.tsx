@@ -558,6 +558,7 @@ export default function Providers() {
 
   return (
     <div className="space-y-4">
+      <ProxyGroupCard />
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xl font-bold">渠道管理(标准协议)</h2>
@@ -618,5 +619,80 @@ export default function Providers() {
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+
+// ---- ZCode 反代组卡片(整体作为一类渠道参与选路分级) ----
+
+function ProxyGroupCard() {
+  const qc = useQueryClient()
+  const proxies = useQuery({
+    queryKey: ['proxies'],
+    queryFn: async () => (await api<Page<ProviderDetail>>('GET', '/api/providers?category=proxy&limit=200')).data,
+  })
+  const [busy, setBusy] = useState(false)
+  const items = proxies.data?.items ?? []
+  if (items.length === 0) return null
+  const enabled = items.filter((p) => p.is_active)
+  const maxPrio = Math.max(...items.map((p) => p.priority))
+
+  // 整体启停 = 批量 bulk
+  const toggleAll = async (enable: boolean) => {
+    setBusy(true)
+    try {
+      const r = await api('POST', '/api/providers/bulk', { action: enable ? 'enable' : 'disable', ids: items.map((p) => p.id) })
+      if (r.ok) {
+        sonnerToast.success(`ZCode 反代已整体${enable ? '启用' : '禁用'}`)
+        void qc.invalidateQueries({ queryKey: ['proxies'] })
+        void qc.invalidateQueries({ queryKey: ['providers'] })
+      } else sonnerToast.error(errMsg(r))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // 组优先级平移:目标值作为组内最大优先级,保持组内相对顺序
+  const setGroupPriority = async () => {
+    const input = prompt(`设置 ZCode 组优先级(当前最高 ${maxPrio},组内保持相对顺序;数值越大越优先于其它渠道):`, String(maxPrio))
+    const target = parseInt(input ?? '', 10)
+    if (Number.isNaN(target)) return
+    setBusy(true)
+    try {
+      for (const p of items) {
+        const rel = maxPrio === 0 ? 0 : p.priority - maxPrio // ≤0 的相对差
+        const np = target + rel
+        if (np === p.priority) continue
+        const r = await api('PATCH', `/api/providers/${p.id}`, { priority: np })
+        if (!r.ok) { sonnerToast.error(`${p.name}: ${errMsg(r)}`); break }
+      }
+      sonnerToast.success(`组优先级已设为 ${target}(组内相对顺序不变)`)
+      void qc.invalidateQueries({ queryKey: ['proxies'] })
+      void qc.invalidateQueries({ queryKey: ['providers'] })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardContent className="flex flex-wrap items-center justify-between gap-3 p-3.5">
+        <div className="text-sm">
+          <span className="font-medium">ZCode 反代组</span>
+          <span className="ml-2 text-muted-foreground">
+            {items.length} 个账号 · 启用 {enabled.length} · 组内最高优先级 {maxPrio}
+          </span>
+          <span className="ml-2 text-xs text-muted-foreground">(整体与其它标准渠道按优先级统一选路;账号间分级在「反代」页管理)</span>
+        </div>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void setGroupPriority()}>组优先级</Button>
+          {enabled.length > 0 ? (
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => void toggleAll(false)}>整体禁用</Button>
+          ) : (
+            <Button size="sm" disabled={busy} onClick={() => void toggleAll(true)}>整体启用</Button>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   )
 }

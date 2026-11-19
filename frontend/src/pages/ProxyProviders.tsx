@@ -182,6 +182,8 @@ function AppPage({ appId }: { appId: AppId }) {
   const [claiming, setClaiming] = useState<Set<string>>(new Set())
   const [fetchingInfo, setFetchingInfo] = useState<Set<string>>(new Set())
   const [noteFor, setNoteFor] = useState<{ id: string; name: string; note: string } | null>(null)
+  const [testing, setTesting] = useState<string | null>(null)
+  const [editFor, setEditFor] = useState<{ id: string; name: string; priority: number; weight: number } | null>(null)
   const doClaim = async (id: string, name: string) => {
     setClaiming((prev) => new Set(prev).add(id))
     const r = await api<{ claimed: string[]; skipped: string[]; problems: string[] }>('POST', `/api/providers/${id}/zcode/claim`)
@@ -219,6 +221,22 @@ function AppPage({ appId }: { appId: AppId }) {
     if (r.data.plan_name) parts.push(`套餐 ${r.data.plan_name}`)
     sonnerToast.success(`${name}:${parts.join(' · ') || '已获取'}${r.data.name_updated ? '(名称已回填)' : ''}`)
     invalidate()
+  }
+
+  // 行内测试:真实对话(model-tests),模型取渠道第一个
+  const testModel = async (id: string, name: string, model: string) => {
+    setTesting(id)
+    try {
+      const r = await api<{ ok?: boolean; status?: number; error?: string; response?: unknown }>(
+        'POST', `/api/providers/${id}/model-tests`, { model, message: '回复两个字:成功', stream: false })
+      if (r.ok) {
+        const d = r.data
+        if (d.ok) sonnerToast.success(`${name}:模型调用成功`)
+        else sonnerToast.warning(`${name}:${d.error || `上游 ${d.status ?? ''}`}`)
+      } else sonnerToast.error(`${name} 测试失败:${errMsg(r)}`)
+    } finally {
+      setTesting(null)
+    }
   }
 
   const claimAll = async () => {
@@ -303,6 +321,7 @@ function AppPage({ appId }: { appId: AppId }) {
 
           {batchOpen && <BatchModal appId={appId} onOpenChange={setBatchOpen} />}
           {noteFor && <NoteModal target={noteFor} onDone={invalidate} onClose={() => setNoteFor(null)} />}
+          {editFor && <EditModal target={editFor} onDone={invalidate} onClose={() => setEditFor(null)} />}
           {importOpen && <ImportModal onOpenChange={setImportOpen} onDone={invalidate} />}
 
           {selected.size > 0 && (
@@ -361,19 +380,27 @@ function AppPage({ appId }: { appId: AppId }) {
                             </TD>
                           )}
                           <TD>
-                            {appId === 'zcode-cn' && p.channel_kind === 'zcode' ? (
-                              <div className="flex gap-1">
+                            <div className="flex flex-wrap gap-1">
+                              {appId === 'zcode-cn' && p.channel_kind === 'zcode' && (
                                 <Button size="sm" variant="outline" disabled={claiming.has(p.id)} onClick={() => void doClaim(p.id, p.name)}>
                                   {claiming.has(p.id) ? '领取中…' : '领取'}
                                 </Button>
+                              )}
+                              {p.channel_kind === 'zcode' && (
                                 <Button size="sm" variant="outline" disabled={fetchingInfo.has(p.id)} onClick={() => void fetchAccountInfo(p.id, p.name)}>
                                   {fetchingInfo.has(p.id) ? '获取中…' : '账号信息'}
                                 </Button>
-                              </div>
-                            ) : <span className="text-xs text-muted-foreground">-</span>}
-                            <Button size="sm" variant="ghost" className="mt-1" onClick={() => setNoteFor({ id: p.id, name: p.name, note: p.note ?? '' })}>
-                              备注
-                            </Button>
+                              )}
+                              <Button size="sm" variant="outline" disabled={testing === p.id} onClick={() => void testModel(p.id, p.name, (p.models ?? [])[0] ?? 'GLM-5.3-Flash')}>
+                                {testing === p.id ? '测试中…' : '测试'}
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={() => setEditFor({ id: p.id, name: p.name, priority: p.priority, weight: p.weight })}>
+                                编辑
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => setNoteFor({ id: p.id, name: p.name, note: p.note ?? '' })}>
+                                备注
+                              </Button>
+                            </div>
                           </TD>
                         </TR>
                       )
@@ -645,6 +672,54 @@ function NoteModal({ target, onDone, onClose }: { target: { id: string; name: st
             className="flex min-h-24 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm"
             value={note} onChange={(e) => setNote(e.target.value)}
             placeholder="账号标记 / 用途 / 备注……(「账号信息」一键获取会覆盖为最新摘要)" />
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={onClose}>取消</Button>
+            <Button type="submit" disabled={busy}>{busy ? '保存中…' : '保存'}</Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+
+// ---- 编辑(优先级/权重;账号间分级管理) ----
+
+function EditModal({ target, onDone, onClose }: { target: { id: string; name: string; priority: number; weight: number }; onDone: () => void; onClose: () => void }) {
+  const [priority, setPriority] = useState(String(target.priority))
+  const [weight, setWeight] = useState(String(target.weight))
+  const [busy, setBusy] = useState(false)
+  const submit = async () => {
+    setBusy(true)
+    try {
+      const r = await api('PATCH', `/api/providers/${target.id}`, {
+        priority: parseInt(priority, 10) || 0,
+        weight: parseFloat(weight) || 1.0,
+      })
+      if (r.ok) {
+        sonnerToast.success('已保存')
+        onDone()
+        onClose()
+      } else sonnerToast.error(errMsg(r))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent title={`编辑 · ${target.name}`}>
+        <form className="space-y-3.5" onSubmit={(e) => { e.preventDefault(); void submit() }}>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">优先级(大者先选)</label>
+              <Input type="number" value={priority} onChange={(e) => setPriority(e.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">权重(同级分流)</label>
+              <Input type="number" step="0.1" value={weight} onChange={(e) => setWeight(e.target.value)} />
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">同级优先级内按权重加权分流;数值越大越优先。</p>
           <div className="flex justify-end gap-2">
             <Button type="button" variant="outline" onClick={onClose}>取消</Button>
             <Button type="submit" disabled={busy}>{busy ? '保存中…' : '保存'}</Button>
