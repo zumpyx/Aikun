@@ -1,4 +1,5 @@
 .zcode/
+/data
 /target
 .env
 *.db
