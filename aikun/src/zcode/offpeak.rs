@@ -38,6 +38,8 @@ struct Ticket {
     ticket_id: String,
     task_id: String,
     state: String,
+    /// 最后已知的排队位置(-1=未知)。
+    position: i64,
 }
 
 static TICKETS: LazyLock<Mutex<HashMap<String, Ticket>>> =
@@ -105,12 +107,24 @@ async fn request_json(
     Ok((status, parsed))
 }
 
-/// 取号/复用(task_id 幂等;过期票换新 task)。
-async fn ensure_ticket(base: &str, jwt: &str, cache_key: &str) -> Result<Ticket, String> {
+/// 取号/复用(task_id 幂等;过期票换新 task)。`allow_take=false` 时只用
+/// 渠道已持有的票(诊断类调用不烧每日取号限额)。
+async fn ensure_ticket(
+    base: &str,
+    jwt: &str,
+    cache_key: &str,
+    allow_take: bool,
+) -> Result<Ticket, String> {
     if let Some(t) = TICKETS.lock().unwrap().get(cache_key)
         && matches!(t.state.as_str(), "queued" | "ready" | "active")
     {
         return Ok(t.clone());
+    }
+    if !allow_take {
+        return Err(
+            "off-peak 无可用票(诊断模式不取新号——取号每日有限额,留给真实流量;由真实请求或手动触发取号)"
+                .to_string(),
+        );
     }
     // 新 task(UUID 形态是硬要求,任意串 3001)
     let task_id = uuid::Uuid::new_v4().to_string();
@@ -151,6 +165,7 @@ async fn ensure_ticket(base: &str, jwt: &str, cache_key: &str) -> Result<Ticket,
         ticket_id: d["ticket_id"].as_str().unwrap_or_default().to_string(),
         task_id,
         state: d["state"].as_str().unwrap_or("queued").to_string(),
+        position: d["position"].as_i64().unwrap_or(-1),
     };
     if t.ticket_id.is_empty() {
         return Err("off-peak 取号响应缺 ticket_id".to_string());
@@ -162,9 +177,48 @@ async fn ensure_ticket(base: &str, jwt: &str, cache_key: &str) -> Result<Ticket,
     Ok(t)
 }
 
-/// off-peak chat 编排:取号 → (等待预算内)排队 → ready 后调用。
+/// 单次状态刷新(不轮询)。
+async fn refresh_ticket(base: &str, jwt: &str, t: &mut Ticket) -> Result<(), String> {
+    let (_status, body) = request_json(
+        reqwest::Method::POST,
+        base,
+        STATUS_PATH,
+        jwt,
+        Some(&serde_json::json!({ "ticket_ids": [t.ticket_id] })),
+        None,
+        None,
+    )
+    .await?;
+    if body["code"].as_i64() != Some(0) {
+        return Err(format!(
+            "off-peak 状态查询失败(code {})",
+            body["code"].as_i64().unwrap_or(-1)
+        ));
+    }
+    if let Some(tk) = body["data"]["tickets"].as_array().and_then(|a| a.first()) {
+        if let Some(s) = tk["state"].as_str() {
+            t.state = s.to_string();
+        }
+        if let Some(pos) = tk["position"].as_i64() {
+            t.position = pos;
+        }
+    }
+    Ok(())
+}
+
+/// off-peak chat 编排:取号(可选)→ (等待预算内)排队 → ready 后调用。
 /// 返回 (HTTP 响应, 排队耗时秒);上游 HTTP 状态原样透传由调用方判定。
-pub async fn chat(base: &str, jwt: &str, body: &Value) -> Result<(reqwest::Response, u64), String> {
+///
+/// `allow_take`:是否允许取**新**号。取号每日有限额(实测烧完次日北京
+/// 零点恢复)——真实转发流量传 true;诊断类调用(周期模型测试)传
+/// false 只用已有票,避免后台任务把一天的限额烧光(2026-11-21 实录:
+/// 30 分钟一轮 × 2 模型,当天即耗尽,三条车道全失败)。
+pub async fn chat(
+    base: &str,
+    jwt: &str,
+    body: &Value,
+    allow_take: bool,
+) -> Result<(reqwest::Response, u64), String> {
     let cache_key = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -172,7 +226,7 @@ pub async fn chat(base: &str, jwt: &str, body: &Value) -> Result<(reqwest::Respo
         h.finish().to_string()
     };
     let started = std::time::Instant::now();
-    let mut ticket = ensure_ticket(base, jwt, &cache_key).await?;
+    let mut ticket = ensure_ticket(base, jwt, &cache_key, allow_take).await?;
 
     // 排队等待(预算内;0=不等待)
     let budget = wait_budget_secs();
@@ -196,6 +250,9 @@ pub async fn chat(base: &str, jwt: &str, body: &Value) -> Result<(reqwest::Respo
             && let Some(s) = tk["state"].as_str()
         {
             ticket.state = s.to_string();
+            if let Some(pos) = tk["position"].as_i64() {
+                ticket.position = pos;
+            }
             TICKETS
                 .lock()
                 .unwrap()
@@ -208,7 +265,22 @@ pub async fn chat(base: &str, jwt: &str, body: &Value) -> Result<(reqwest::Respo
     }
 
     match ticket.state.as_str() {
-        "ready" | "active" => {}
+        "ready" | "active" => {
+            // 调用前刷新一次:ready 窗口仅 ~5 分钟,缓存里的 ready 可能已
+            // 过期——不刷新会烧一次 400 才发现。
+            refresh_ticket(base, jwt, &mut ticket).await?;
+            TICKETS
+                .lock()
+                .unwrap()
+                .insert(cache_key.clone(), ticket.clone());
+            if !matches!(ticket.state.as_str(), "ready" | "active") {
+                TICKETS.lock().unwrap().remove(&cache_key);
+                return Err(format!(
+                    "off-peak 票已失效(state={}),已丢弃待重取",
+                    ticket.state
+                ));
+            }
+        }
         "queued" => {
             let (_status, body) = request_json(
                 reqwest::Method::POST,

@@ -131,6 +131,7 @@ pub async fn probe_model(
     stream: bool,
     connect_timeout_secs: u64,
     ttfb_timeout_secs: u64,
+    offpeak_take: bool,
 ) -> ModelProbe {
     let body = build_probe_body(model, protocol, &messages, max_tokens, stream);
     let (resp, latency) = match send_request(
@@ -142,6 +143,7 @@ pub async fn probe_model(
         120,
         connect_timeout_secs,
         ttfb_timeout_secs,
+        offpeak_take,
     )
     .await
     {
@@ -468,6 +470,7 @@ async fn model_test_worker(
             false,
             config.connect_timeout_secs,
             config.ttfb_timeout_secs,
+            false, // 周期诊断不烧 off-peak 每日取号限额
         )
         .await;
         tested.fetch_add(1, Ordering::Relaxed);

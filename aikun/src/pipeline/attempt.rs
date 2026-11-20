@@ -109,6 +109,7 @@ pub(crate) async fn single_attempt(
                 state.config.request_timeout_secs,
                 state.config.connect_timeout_secs,
                 state.config.ttfb_timeout_secs,
+                true, // 真实转发允许 off-peak 取号(每日限额的正当消费者)
             )
             .await
         }

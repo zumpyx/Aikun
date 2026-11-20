@@ -1755,6 +1755,7 @@ impl providers_port::ProviderProbes for GatewayProbes {
             false,
             self.config.connect_timeout_secs,
             self.config.ttfb_timeout_secs,
+            true, // 手动测试允许 off-peak 取号(用户主动验证,值得花限额)
         )
         .await;
         providers_port::ModelProbeOutcome {
@@ -1820,6 +1821,7 @@ impl providers_port::ProviderProbes for GatewayProbes {
                 120,
                 config.connect_timeout_secs,
                 config.ttfb_timeout_secs,
+                false, // 诊断辅助不取新号(off-peak 每日限额留给真实流量)
             )
             .await
             {

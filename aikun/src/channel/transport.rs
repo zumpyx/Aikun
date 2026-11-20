@@ -231,6 +231,7 @@ pub async fn send_request(
     fallback_timeout_secs: u64,
     connect_timeout_secs: u64,
     ttfb_timeout_secs: u64,
+    offpeak_take: bool,
 ) -> Result<(reqwest::Response, f64), (Value, u16, f64)> {
     let start = Instant::now();
     // Streaming responses can run arbitrarily long — no overall timeout
@@ -265,7 +266,9 @@ pub async fn send_request(
         } else {
             provider.anthropic_base_url.trim()
         };
-        match crate::zcode::offpeak::chat(base, &provider.api_key, &request_body).await {
+        match crate::zcode::offpeak::chat(base, &provider.api_key, &request_body, offpeak_take)
+            .await
+        {
             Ok((resp, waited)) => {
                 if resp.status().is_success() {
                     let latency = start.elapsed().as_millis() as f64;
