@@ -2,7 +2,7 @@
 // 国际/国内 × 订阅JWT/APIKey 四种接入预设与免费额度领取任务面板;
 // WorkBuddy/Qoder 为占位协议子页;Z.AI Chat 待接入。
 // 批量启停/删除、导入导出随应用(kind 过滤);表单复用批量粘贴。
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, Navigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, errMsg, type Page } from '@/lib/api'
@@ -376,9 +376,14 @@ function AppPage({ appId }: { appId: AppId }) {
                                   账号信息
                                 </Button>
                               )}
-                              <Button size="sm" variant="outline" disabled={testing === p.id} onClick={() => void testModel(p.id, p.name, pickTestModel(p.models ?? []))}>
-                                {testing === p.id ? '测试中…' : '测试'}
-                              </Button>
+                              <TestMenu
+                                providerId={p.id}
+                                name={p.name}
+                                models={p.models ?? []}
+                                kind={p.channel_kind ?? ''}
+                                testing={testing === p.id}
+                                onTest={(m) => void testModel(p.id, p.name, m)}
+                              />
                               <Button size="sm" variant="outline" onClick={() => setEditFor({ id: p.id, name: p.name, priority: p.priority, weight: p.weight })}>
                                 编辑
                               </Button>
@@ -669,10 +674,61 @@ function NoteModal({ target, onDone, onClose }: { target: { id: string; name: st
 
 
 
-/** 行内测试默认模型:优先 flash(免费窗口可用;大杯需付费套餐,
- * 免费账号会 3009 并发拒绝)。 */
-function pickTestModel(models: string[]): string {
-  return models.find((m) => m.toLowerCase().includes('flash')) ?? models[0] ?? 'GLM-5.3-Flash'
+/** 行内测试菜单:逐模型发起测试;zcode 渠道按档位标注——名称含
+ * flash = 免费档(闲时免费桶,GLM-5.3-Flash 是免费 plan 唯一能力),
+ * 其余 = 订阅档(吃付费套餐/正常额度,无订阅时上游 1005/3009)。 */
+function TestMenu({
+  providerId, name, models, kind, testing, onTest,
+}: {
+  providerId: string
+  name: string
+  models: string[]
+  kind: string
+  testing: boolean
+  onTest: (model: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  const isZcode = kind === 'zcode'
+
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [open])
+
+  const list = models.length > 0 ? models : ['GLM-5.3-Flash']
+  return (
+    <div ref={ref} className="relative inline-block" data-testid={`test-menu-${providerId}`}>
+      <Button size="sm" variant="outline" disabled={testing} onClick={() => setOpen((v) => !v)}>
+        {testing ? '测试中…' : '测试 ▾'}
+      </Button>
+      {open && (
+        <div className="absolute right-0 z-30 mt-1 min-w-56 rounded-md border bg-card p-1 shadow-md">
+          <div className="px-2 py-1 text-[11px] text-muted-foreground">选模型测试 {name}</div>
+          {list.map((m) => {
+            const free = m.toLowerCase().includes('flash')
+            return (
+              <button
+                key={m}
+                type="button"
+                className="flex w-full items-center justify-between gap-3 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
+                onClick={() => { setOpen(false); onTest(m) }}
+              >
+                <span className="font-mono">{m}</span>
+                {isZcode && (free
+                  ? <Badge tone="success">免费</Badge>
+                  : <Badge tone="default">订阅</Badge>)}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ---- 账号信息(订阅 / 5h·周额度 / 重置次数) ----
