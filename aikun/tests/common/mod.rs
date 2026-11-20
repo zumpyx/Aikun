@@ -472,7 +472,12 @@ impl TestApp {
                     .send()
                     .await
                     .unwrap();
-                assert_eq!(resp.status(), 204);
+                // 204 = 删除;404 = 已被并发清理(夹具竞态,同效)
+                assert!(
+                    resp.status() == 204 || resp.status() == 404,
+                    "价格清理意外状态 {}",
+                    resp.status()
+                );
             }
         }
     }
