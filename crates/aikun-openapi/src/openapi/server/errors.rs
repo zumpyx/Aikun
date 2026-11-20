@@ -2942,6 +2942,80 @@ impl IntoResponse for AdminDeleteProxyResponse {
         }
     }
 }
+/// Response for `GET /api/providers/{id}/zcode/account-info` (operationId `adminZcodeAccountInfoCached`).
+pub enum AdminZcodeAccountInfoCachedResponse {
+    Ok(ZcodeAccountInfoCached),
+    BadRequest(Problem),
+    Unauthorized(Problem),
+    Forbidden(Problem),
+    NotFound(Problem),
+}
+impl IntoResponse for AdminZcodeAccountInfoCachedResponse {
+    fn into_response(self) -> ::axum::response::Response {
+        match self {
+            Self::Ok(body) => {
+                let mut response = (StatusCode::OK, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::BadRequest(body) => {
+                let mut response = (StatusCode::BAD_REQUEST, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/problem+json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::Unauthorized(body) => {
+                let mut response = (StatusCode::UNAUTHORIZED, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/problem+json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::Forbidden(body) => {
+                let mut response = (StatusCode::FORBIDDEN, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/problem+json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+            Self::NotFound(body) => {
+                let mut response = (StatusCode::NOT_FOUND, Json(body)).into_response();
+                let Ok(content_type) =
+                    ::axum::http::HeaderValue::from_bytes("application/problem+json".as_bytes())
+                else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                response
+                    .headers_mut()
+                    .insert(::axum::http::header::CONTENT_TYPE, content_type);
+                response
+            }
+        }
+    }
+}
 /// Response for `POST /api/providers/{id}/zcode/account-info` (operationId `adminZcodeAccountInfo`).
 pub enum AdminZcodeAccountInfoResponse {
     Ok(ZcodeAccountInfo),

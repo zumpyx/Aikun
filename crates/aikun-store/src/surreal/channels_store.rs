@@ -111,6 +111,17 @@ pub struct ProxyTaskRow {
     pub problems: Vec<String>,
 }
 
+/// zcode 渠道的账号信息缓存快照(每渠道一行;POST 获取即覆盖,
+/// GET 读——详情窗口先显缓存再按需拉新)。info 为序列化 JSON。
+#[derive(Debug, Clone)]
+pub struct ZcodeAccountRow {
+    pub provider_id: String,
+    /// ZcodeAccountInfo 的 JSON 序列化(原样透传)。
+    pub info: String,
+    /// RFC3339。
+    pub fetched_at: String,
+}
+
 /// zcode 渠道的 OAuth 家族业务 token(每渠道一行;monitor 域订阅与
 /// 5h/周额度查询的凭证。token 为库内密文——admin 层 KeyCipher 加密,
 /// store 只存不解)。
@@ -274,6 +285,15 @@ pub trait ChannelStore: Send + Sync {
         &self,
         key_hash: &str,
     ) -> Result<Option<String>, StoreError>;
+
+    /// zcode 账号信息缓存 UPSERT(POST 获取成功即覆盖刷新)。
+    async fn upsert_zcode_account(&self, row: ZcodeAccountRow) -> Result<(), StoreError>;
+
+    /// zcode 账号信息缓存读取(无则 None)。
+    async fn find_zcode_account(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<ZcodeAccountRow>, StoreError>;
 
     /// 代理池:新增(name/url/note;id 由实现生成)。URL 形态校验在 admin 层。
     async fn create_proxy(&self, row: NewProxyRow) -> Result<ProxyRow, StoreError>;
@@ -1739,6 +1759,53 @@ impl ChannelStore for SurrealChannels {
                     provider_id: j_str(r, "provider_id"),
                     business_token: token,
                     refreshed_at: j_str(r, "refreshed_at"),
+                })
+            }
+        }))
+    }
+
+    async fn upsert_zcode_account(&self, row: ZcodeAccountRow) -> Result<(), StoreError> {
+        // 数组 record id 定位 UPSERT(zcode_oauth 同款惯例)。
+        self.handle
+            .db()
+            .query(
+                "UPSERT type::record('zcode_account', [type::record('provider', $pid)]) SET
+                    provider_id = $pid,
+                    info = $info,
+                    fetched_at = time::now();",
+            )
+            .bind(("pid", row.provider_id.clone()))
+            .bind(("info", row.info.clone()))
+            .await
+            .map_err(qerr)?
+            .check()
+            .map_err(qerr)?;
+        Ok(())
+    }
+
+    async fn find_zcode_account(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<ZcodeAccountRow>, StoreError> {
+        let mut res = self
+            .handle
+            .db()
+            .query("SELECT * FROM zcode_account WHERE provider_id = $pid LIMIT 1")
+            .bind(("pid", provider_id))
+            .await
+            .map_err(qerr)?
+            .check()
+            .map_err(qerr)?;
+        let rows: Vec<serde_json::Value> = res.take(0).map_err(qerr)?;
+        Ok(rows.first().and_then(|r| {
+            let info = j_str(r, "info");
+            if info.is_empty() {
+                None
+            } else {
+                Some(ZcodeAccountRow {
+                    provider_id: j_str(r, "provider_id"),
+                    info,
+                    fetched_at: j_str(r, "fetched_at"),
                 })
             }
         }))

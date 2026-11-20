@@ -1599,6 +1599,28 @@ impl providers_port::ProviderStore for SurrealProviderStore {
             .await
             .map_err(|e| tracing::error!("SurrealProviderStore::find_provider_id_by_key_hash: {e}"))
     }
+
+    async fn upsert_zcode_account(&self, provider_id: &str, info_json: &str) -> Result<(), ()> {
+        self.store
+            .channels
+            .upsert_zcode_account(aikun_store::surreal::channels_store::ZcodeAccountRow {
+                provider_id: provider_id.to_string(),
+                info: info_json.to_string(),
+                fetched_at: String::new(),
+            })
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::upsert_zcode_account: {e}"))
+    }
+
+    async fn find_zcode_account(&self, provider_id: &str) -> Result<Option<(String, String)>, ()> {
+        Ok(self
+            .store
+            .channels
+            .find_zcode_account(provider_id)
+            .await
+            .map_err(|e| tracing::error!("SurrealProviderStore::find_zcode_account: {e}"))?
+            .map(|r| (r.info, r.fetched_at)))
+    }
 }
 
 /// 从单条上游 SSE 事件 data 提取增量文本(口径同

@@ -279,6 +279,10 @@ pub trait ProviderStore: Send + Sync + 'static {
     /// key_hash → 渠道 id(在线登录遇到重复 JWT 时,定位既有渠道回填
     /// 业务 token 而不是报 409)。
     async fn find_provider_id_by_key_hash(&self, key_hash: &str) -> Result<Option<String>, ()>;
+    /// zcode 账号信息缓存 UPSERT(POST 获取成功即覆盖刷新)。
+    async fn upsert_zcode_account(&self, provider_id: &str, info_json: &str) -> Result<(), ()>;
+    /// zcode 账号信息缓存读取(返回 (info JSON, fetched_at);无则 None)。
+    async fn find_zcode_account(&self, provider_id: &str) -> Result<Option<(String, String)>, ()>;
 }
 
 /// 一次连通性探测的输入(base_url 已按协议选定;api_key 为明文)。

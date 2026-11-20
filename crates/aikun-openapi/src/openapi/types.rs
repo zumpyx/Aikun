@@ -227,6 +227,72 @@ impl AsRef<str> for ZcodeLoginInitRequestEnv {
         self.as_str()
     }
 }
+///账号信息缓存快照(POST 获取即刷新;GET 读取)。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ZcodeAccountInfoCached {
+    ///最近一次成功获取的 RFC3339 时间;从未获取为 null
+    pub fetched_at: Option<String>,
+    ///缓存的账号信息;从未获取为 null
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub info: Option<Option<ZcodeAccountInfo>>,
+}
+/**token 查上游得到的账号信息聚合:billing/balance(免费额度桶)+
+coding-plan/reset/status(重置次数)+ 订阅与 5h/周额度(monitor 域,
+需在线登录补全的业务 token;批量粘贴 JWT 的渠道没有,对应字段
+为 null 且 plan_credentials=false)。name_updated = 是否把自动
+生成名替换成了账号标识(手动命名不覆盖)。
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ZcodeAccountInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    ///billing/balance 的 data 原始对象(套餐/额度桶,原样)
+    pub balance: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+    pub name_updated: bool,
+    ///是否已持有 monitor 域业务 token(在线登录补全过)
+    pub plan_credentials: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_name: Option<String>,
+    /**monitor 域 /api/monitor/usage/quota/limit 的 data 原样
+    ({level, limits:[...]},5 小时窗与每周窗各一条:usage/
+    remaining/percentage/nextResetTime)。无业务 token 或查询
+    失败为 null。
+    */
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub quota: Option<Option<serde_json::Value>>,
+    /**coding-plan/reset/status 的 data 原样:available_five_hour_resets /
+    available_week_resets(数组,元素含 expire_at)、latest_*_reset_history
+    (used_at)、has_unread_history。查询失败为 null(warnings 有说明)。
+    */
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub reset_status: Option<Option<serde_json::Value>>,
+    /**monitor 域 /api/biz/subscription/list 的 data 原样(订阅:
+    productId / productName / billingCycle / expireTime)。
+    无业务 token 或查询失败为 null。
+    */
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub subscription: Option<Option<serde_json::Value>>,
+    ///各子查询的失败说明(整体 200,子项降级为 null)
+    pub warnings: Vec<String>,
+}
 ///本人钱包(金额均元;日序列合并明细表与日聚合表,不重复计数)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Wallet {
@@ -2919,59 +2985,6 @@ pub struct UpsertPriceRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VersionInfo {
     pub version: String,
-}
-/**token 查上游得到的账号信息聚合:billing/balance(免费额度桶)+
-coding-plan/reset/status(重置次数)+ 订阅与 5h/周额度(monitor 域,
-需在线登录补全的业务 token;批量粘贴 JWT 的渠道没有,对应字段
-为 null 且 plan_credentials=false)。name_updated = 是否把自动
-生成名替换成了账号标识(手动命名不覆盖)。
-*/
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ZcodeAccountInfo {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub account_id: Option<String>,
-    ///billing/balance 的 data 原始对象(套餐/额度桶,原样)
-    pub balance: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display: Option<String>,
-    pub name_updated: bool,
-    ///是否已持有 monitor 域业务 token(在线登录补全过)
-    pub plan_credentials: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub plan_name: Option<String>,
-    /**monitor 域 /api/monitor/usage/quota/limit 的 data 原样
-    ({level, limits:[...]},5 小时窗与每周窗各一条:usage/
-    remaining/percentage/nextResetTime)。无业务 token 或查询
-    失败为 null。
-    */
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        default,
-        deserialize_with = "tri_state_serde::deserialize"
-    )]
-    pub quota: Option<Option<serde_json::Value>>,
-    /**coding-plan/reset/status 的 data 原样:available_five_hour_resets /
-    available_week_resets(数组,元素含 expire_at)、latest_*_reset_history
-    (used_at)、has_unread_history。查询失败为 null(warnings 有说明)。
-    */
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        default,
-        deserialize_with = "tri_state_serde::deserialize"
-    )]
-    pub reset_status: Option<Option<serde_json::Value>>,
-    /**monitor 域 /api/biz/subscription/list 的 data 原样(订阅:
-    productId / productName / billingCycle / expireTime)。
-    无业务 token 或查询失败为 null。
-    */
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        default,
-        deserialize_with = "tri_state_serde::deserialize"
-    )]
-    pub subscription: Option<Option<serde_json::Value>>,
-    ///各子查询的失败说明(整体 200,子项降级为 null)
-    pub warnings: Vec<String>,
 }
 ///OAuth 授权流已发起;authorize_url 交给浏览器打开。
 #[derive(Debug, Clone, Deserialize, Serialize)]

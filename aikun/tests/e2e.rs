@@ -3292,9 +3292,25 @@ async fn zcode_account_info_fetch_and_backfill() {
     let row = &v["items"][0];
     assert_eq!(row["name"], "user@z.ai", "名称回填为账号标识");
     assert!(
-        row["note"].as_str().unwrap_or("").contains("acc-123"),
-        "note 含账号 id"
+        !row["note"].as_str().unwrap_or("").contains("acc-123"),
+        "note 不再写账号摘要(2026-11-20 改版:名称即备注,note 只留归组标记)"
     );
+
+    // GET 缓存读:POST 已持久化,fetched_at + info 都在
+    let r = app
+        .client()
+        .get(format!(
+            "{}/api/providers/{pid}/zcode/account-info",
+            app.base
+        ))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "GET 缓存 200");
+    let cached: Value = r.json().await.unwrap();
+    assert!(cached["fetched_at"].as_str().is_some(), "有拉取时间");
+    assert_eq!(cached["info"]["account_id"], "acc-123", "缓存含账号信息");
 
     // 手动命名不被覆盖:改名后再获取,保持手动名
     let r = app

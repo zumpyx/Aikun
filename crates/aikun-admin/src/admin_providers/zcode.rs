@@ -5,8 +5,9 @@
 //! 的 zcode 专属方法都在这里;渠道 CRUD/导入导出等通用面见 `mod.rs`。
 
 use aikun_openapi::openapi::server::errors::{
-    AdminListZcodeTasksResponse, AdminZcodeAccountInfoResponse, AdminZcodeClaimQuotaResponse,
-    AdminZcodeLoginInitResponse, AdminZcodeLoginPollResponse, AdminZcodeResetQuotaResponse,
+    AdminListZcodeTasksResponse, AdminZcodeAccountInfoCachedResponse,
+    AdminZcodeAccountInfoResponse, AdminZcodeClaimQuotaResponse, AdminZcodeLoginInitResponse,
+    AdminZcodeLoginPollResponse, AdminZcodeResetQuotaResponse,
 };
 use aikun_openapi::openapi::types::{
     AdminZcodeClaimResult, ProxyTaskList, ProxyTaskRecord, ProxyTaskRecordSource, ZcodeAccountInfo,
@@ -477,27 +478,12 @@ impl AdminProvidersService {
             .and_then(|a| a.first())
             .and_then(|p| p["name"].as_str())
             .map(str::to_string);
-        // 回填:名称仅当仍是自动生成前缀(手动命名不覆盖);摘要进 note
-        //(用户裁决:备注可手动改,一键获取会覆盖为最新摘要)。
+        // 回填(2026-11-20 改版):**只回填名称**——列表名称即备注
+        // (自由修改),自动生成名 zcode- 前缀才替换为账号标识;note 不再
+        // 写摘要(仅保留 [国内] 归组标记,账号信息的持久化改走
+        // zcode_account 缓存侧表)。
         let mut name_updated = false;
         let patch = super::ProviderPatch {
-            note: Some(format!(
-                "{}账号信息:{}{}{}",
-                if row.note.trim().starts_with("[国内]") {
-                    "[国内] "
-                } else {
-                    ""
-                },
-                display.clone().unwrap_or_default(),
-                account_id
-                    .as_ref()
-                    .map(|a| format!(" id={a}"))
-                    .unwrap_or_default(),
-                plan_name
-                    .as_ref()
-                    .map(|p| format!(" 套餐={p}"))
-                    .unwrap_or_default(),
-            )),
             name: if row.name.trim().starts_with("zcode-") {
                 let picked = display.clone().or_else(|| account_id.clone());
                 if picked.is_some() {
@@ -510,7 +496,7 @@ impl AdminProvidersService {
             ..Default::default()
         };
         let _ = self.store.update_provider(&id, &patch).await;
-        AdminZcodeAccountInfoResponse::Ok(ZcodeAccountInfo {
+        let info = ZcodeAccountInfo {
             account_id,
             display,
             plan_name,
@@ -521,7 +507,73 @@ impl AdminProvidersService {
             quota,
             plan_credentials: token.is_some(),
             warnings,
-        })
+        };
+        // 持久化缓存(详情窗口 GET 读;失败只留痕不影响响应)
+        if let Ok(json) = serde_json::to_string(&info)
+            && let Err(()) = self.store.upsert_zcode_account(&id, &json).await
+        {
+            tracing::warn!("zcode 账号信息缓存写入失败({id})");
+        }
+        AdminZcodeAccountInfoResponse::Ok(info)
+    }
+
+    /// `GET /api/providers/{id}/zcode/account-info`——读缓存的账号信息
+    /// (零上游调用;POST 获取成功即刷新缓存。详情窗口打开先读缓存,
+    /// 需要最新再 POST 拉新)。
+    pub async fn admin_zcode_account_info_cached(
+        &self,
+        id: String,
+    ) -> AdminZcodeAccountInfoCachedResponse {
+        use aikun_openapi::openapi::types::ZcodeAccountInfoCached;
+        let row = match self.store.find_provider(&id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                return AdminZcodeAccountInfoCachedResponse::NotFound(problem(
+                    404,
+                    "not_found",
+                    "渠道不存在",
+                ));
+            }
+            Err(()) => {
+                return AdminZcodeAccountInfoCachedResponse::NotFound(problem(
+                    502,
+                    "store_error",
+                    "渠道读取失败",
+                ));
+            }
+        };
+        if row.channel_kind.trim() != aikun_channels::adapters::zcode::KIND {
+            return AdminZcodeAccountInfoCachedResponse::BadRequest(problem(
+                400,
+                "invalid_channel_kind",
+                "仅 zcode 渠道支持账号信息",
+            ));
+        }
+        match self.store.find_zcode_account(&id).await {
+            Ok(Some((json, fetched_at))) => match serde_json::from_str::<ZcodeAccountInfo>(&json) {
+                Ok(info) => AdminZcodeAccountInfoCachedResponse::Ok(ZcodeAccountInfoCached {
+                    fetched_at: Some(fetched_at),
+                    info: Some(Some(info)),
+                }),
+                // 旧版本/损坏的缓存:按未获取处理(下次 POST 重建)
+                Err(e) => {
+                    tracing::warn!("zcode 账号信息缓存解析失败({id}): {e}");
+                    AdminZcodeAccountInfoCachedResponse::Ok(ZcodeAccountInfoCached {
+                        fetched_at: None,
+                        info: None,
+                    })
+                }
+            },
+            Ok(None) => AdminZcodeAccountInfoCachedResponse::Ok(ZcodeAccountInfoCached {
+                fetched_at: None,
+                info: None,
+            }),
+            Err(()) => AdminZcodeAccountInfoCachedResponse::BadRequest(problem(
+                502,
+                "store_error",
+                "账号信息缓存读取失败",
+            )),
+        }
     }
 
     /// `POST /api/providers/{id}/zcode/reset-quota`——使用一次额度重置
