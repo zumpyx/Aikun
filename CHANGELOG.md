@@ -6,6 +6,23 @@
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
 ## [Unreleased]
+### 修复(ZCode 上游协议)
+
+- **上游 2026-11-20 收紧客户端校验导致全部 zcode 渠道不可用**:旧伪装
+  版本 3.16.3 → 405+3012 "client not supported"(健康探测/模型测试
+  表现为"上游响应不符合协议格式")。两处修复:① 伪装客户端版本升
+  3.18.2(与 billing 家族统一为单一版本常量;实测 3.18.2 过、3.16.3
+  拒);② system 身份文本换成 3.17.1 系口径(上游同日收紧了身份文本
+  检查——旧 3.18.2 HAR 文本也被拒;新文本与 3 块 wire 形状炼化自
+  TriDefender/zcode-api 的 bundle 逆向 + probe matrix:cliPrefix 裸块
+  (3.15.1 起无 cache_control)+ stable 身份块 byte-exact(ephemeral)+
+  dynamic 块 = 客户端 system 文本或空,ephemeral)+ 补 `x-zcode-trace-id`
+  头(官方 bundle 头族成员)。新增 `normalize_body_wire_shape` 单测
+  锚定 wire 形状。
+- **模型测试错误文案透传上游信封 code/msg**:200+错误信封(配额
+  1005 / 风控 3012 等)不再只报"上游响应不符合协议格式",带
+  `上游 1005:exceed quota limit` 式明细——本次排查正是被泛化文案
+  挡住了真实原因。
 ### 变更(数据库)
 
 - **默认嵌入式 SurrealKV 改为仅快照模式(速度优先)**:默认端点

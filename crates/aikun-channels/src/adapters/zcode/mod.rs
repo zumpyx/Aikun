@@ -55,8 +55,10 @@ pub const MESSAGES_PATH: &str = "/api/v1/zcode-plan/anthropic/v1/messages";
 /// 的 remaining/limit/period_end,可用于人工核对剩余额度)。
 pub const BALANCE_PATH: &str = "/api/v1/zcode-plan/billing/balance";
 
-/// 伪装客户端版本(与抓包基线一致;上游按此校验 X-ZCode-App-Version)。
-pub const CLIENT_VERSION: &str = "3.16.3";
+/// 伪装客户端版本(上游按此校验 User-Agent / X-ZCode-App-Version;
+/// **2026-11-20 实测收紧了版本下限**:3.16.3 → 405+3012,3.18.2 过——
+/// 与 billing 家族统一为一个版本常量,客户端再升版时两处同步)。
+pub const CLIENT_VERSION: &str = "3.18.2";
 
 /// 免费窗口的小时边界(北京时间,含头不含尾):任意日 23:00 起、次日
 /// 09:00 止;周六/周日全天在窗(见 [`is_off_peak`])。
@@ -99,12 +101,14 @@ impl ChannelAdapter for ZcodeAdapter {
         )
     }
 
-    /// 请求体伪装(3012 内容检查的破解,炼化自 Zcode2Api normalizeBody;
-    /// 2026-11-19 国内账号实测:缺失 → 405+3012 "client not supported"):
-    /// 官方 3 个 system 身份块(23mac.har,嵌入 system.json;恰好第 4 块
-    /// 会 3012)+ metadata.user_id 设备 JSON + string content 转 text
-    /// block + 末块 cache_control ephemeral。客户端 system 文本拼进官方
-    /// 最后一块(参考实现 splice 口径)。
+    /// 请求体伪装(3012 内容检查的破解;**2026-11-20 上游收紧**:旧
+    /// 3.18.2 HAR 抓的身份文本当日被拒 → 405+3012,换 3.17.1 系身份
+    /// 文本实测即过。文本与 3 块 wire 形状炼化自 TriDefender/zcode-api
+    /// 的 bundle 逆向 + probe matrix):cliPrefix(无 cache_control,3.15.1
+    /// 起)+ stable 身份块(byte-exact,ephemeral)+ dynamic 块(客户端
+    /// system 文本作 `\n\n` 前缀整体内容,ephemeral;无客户端 system 时
+    /// 为空——块 3 网关不查)+ metadata.user_id 设备 JSON + string
+    /// content 转 text block + 末块 cache_control ephemeral。
     fn prepare_request(&self, _provider: &Provider, _protocol: Protocol, body: &mut Value) {
         normalize_body(body);
     }
@@ -137,6 +141,11 @@ impl ChannelAdapter for ZcodeAdapter {
             // 随机(session-id 由上游按 device 聚合,同进程稳定即可)。
             ("x-zcode-query-source", "main_turn".to_string()),
             ("x-zcode-session-type", "main".to_string()),
+            // trace-id:官方 bundle 头族的一员(x-request-id,
+            // x-zcode-session-type, x-zcode-trace-id, [x-query-id],
+            // [x-session-id]);实测非硬性,带上降低与真实客户端的
+            // 差异度(风控连坐口径,2026-11-20)。
+            ("x-zcode-trace-id", mint_hex_uuid(0x7ac_e000)),
             ("x-query-id", mint_hex_uuid(0x51ed_270b)),
             ("x-request-id", mint_hex_uuid(0x0fc1_ce77)),
         ]
@@ -175,7 +184,9 @@ fn mint_hex_uuid(salt: u64) -> String {
     )
 }
 
-/// 官方 system 身份块(23mac.har;恰 3 块——第 4 块 3012)。
+/// 官方 system 身份文本(3.17.1 系口径;2026-11-20 起上游 3012 内容
+/// 检查只认此版身份文本——3.18.2 HAR 抓的旧文本当日被拒,实测换此
+/// 即过。3 块 wire 形状由 [`ZcodeSystem::wire_blocks`] 构造)。
 const ZCODE_SYSTEM: &str = include_str!("system.json");
 
 /// 会话/设备标识的确定性派生(FNV-1a;上游按 device 聚合 session,
@@ -201,27 +212,11 @@ fn normalize_body(body: &mut Value) {
         }
     }
 
-    // 2) system:官方 3 块;客户端 system 文本拼进最后一块文本尾
-    let client_sys: Vec<String> = match &body["system"] {
-        Value::String(t) if !t.trim().is_empty() => vec![t.trim().to_string()],
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter_map(|b| b["text"].as_str())
-            .map(str::trim)
-            .filter(|t| !t.is_empty() && !t.starts_with("x-anthropic-billing-header:"))
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    };
-    if let Ok(mut official) = serde_json::from_str::<Vec<Value>>(ZCODE_SYSTEM) {
-        if !client_sys.is_empty()
-            && let Some(last) = official.last_mut()
-            && let Some(t) = last["text"].as_str().map(str::to_string)
-        {
-            last["text"] = Value::String(format!("{t}\n\n{}", client_sys.join("\n\n")));
-        }
-        body["system"] = Value::Array(official);
-    }
+    // 2) system:官方 3 块 wire 形状(2026-11-20 口径,见
+    //    ZcodeSystem::wire_blocks):客户端 system 文本整体作为块 3
+    //    内容(`\n\n` 前缀替换官方 dynamic 二连——块 3 网关不查,
+    //    客户端文本骑在最宽松的块上;无客户端 system 为空块)。
+    body["system"] = Value::Array(zcode_system().wire_blocks(client_system_text(&body["system"])));
 
     // 3) cache_control ephemeral:最后一条非 system 消息的最后一个
     //    content block
@@ -242,6 +237,68 @@ fn normalize_body(body: &mut Value) {
             "{{\"device_id\":\"{mid}\",\"account_uuid\":\"\",\"session_id\":\"{sid}\"}}"
         )
     });
+}
+
+/// 官方 system 身份文本(2026-11-20 起的 3012 检查口径,3.17.1 系;
+/// 见 system.json 文件头注释)。解析失败(future 文件形状变化)按空
+/// 客户端 system 兜底——身份块发不出去上游会 3012,那是显式可见的
+/// 故障,好过在这里 panic。
+fn zcode_system() -> &'static ZcodeSystem {
+    use std::sync::OnceLock;
+    static SYS: OnceLock<ZcodeSystem> = OnceLock::new();
+    SYS.get_or_init(|| {
+        serde_json::from_str(ZCODE_SYSTEM).unwrap_or_else(|e| {
+            tracing::error!("zcode system.json 解析失败(3012 将复现): {e}");
+            ZcodeSystem::default()
+        })
+    })
+}
+
+/// system.json 形状(cliPrefix / stableSections / dynamic 备查文本)。
+#[derive(Debug, Default, serde::Deserialize)]
+struct ZcodeSystem {
+    #[serde(default, rename = "cliPrefix")]
+    cli_prefix: String,
+    #[serde(default, rename = "stableSections")]
+    stable_sections: Vec<String>,
+}
+
+impl ZcodeSystem {
+    /// 3 块 wire 形状:cliPrefix 裸块(3.15.1 起无 cache_control)+
+    /// stable 身份块(byte-exact,ephemeral)+ dynamic 块(客户端文本
+    /// 或空,ephemeral;整体 `\n\n` 前缀当且仅当非空)。
+    fn wire_blocks(&self, client_system: Option<String>) -> Vec<Value> {
+        use serde_json::json;
+        let stable = self.stable_sections.join("\n\n");
+        let dynamic = client_system.unwrap_or_default();
+        vec![
+            json!({ "type": "text", "text": self.cli_prefix }),
+            json!({ "type": "text", "text": stable, "cache_control": { "type": "ephemeral" } }),
+            json!({
+                "type": "text",
+                "text": if dynamic.is_empty() { String::new() } else { format!("\n\n{dynamic}") },
+                "cache_control": { "type": "ephemeral" },
+            }),
+        ]
+    }
+}
+
+/// 客户端 system → 单一字符串(None = 无):字符串 trim 后非空即用;
+/// 数组取各 text 块 `\n\n` 连接(真实客户端只带一条自定义 prompt,
+/// 永远不是块列表;cache_control 丢弃——stable 块独占 ephemeral 断点)。
+fn client_system_text(system: &Value) -> Option<String> {
+    let parts: Vec<String> = match system {
+        Value::String(t) if !t.trim().is_empty() => vec![t.trim().to_string()],
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && !t.starts_with("x-anthropic-billing-header:"))
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 /// 绝对路径拼接:base 去尾斜杠后直接接 path(保留 base 自带 query 的场景
@@ -366,12 +423,12 @@ mod tests {
         );
         assert_eq!(
             a.models_url("https://zcode.z.ai", Protocol::Anthropic),
-            "https://zcode.z.ai/api/v1/zcode-plan/billing/balance?app_version=3.16.3"
+            "https://zcode.z.ai/api/v1/zcode-plan/billing/balance?app_version=3.18.2"
         );
         // 国内版:同一端点族,仅 base 不同(2026-11-18 双环境支持)
         assert_eq!(
             a.models_url("https://zcode.bigmodel.cn", Protocol::Anthropic),
-            "https://zcode.bigmodel.cn/api/v1/zcode-plan/billing/balance?app_version=3.16.3"
+            "https://zcode.bigmodel.cn/api/v1/zcode-plan/billing/balance?app_version=3.18.2"
         );
         let mut p = crate::provider::tests::bare_provider();
         p.openai_base_url = "https://zcode.z.ai".into();
@@ -390,5 +447,61 @@ mod tests {
             "由默认鉴权头携带,不重复"
         );
         assert!(a.extra_headers(Protocol::OpenAi).is_empty());
+    }
+
+    /// system 3 块 wire 形状(2026-11-20 口径):cliPrefix 裸块 + stable
+    /// 身份块(ephemeral)+ dynamic 块(客户端文本 NLNL 前缀/空,ephemeral)。
+    /// 上游 3012 只认此版身份文本——形状由测试锚定,防手滑漂移。
+    #[test]
+    fn normalize_body_wire_shape() {
+        use serde_json::json;
+
+        // 无客户端 system:dynamic 为空块
+        let mut b = json!({
+            "model": "GLM-5.3-Flash", "max_tokens": 8,
+            "messages": [{ "role": "user", "content": "hi" }],
+        });
+        normalize_body(&mut b);
+        let sys = b["system"].as_array().unwrap();
+        assert_eq!(sys.len(), 3, "恰 3 块 wire 形状");
+        assert_eq!(sys[0]["text"], "You are ZCode, an interactive agent");
+        assert!(
+            sys[0].get("cache_control").is_none(),
+            "cliPrefix 裸块(3.15.1 起无 cache_control)"
+        );
+        let stable = sys[1]["text"].as_str().unwrap();
+        assert!(
+            stable.starts_with("\nYou are an agent working with the user toward their goals"),
+            "stable 块以 3.17.1 系身份文本开头(3012 检查锚): {stable:?}"
+        );
+        assert_eq!(sys[1]["cache_control"]["type"], "ephemeral");
+        assert_eq!(sys[2]["text"], "", "无客户端 system → 空 dynamic 块");
+        assert_eq!(sys[2]["cache_control"]["type"], "ephemeral");
+        // metadata.user_id 设备 JSON + 末块 cache_control
+        assert!(
+            b["metadata"]["user_id"]
+                .as_str()
+                .unwrap()
+                .contains("device_id")
+        );
+        let last = b["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            last["content"][0]["type"], "text",
+            "string content 已转 block"
+        );
+
+        // 有客户端 system:dynamic = NLNL + 客户端文本(整体替换,不拼接)
+        let mut b2 = json!({
+            "model": "GLM-5.3", "max_tokens": 8, "system": "  你是网关的助手  ",
+            "messages": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        });
+        normalize_body(&mut b2);
+        let sys2 = b2["system"].as_array().unwrap();
+        assert_eq!(sys2[2]["text"].as_str().unwrap(), "\n\n你是网关的助手");
+        assert_eq!(
+            sys2[1]["text"], sys[1]["text"],
+            "stable 块与客户端 system 无关,恒 byte-exact"
+        );
     }
 }

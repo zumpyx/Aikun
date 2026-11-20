@@ -199,12 +199,24 @@ pub async fn probe_model(
         };
         // 与代理转发路径同一口径:200 但响应体不符合协议形状(MiniMax 式
         // 200+错误信封)判失败,否则会写成 healthy 并污染渠道 EMA。
+        // 错误文案透传信封的 code/msg(zcode 3012/1005、MiniMax 等都有)——
+        // 2026-11-20 排查实录:"不符合协议格式"挡住了上游 405+3012 客户端
+        // 版本被拒的真实原因,定位绕了一大圈。
         if !aikun_protocol::valid_response_shape(&v, protocol) {
+            let envelope = match (v["code"].as_i64(), v["msg"].as_str()) {
+                (Some(code), Some(msg)) if !msg.is_empty() => format!("上游 {code}:{msg}"),
+                (Some(code), _) => format!("上游 {code}"),
+                _ => String::new(),
+            };
             return ModelProbe {
                 ok: false,
                 latency_ms: latency,
                 status,
-                error: Some("上游响应不符合协议格式".to_string()),
+                error: Some(if envelope.is_empty() {
+                    "上游响应不符合协议格式".to_string()
+                } else {
+                    format!("上游响应不符合协议格式({envelope})")
+                }),
                 snippet: None,
                 response: Some(v),
             };
