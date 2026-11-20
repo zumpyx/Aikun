@@ -599,6 +599,15 @@ type ZcodeAccountInfo = {
   quota?: { level?: string; limits?: Array<{ type?: string; unit?: number; number?: number; usage?: number; remaining?: number; percentage?: number; nextResetTime?: number }> } | null
 }
 
+/// 北京时间是否处于闲时免费窗口(与后端 is_off_peak 同口径:
+/// 任意日 23:00–次日 09:00,周六/周日全天)。
+function beijingOffPeakNow(): boolean {
+  const now = new Date(Date.now() + 8 * 3600 * 1000)
+  const day = now.getUTCDay() // 0=周日 … 6=周六
+  const h = now.getUTCHours()
+  return day === 0 || day === 6 || h >= 23 || h < 9
+}
+
 /// 时间戳(s)→ 本地短时间;空值 '-'。
 function ts(v?: number | null): string {
   return v && v > 0 ? new Date(v * (v > 1e12 ? 1 : 1000)).toLocaleString('zh-CN', { hour12: false }) : '-'
@@ -683,8 +692,8 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
     }
   }
 
-  const testOne = async (model: string) => {
-    setTestingModel(model)
+  const testOne = async (laneKey: string, model: string) => {
+    setTestingModel(laneKey)
     try {
       const r = await api<{ ok?: boolean; status?: number; error?: string; snippet?: string }>(
         'POST', `/api/providers/${target.id}/model-tests`, { model, message: '回复两个字:成功', stream: false })
@@ -693,12 +702,12 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
         const verdict = d.ok
           ? `✓ ${(d.snippet || '').slice(0, 30)}`
           : (d.error || `上游 ${d.status ?? ''}`)
-        setModelResult((m) => ({ ...m, [model]: verdict }))
+        setModelResult((m) => ({ ...m, [laneKey]: verdict }))
         if (d.ok) sonnerToast.success(`${target.name} · ${model}:调用成功`)
         else sonnerToast.warning(`${target.name} · ${model}:${verdict}`)
       } else {
         const msg = errMsg(r)
-        setModelResult((m) => ({ ...m, [model]: msg }))
+        setModelResult((m) => ({ ...m, [laneKey]: msg }))
         sonnerToast.error(`${target.name} · ${model} 测试失败:${msg}`)
       }
     } finally {
@@ -708,6 +717,22 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
 
   const info = cached.data?.info
   const models = target.models?.length ? target.models : ['GLM-5.3-Flash']
+  // zcode 能力矩阵(用户口径 2026-11-20):订阅档 GLM-5.3 与
+  // GLM-5.3-Flash 各测一次;闲时另有免费档 GLM-5.3-Flash(免费桶
+  // 仅闲时有效;非闲时同一请求走订阅额度)。非 zcode 渠道按渠道
+  // 模型逐项测。
+  const hasBig = models.some((m) => !m.toLowerCase().includes('flash'))
+  const hasFlash = models.some((m) => m.toLowerCase().includes('flash'))
+  const offPeak = beijingOffPeakNow()
+  const lanes: Array<{ key: string; model: string; badge: string; tone: 'default' | 'success'; hint?: string }> = isZcode ? [
+    ...(hasBig ? [{ key: 'sub-big', model: models.find((m) => !m.toLowerCase().includes('flash'))!, badge: '订阅', tone: 'default' as const }] : []),
+    ...(hasFlash ? [
+      { key: 'sub-flash', model: models.find((m) => m.toLowerCase().includes('flash'))!, badge: '订阅', tone: 'default' as const },
+      { key: 'free-flash', model: models.find((m) => m.toLowerCase().includes('flash'))!, badge: '免费 · 闲时', tone: 'success' as const, hint: offPeak ? '当前在闲时窗口(免费桶可用)' : '当前非闲时(免费桶未生效,此测试将走订阅额度)' },
+    ] : []),
+  ] : models.map((m) => ({
+    key: m, model: m, badge: '', tone: 'default' as const,
+  }))
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -765,24 +790,24 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
             </section>
           )}
 
-          {/* 可用模型:点击即测 */}
+          {/* 能力矩阵(zcode:订阅×2 + 闲时免费;其他渠道逐模型) */}
           <section className="space-y-1.5">
             <h4 className="font-medium">可用模型(点击测试)</h4>
-            {models.map((m) => {
-              const free = m.toLowerCase().includes('flash')
-              const testing = testingModel === m
-              const result = modelResult[m]
+            {lanes.map((lane) => {
+              const testing = testingModel === lane.key
+              const result = modelResult[lane.key]
               return (
                 <button
-                  key={m}
+                  key={lane.key}
                   type="button"
                   disabled={testing}
                   className="flex w-full items-center justify-between gap-3 rounded-md border px-2 py-1.5 text-left text-xs hover:bg-accent disabled:opacity-60"
-                  onClick={() => void testOne(m)}
+                  onClick={() => void testOne(lane.key, lane.model)}
                 >
-                  <span className="flex items-center gap-2">
-                    <span className="font-mono">{m}</span>
-                    {isZcode && (free ? <Badge tone="success">免费</Badge> : <Badge tone="default">订阅</Badge>)}
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono">{lane.model}</span>
+                    {lane.badge && <Badge tone={lane.tone}>{lane.badge}</Badge>}
+                    {lane.hint && <span className="text-[10px] text-muted-foreground">{lane.hint}</span>}
                   </span>
                   <span className={result?.startsWith('✓') ? 'text-emerald-600' : result ? 'text-amber-600' : 'text-muted-foreground'}>
                     {testing ? '测试中…' : result ?? '点击测试'}
@@ -790,6 +815,11 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
                 </button>
               )
             })}
+            {isZcode && (
+              <p className="text-[11px] text-muted-foreground">
+                闲时窗口(北京时间 23:00–09:00 / 周末全天)内网关优先消耗免费额度,免费桶并发超限自动落回订阅额度。
+              </p>
+            )}
           </section>
         </div>
       </DialogContent>
