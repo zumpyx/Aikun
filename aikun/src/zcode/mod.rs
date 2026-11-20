@@ -6,6 +6,7 @@
 pub mod captcha;
 pub mod claim;
 pub mod oauth;
+pub mod offpeak;
 pub mod scheduler;
 
 pub use claim::ZcodeClaimImpl;

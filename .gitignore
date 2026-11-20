@@ -1,5 +1,5 @@
+.zcode/
 /target
-/data
 .env
 *.db
 *.db-shm

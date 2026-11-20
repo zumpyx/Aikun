@@ -1964,7 +1964,10 @@ async fn zcode_channel_anthropic_protocol_end_to_end() {
         .unwrap();
     assert_eq!(r.status(), 200, "PATCH channel_kind=zcode");
 
-    // mock 上游:一条 Anthropic 形态的 chat 响应 + 一条 SSE(流式路径)
+    // mock 上游:一条 off-peak 取号失败(zcode chat 现在先走 off-peak 排队
+    // 通道,mock 无该端点语义——先喂 404 让其立即回退 plan 端点)+
+    // 一条 Anthropic 形态的 chat 响应 + 一条 SSE(流式路径)
+    mock.push_json(404, json!({"code": 404, "msg": "no mock route"}));
     mock.push_json(
         200,
         json!({

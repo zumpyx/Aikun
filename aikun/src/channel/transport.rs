@@ -253,6 +253,39 @@ pub async fn send_request(
     adapter.prepare_request(provider, protocol, &mut request_body);
     let url = adapter.chat_url(provider, protocol);
 
+    // ZCode off-peak 通道(2026-11-20 上游改版:免费/Lite credits 全走
+    // 排队取号制,plan 端点一律 1005):取号 → 排队(预算内)→ ready 后
+    // 调 off-peak 专用端点。不可恢复(限额/超时/票失效)时回退 plan
+    // 端点原路径保底(全量订阅用户仍有路)。
+    if provider.channel_kind.trim() == aikun_channels::adapters::zcode::KIND
+        && protocol == aikun_protocol::Protocol::Anthropic
+    {
+        let base = if provider.anthropic_base_url.trim().is_empty() {
+            provider.openai_base_url.trim()
+        } else {
+            provider.anthropic_base_url.trim()
+        };
+        match crate::zcode::offpeak::chat(base, &provider.api_key, &request_body).await {
+            Ok((resp, waited)) => {
+                if resp.status().is_success() {
+                    let latency = start.elapsed().as_millis() as f64;
+                    debug!(
+                        "zcode off-peak 通道命中(排队等待 {waited}s):{}",
+                        sanitize_log_url(&url)
+                    );
+                    return Ok((resp, latency));
+                }
+                tracing::warn!(
+                    "zcode off-peak 通道非 2xx({}),回退 plan 端点",
+                    resp.status().as_u16()
+                );
+            }
+            Err(e) => {
+                tracing::warn!("zcode off-peak 通道不可用,回退 plan 端点:{e}");
+            }
+        }
+    }
+
     // 同 chat.rs:转发日志是每请求热路径,降级 debug。
     debug!(
         "Forwarding {} request to {} ({}){}",

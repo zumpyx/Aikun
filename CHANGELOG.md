@@ -6,6 +6,23 @@
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
 ## [Unreleased]
+### 变更(ZCode:上游免费/订阅体系改版——off-peak 排队取号通道)
+
+- **上游 2026-11-20 二次改版**:免费额度体系从「billing 桶 + zcode-plan
+  端点」整体迁移到 **off-peak 排队取号制**(preview 已空、claim 通道
+  下线;plan 端点对 Lite credits 一律 1005)。Aikun 接入新通道
+  (`aikun/src/zcode/offpeak.rs`,活体验证全链 200):
+  `POST /api/v1/off-peak/ticket`(task_id 须 UUID 形态;**每日取票
+  限额**,用尽回 next_take_at)→ 轮询 status(实测 ~2.5 位/分钟,
+  百人队 ≈ 40 分钟)→ ready(窗口 ~5 分钟)后调
+  `/api/v1/off-peak/anthropic/v1/messages`——关键口径:
+  **`x-coding-plan-api-key` 传 JWT 同值**(传 OAuth 业务 token 反而
+  3001)+ `X-Off-Peak-Ticket-ID` + 常规伪装头族。票按渠道缓存、
+  ready/active 窗口内复用、不主动 settle(保持窗口);过期丢弃重取。
+- **转发策略**:zcode 渠道 chat 先走 off-peak(排队等待预算
+  `AIKUN_ZCODE_OFFPEAK_WAIT_SECS`,默认 90s;0=不等待),不可恢复
+  (限额/超时/票失效)自动回退 zcode-plan 端点保底(全量订阅用户
+  仍有路)。
 ### 改进(反代详情:能力矩阵)
 
 - **详情的模型区改为能力矩阵(zcode)**:订阅档 `GLM-5.3` 与
