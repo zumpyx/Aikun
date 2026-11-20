@@ -127,14 +127,20 @@ async fn ensure_ticket(base: &str, jwt: &str, cache_key: &str) -> Result<Ticket,
     let code = body["code"].as_i64().unwrap_or(-1);
     if status != 200 || code != 0 {
         // 3103 每日限额:next_take_at 透传给调用方
-        let next = body["data"]["next_take_at"].as_i64();
+        let next = body["data"]["next_take_at"]
+            .as_i64()
+            // 毫秒口径(实测 1795190400000 = 次日北京零点)
+            .map(|n| if n > 1_000_000_000_000 { n / 1000 } else { n });
         return Err(format!(
             "off-peak 取号失败(code {code} {}){}",
             body["msg"].as_str().unwrap_or_default(),
             next.map(|n| format!(
-                ":今日取号限额已用完,{} 后可再取",
+                ":今日取号限额已用完,北京时间 {} 后可再取",
                 chrono::DateTime::from_timestamp(n, 0)
-                    .map(|d| d.to_rfc3339())
+                    .map(|d| d
+                        .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+                        .format("%m-%d %H:%M")
+                        .to_string())
                     .unwrap_or_else(|| n.to_string())
             ))
             .unwrap_or_default()
