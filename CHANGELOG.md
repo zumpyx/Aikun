@@ -6,6 +6,23 @@
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
 ## [Unreleased]
+### 变更(ZCode 订阅通道:PAT 直连官方 BigModel 端点——GLM-5.3 大杯修复)
+
+- **订阅档正确路径**(官方 zcode-builtin 模板 + 源码取证 + 活体验证
+  GLM-5.3/Flash 双 200):个人 Coding Plan 的模型请求走
+  `https://open.bigmodel.cn/api/anthropic`(标准 anthropic-messages,
+  鉴权 = **PAT**),不是 zcode.z.ai 的 zcode-plan 专路径(订阅档在此
+  一律 1005——那是免费桶通道)。
+- **PAT 三步签发**(`aikun/src/zcode/pat.rs`,炼化自官方
+  project-access-token-client):getCustomerInfo(**裸业务 token**,
+  Bearer 会被误判)→ api_keys 列表/创建 `zcode-api-key` →
+  `/{id}/access_tokens`(Bearer 业务 token,clientType=zcode)→
+  短期 PAT(实测 ~5h);进程内缓存 + 每请求刷新语义。
+- **转发策略(zcode 渠道)**:有业务 token → PAT 直连官方端点(订阅
+  档,不排队不烧限额)→ 失败回退 off-peak 排队(免费桶)→ 再回退
+  plan 端点保底;手动模型测试同序,周期后台诊断仍不碰取号限额。
+- 实测:GLM-5.3(大杯)+ GLM-5.3-Flash 双车道 200「成功」;无业务
+  token 的渠道行为不变(off-peak 优先)。
 ### 变更(ZCode:上游免费/订阅体系改版——off-peak 排队取号通道)
 
 - **上游 2026-11-20 二次改版**:免费额度体系从「billing 桶 + zcode-plan

@@ -53,6 +53,15 @@ fn wait_budget_secs() -> u64 {
         .unwrap_or(90)
 }
 
+/// 业务 token → PAT(进程内缓存;签发失败返回 None 走 JWT 兜底)。
+/// PAT 与 JWT 的对应由调用侧在 ensure 时解析,这里只查缓存。
+static PAT_BY_JWT: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn pat_for(jwt: &str) -> Option<String> {
+    PAT_BY_JWT.lock().unwrap().get(jwt).cloned()
+}
+
 fn origin_of(base: &str) -> String {
     let mut b = base.trim_end_matches('/').to_string();
     if let Some(s) = b.strip_suffix("/api/v1") {
@@ -61,7 +70,9 @@ fn origin_of(base: &str) -> String {
     b
 }
 
-/// off-peak 家族头(auth + x-coding-plan-api-key=JWT 同值 + 伪装族)。
+/// off-peak 家族头(auth + x-coding-plan-api-key=**PAT** 官方真值 + 伪装族)。
+/// PAT 签发需要业务 token(业务 token 过期则兜底 JWT 同值——实测
+/// zcode.z.ai 域宽松接受,但订阅额度路由可能只认 PAT)。
 #[allow(clippy::too_many_arguments)]
 async fn request_json(
     method: reqwest::Method,
@@ -87,8 +98,11 @@ async fn request_json(
     ) {
         req = req.header(k, v.as_str());
     }
+    // PAT:从 zcode_oauth 侧表的业务 token 签发(调用方注入 jwt 指纹
+    // 对应的业务 token;签发失败兜底 JWT 同值)。
+    let cpak = pat_for(jwt).unwrap_or_else(|| jwt.to_string());
     req = req
-        .header("x-coding-plan-api-key", jwt)
+        .header("x-coding-plan-api-key", cpak)
         .header("User-Agent", format!("ZCode/{CLIENT_VERSION} electron"))
         .header("X-Title", "Z Code@electron")
         .header("X-ZCode-Agent", "glm");
@@ -218,6 +232,7 @@ pub async fn chat(
     jwt: &str,
     body: &Value,
     allow_take: bool,
+    bm_token: Option<&str>,
 ) -> Result<(reqwest::Response, u64), String> {
     let cache_key = {
         use std::hash::{Hash, Hasher};
@@ -225,6 +240,20 @@ pub async fn chat(
         jwt.hash(&mut h);
         h.finish().to_string()
     };
+    // 官方口径:x-coding-plan-api-key = PAT(业务 token 三步签发;短期
+    // PAT,每次请求前刷新——官方「每次模型请求刷新 PAT」同款语义)。
+    if let Some(bm) = bm_token.filter(|t| !t.trim().is_empty()) {
+        match super::pat::ensure_pat(bm).await {
+            Ok(pat) => {
+                PAT_BY_JWT.lock().unwrap().insert(jwt.to_string(), pat);
+            }
+            Err(e) => {
+                // 过期/签发失败:兜底 JWT 同值并留痕(订阅路由可能拒绝)
+                tracing::warn!("off-peak PAT 签发失败,兜底 JWT 同值:{e}");
+                PAT_BY_JWT.lock().unwrap().remove(jwt);
+            }
+        }
+    }
     let started = std::time::Instant::now();
     let mut ticket = ensure_ticket(base, jwt, &cache_key, allow_take).await?;
 

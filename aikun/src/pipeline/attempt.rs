@@ -100,6 +100,7 @@ pub(crate) async fn single_attempt(
             .await
         }
         crate::pipeline::context::Conversion::Standard => {
+            let bm_token = bm_token_of(&state.store, provider).await;
             send_request(
                 &state.clients,
                 provider,
@@ -110,6 +111,7 @@ pub(crate) async fn single_attempt(
                 state.config.connect_timeout_secs,
                 state.config.ttfb_timeout_secs,
                 true, // 真实转发允许 off-peak 取号(每日限额的正当消费者)
+                bm_token.as_deref(),
             )
             .await
         }
@@ -421,4 +423,15 @@ fn bad_body_failure(
         ),
     );
     AttemptOutcome::Failed(error)
+}
+
+/// 渠道的 BigModel 业务 token(zcode_oauth 解密;无/失败 None——
+/// off-peak PAT 签发的输入;缺省时 offpeak 走 JWT 兜底)。
+async fn bm_token_of(store: &crate::store::AppStore, provider: &Provider) -> Option<String> {
+    if provider.channel_kind.trim() != aikun_channels::adapters::zcode::KIND {
+        return None;
+    }
+    let row = store.channels.find_zcode_oauth(&provider.id).await.ok()??;
+    let plain = crate::crypto::decrypt_or_plain(&store.cipher, &row.business_token);
+    (!plain.trim().is_empty()).then_some(plain)
 }

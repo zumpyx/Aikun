@@ -216,6 +216,51 @@ pub fn cached_client(
 /// The caller decides whether to read it as JSON or as an SSE byte stream.
 /// On transport failure returns a synthetic (error_body, 502, latency).
 ///
+/// PAT 直连官方 BigModel anthropic 端点(订阅档;临时换 key,不改渠道行)。
+async fn pat_chat(
+    provider: &Provider,
+    protocol: aikun_protocol::Protocol,
+    request_body: &mut Value,
+    pat: &str,
+) -> Result<(reqwest::Response, f64), (Value, u16, f64)> {
+    let start = Instant::now();
+    let mut p = provider.clone();
+    p.api_key = pat.to_string();
+    p.anthropic_base_url = "https://open.bigmodel.cn/api/anthropic".to_string();
+    p.openai_base_url = "https://open.bigmodel.cn/api/anthropic".to_string();
+    // 通用 anthropic 适配器(generic):标准 /v1/messages 路径——zcode
+    // 适配器会拼 zcode-plan 专路径,这里要官方模板端点。
+    p.channel_kind = String::new();
+    let adapter = aikun_channels::adapter_for(&p);
+    adapter.prepare_request(&p, protocol, request_body);
+    let url = adapter.chat_url(&p, protocol);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|_| {
+            (
+                serde_json::json!({"error": {"message": "Upstream request failed", "type": "upstream_error"}}),
+                502,
+                0.0,
+            )
+        })?;
+    let mut req = client.post(&url).json(request_body);
+    for (k, v) in adapter.auth_headers(&p.api_key, protocol) {
+        req = req.header(k, v.as_str());
+    }
+    for (k, v) in adapter.extra_headers(protocol) {
+        req = req.header(k, v.as_str());
+    }
+    let resp = req.send().await.map_err(|_| {
+        (
+            serde_json::json!({"error": {"message": "Upstream request failed", "type": "upstream_error"}}),
+            502,
+            start.elapsed().as_millis() as f64,
+        )
+    })?;
+    Ok((resp, start.elapsed().as_millis() as f64))
+}
+
 /// Non-streaming requests use the provider's `timeout_secs`, falling back to
 /// the global `fallback_timeout_secs` (REQUEST_TIMEOUT_SECS) when the
 /// provider value is not positive (legacy rows). `connect_timeout_secs` /
@@ -232,6 +277,7 @@ pub async fn send_request(
     connect_timeout_secs: u64,
     ttfb_timeout_secs: u64,
     offpeak_take: bool,
+    bm_token: Option<&str>,
 ) -> Result<(reqwest::Response, f64), (Value, u16, f64)> {
     let start = Instant::now();
     // Streaming responses can run arbitrarily long — no overall timeout
@@ -266,8 +312,49 @@ pub async fn send_request(
         } else {
             provider.anthropic_base_url.trim()
         };
-        match crate::zcode::offpeak::chat(base, &provider.api_key, &request_body, offpeak_take)
-            .await
+        // 订阅档正确路径(官方 zcode-builtin 模板:BigModel Coding Plan 的
+        // anthropic 端点 = open.bigmodel.cn/api/anthropic,鉴权 = PAT——
+        // 2026-11-21 源码取证 + 活体验证 GLM-5.3/Flash 双 200):
+        // 有业务 token 时优先 PAT 直连(不排队、不走每日限额);off-peak
+        // 排队只兜「无业务 token」或 PAT 失败的场景。
+        if let Some(bm) = bm_token.filter(|t| !t.trim().is_empty()) {
+            match crate::zcode::pat::ensure_pat(bm).await {
+                Ok(pat) => {
+                    let resp = pat_chat(provider, protocol, &mut request_body, &pat).await;
+                    match resp {
+                        Ok((resp, latency)) => {
+                            debug!(
+                                "zcode 订阅通道(PAT)命中:{}",
+                                sanitize_log_url(
+                                    "https://open.bigmodel.cn/api/anthropic/v1/messages"
+                                )
+                            );
+                            return Ok((resp, latency));
+                        }
+                        Err((err_body, status, _)) => {
+                            // 业务码 1005 = 该端点配额语义(如 credits 覆盖外
+                            // 的模型);400/401 = PAT 问题——都回退 off-peak。
+                            tracing::warn!(
+                                "zcode 订阅通道(PAT)非 2xx({}),回退 off-peak/plan:{}",
+                                status,
+                                err_body["error"]["message"].as_str().unwrap_or_default()
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("zcode PAT 签发失败,走 off-peak/plan:{e}");
+                }
+            }
+        }
+        match crate::zcode::offpeak::chat(
+            base,
+            &provider.api_key,
+            &request_body,
+            offpeak_take,
+            bm_token,
+        )
+        .await
         {
             Ok((resp, waited)) => {
                 if resp.status().is_success() {

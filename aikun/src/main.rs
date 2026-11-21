@@ -1280,6 +1280,23 @@ struct GatewayProbes {
     config: Arc<AppConfig>,
 }
 
+impl GatewayProbes {
+    /// 渠道的 BigModel 业务 token(zcode_oauth 解密;手动测试签 PAT 用)。
+    async fn bm_token_for_test(&self, provider: &aikun_channels::Provider) -> Option<String> {
+        if provider.channel_kind.trim() != aikun_channels::adapters::zcode::KIND {
+            return None;
+        }
+        let enc = self
+            .store
+            .channels
+            .find_zcode_oauth(&provider.id)
+            .await
+            .ok()??;
+        let plain = crate::crypto::decrypt_or_plain(&self.store.cipher, &enc.business_token);
+        (!plain.trim().is_empty()).then_some(plain)
+    }
+}
+
 #[async_trait::async_trait]
 impl providers_port::ProviderStore for SurrealProviderStore {
     fn new_provider_id(&self) -> String {
@@ -1756,6 +1773,7 @@ impl providers_port::ProviderProbes for GatewayProbes {
             self.config.connect_timeout_secs,
             self.config.ttfb_timeout_secs,
             true, // 手动测试允许 off-peak 取号(用户主动验证,值得花限额)
+            self.bm_token_for_test(&provider).await.as_deref(),
         )
         .await;
         providers_port::ModelProbeOutcome {
@@ -1822,6 +1840,7 @@ impl providers_port::ProviderProbes for GatewayProbes {
                 config.connect_timeout_secs,
                 config.ttfb_timeout_secs,
                 false, // 诊断辅助不取新号(off-peak 每日限额留给真实流量)
+                None,  // 不签 PAT(同上)
             )
             .await
             {
