@@ -210,7 +210,17 @@ async fn pipeline_entry(
     // 429。只做入口预检、不做预留金——并发在途请求仍可能把单请求扣成
     // 负数(用量先发生费用后结算),这是有意的取舍,扣费侧注释见
     // insert_request_log。
-    if !admission::has_positive_balance(&state, &claims.sub).await {
+    // 闲时免费车道豁免(2026-11-23):北京时间闲时窗口内请求 Flash 走
+    // zcode 渠道下游 0 元记账——0 元请求不应被预存余额一刀切卡死
+    // (2026-11-22 实录:admin 余额 0,凌晨调 Flash 被 402,而该请求
+    // 本应免费)。条件与计费侧 upstream_free 同一真值函数;且要求存在
+    // 活跃 zcode 渠道(选路才可能落入免费车道)。若 failover 最终落在
+    // 非 zcode 渠道,计费照收、余额可负——与"并发在途可扣成负数"的
+    // 既有取舍一致(扣费侧 insert_request_log 注释)。
+    let free_lane_possible =
+        aikun_channels::adapters::zcode::upstream_free(&model, chrono::Utc::now().timestamp())
+            && has_active_zcode_channel(&state).await;
+    if !free_lane_possible && !admission::has_positive_balance(&state, &claims.sub).await {
         return admission_reject(&state, &ctx, &span, GatewayError::InsufficientBalance);
     }
     // API key 的每分钟限流、每日 token 额度与并发上限(仅 /v1 的 key 调用;
@@ -413,6 +423,19 @@ pub(crate) async fn read_json_limited(resp: reqwest::Response) -> Result<Value, 
 fn truncate_json(v: &Value) -> String {
     let s = serde_json::to_string(v).unwrap_or_default();
     s.chars().take(200).collect()
+}
+
+/// 是否存在活跃的 zcode 渠道(闲时免费车道豁免的前提;查询失败按无处理,
+/// fail-closed——预检回到原口径)。
+async fn has_active_zcode_channel(state: &AppState) -> bool {
+    matches!(
+        state.store.channels.active_channels().await.map(|chans| {
+            chans
+                .iter()
+                .any(|c| c.channel_kind.trim() == aikun_channels::adapters::zcode::KIND)
+        }),
+        Ok(true)
+    )
 }
 
 #[cfg(test)]

@@ -6,6 +6,19 @@
 约定(见 `docs/roadmap-v0.5.md`「纪律」):纯重构不改行为;任何行为变化必须单列条目。
 
 ## [Unreleased]
+### 修复(闲时免费车道被余额预检卡死)
+
+- **闲时免费车道豁免余额预检**:余额预检(balance>0)在选路之前一刀切
+  ——admin 余额 0 时,凌晨(闲时窗口)调 GLM-5.3-Flash 被 402 拒绝,
+  而该请求本应下游 0 元记账。豁免条件与计费侧 upstream_free 同一真值
+  函数(闲时窗口 × Flash)+ 存在活跃 zcode 渠道;若 failover 最终
+  落在非免费渠道,计费照收、余额可负(与并发在途扣成负数的既有
+  取舍一致)。实测:/v1/responses 与 /v1/chat/completions 双端点
+  闲时免费车道 200「成功」。
+- **协议澄清(官方矩阵既有行为,非透传)**:/v1/responses 请求在
+  网关内走完整转换管线(Responses→OpenAI→Anthropic 直译链)转发到
+  zcode 渠道,响应转换回 Responses 形状返回——字节级透传白名单仅
+  embeddings/moderations/images/rerank,responses 不在其中。
 ### 修复(密钥页:key 无法正确复制)
 
 - **创建密钥后弹一次性明文展示窗**:此前创建成功只刷新列表——列表
