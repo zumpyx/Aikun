@@ -1,5 +1,5 @@
 // API 密钥:列表/创建/编辑/启停/删除(keys.js 迁移)
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, errMsg, type Page } from '@/lib/api'
 import { copyText, fmtNum, fmtTime } from '@/lib/utils'
@@ -35,7 +35,7 @@ function toLocalInput(v?: string | null) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-function KeyModal({ open, onOpenChange, editing }: { open: boolean; onOpenChange: (v: boolean) => void; editing: ApiKey | null }) {
+function KeyModal({ open, onOpenChange, editing, onCreated }: { open: boolean; onOpenChange: (v: boolean) => void; editing: ApiKey | null; onCreated: (key: string) => void }) {
   const qc = useQueryClient()
   const [name, setName] = useState(editing?.name ?? '')
   const [expires, setExpires] = useState(toLocalInput(editing?.expires_at))
@@ -63,6 +63,8 @@ function KeyModal({ open, onOpenChange, editing }: { open: boolean; onOpenChange
       if (r.ok) {
         sonnerToast.success(editing ? '已保存' : '密钥已创建')
         onOpenChange(false)
+        // 创建响应带一次性明文 key(列表只有掩码)——弹窗展示供复制
+        if (!editing && 'key' in r.data && typeof r.data.key === 'string') onCreated(r.data.key)
         void qc.invalidateQueries({ queryKey: ['api-keys'] })
       } else sonnerToast.error(errMsg(r))
     } finally {
@@ -95,6 +97,8 @@ function KeyModal({ open, onOpenChange, editing }: { open: boolean; onOpenChange
 export default function Keys() {
   const qc = useQueryClient()
   const [modal, setModal] = useState<{ open: boolean; editing: ApiKey | null }>({ open: false, editing: null })
+  // 一次性明文 key(仅创建响应返回;关闭即不可再看)
+  const [createdKey, setCreatedKey] = useState<string | null>(null)
   const list = useQuery({
     queryKey: ['api-keys'],
     queryFn: async () => (await api<Page<ApiKey>>('GET', '/api/api-keys')).data.items ?? [],
@@ -124,7 +128,8 @@ export default function Keys() {
         </div>
         <Button onClick={() => setModal({ open: true, editing: null })}>+ 创建密钥</Button>
       </div>
-      {modal.open && <KeyModal open={modal.open} onOpenChange={(v) => setModal({ open: v, editing: null })} editing={modal.editing} />}
+      {modal.open && <KeyModal open={modal.open} onOpenChange={(v) => setModal({ open: v, editing: null })} editing={modal.editing} onCreated={setCreatedKey} />}
+      {createdKey && <CreatedKeyModal apiKey={createdKey} onClose={() => setCreatedKey(null)} />}
       <Card>
         <CardContent className="p-0">
           {data.length === 0 ? (
@@ -167,6 +172,52 @@ export default function Keys() {
           )}
         </CardContent>
       </Card>
+    </div>
+  )
+}
+
+/// 创建成功的一次性明文 key 展示:列表里只有掩码(sk-****后4位),
+/// 这是唯一能复制完整 key 的窗口——大字号等宽展示 + 一键复制。
+function CreatedKeyModal({ apiKey, onClose }: { apiKey: string; onClose: () => void }) {
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent title="密钥已创建">
+        <div className="space-y-3.5">
+          <p className="rounded-md border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-800">
+            ⚠ 完整密钥仅显示这一次,关闭后列表只显示掩码(sk-**** 后 4 位)——请立即复制保存。
+          </p>
+          <KeyCopyBox apiKey={apiKey} />
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={onClose}>我已保存,关闭</Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/// 明文 key 展示盒:自动全选(选中后 Cmd/Ctrl+C 即复制,不依赖剪贴板
+/// API 权限)+ 一键复制按钮(失败 toast 明确提示手动复制)。
+function KeyCopyBox({ apiKey }: { apiKey: string }) {
+  const ref = useRef<HTMLTextAreaElement | null>(null)
+  useEffect(() => {
+    // 弹窗渲染后自动全选,让"选中→手动复制"零门槛可用
+    ref.current?.select()
+  }, [])
+  return (
+    <div className="space-y-2">
+      <textarea
+        ref={ref}
+        readOnly
+        value={apiKey}
+        onFocus={(e) => e.currentTarget.select()}
+        rows={3}
+        className="w-full resize-none rounded-md border bg-muted p-3 text-center font-mono text-sm break-all"
+      />
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] text-muted-foreground">已全选——直接按 Ctrl/Cmd+C 复制,或点右侧按钮</span>
+        <Button size="sm" onClick={() => copyText(apiKey, (m) => sonnerToast.success(m))}>复制密钥</Button>
+      </div>
     </div>
   )
 }

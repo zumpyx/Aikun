@@ -33,10 +33,40 @@ export const truncBytes = (s: unknown, max: number) => {
   return out || '?'
 }
 export async function copyText(text: string, toast?: (m: string, t?: 'success' | 'error') => void) {
+  // 剪贴板 API 需文档聚焦;IAB/失焦场景静默失败(写入空或不生效),
+  // 故先试标准 API 再回退 execCommand——两者都校验"写入是否真的是
+  // 目标文本"(读回比对),防止"提示已复制但剪贴板是旧值/掩码"。
+  const modern = () =>
+    navigator.clipboard?.writeText(text).then(async () => {
+      try {
+        return (await navigator.clipboard.readText()) === text
+      } catch {
+        // 读回无权限时无法自证,按成功处理(桌面端常态)
+        return true
+      }
+    })
+  const legacy = () => {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.focus()
+    ta.select()
+    let ok = false
+    try {
+      ok = document.execCommand('copy')
+    } catch {
+      ok = false
+    }
+    document.body.removeChild(ta)
+    return ok
+  }
   try {
-    await navigator.clipboard.writeText(text)
-    toast?.('已复制')
+    if ((await modern()) || legacy()) toast?.('已复制')
+    else toast?.('复制失败，请手动复制', 'error')
   } catch {
-    toast?.('复制失败，请手动复制', 'error')
+    if (legacy()) toast?.('已复制')
+    else toast?.('复制失败，请手动复制', 'error')
   }
 }
