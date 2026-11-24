@@ -7,7 +7,7 @@
 
 pub mod breaker;
 pub mod health;
-pub mod minimax;
+pub mod minimax_code;
 pub mod model_test;
 pub mod registry;
 pub mod selector;

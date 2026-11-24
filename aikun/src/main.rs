@@ -216,7 +216,7 @@ async fn async_main() {
     // zcode 每日自动领取(签到任务;AIKUN_ZCODE_AUTO_CLAIM 可关)
     crate::zcode::scheduler::spawn_auto_claim(store.clone(), admin_service.clone(), &config);
     // MiniMax 每日自动签到(时刻和抖动可在页面改)
-    crate::channel::minimax::spawn_auto_checkin(store.clone(), (*config).clone());
+    crate::channel::minimax_code::spawn_auto_checkin(store.clone(), (*config).clone());
     let admin_routes =
         aikun_openapi::openapi::server::router::admin_api_router(admin_service.clone())
             .layer(middleware::from_fn(require_admin))
@@ -1811,7 +1811,7 @@ impl providers_port::ProviderProbes for GatewayProbes {
                 15,
                 self.config.connect_timeout_secs,
             );
-            return crate::channel::minimax::fetch_models(&client, &probe.api_key)
+            return crate::channel::minimax_code::fetch_models(&client, &probe.api_key)
                 .await
                 .map_err(|e| providers_port::FetchModelsError::Connect { message: e });
         }
@@ -2180,7 +2180,7 @@ async fn minimax_account_info(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let (token, client) = minimax_provider_token(&state, &id).await?;
-    let info = crate::channel::minimax::account_info(&client, &token).await;
+    let info = crate::channel::minimax_code::account_info(&client, &token).await;
     if let Some(models) = info.get("models").and_then(|m| m.as_array()) {
         let names: Vec<String> = models
             .iter()
@@ -2217,7 +2217,7 @@ async fn minimax_checkin(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let (token, client) = minimax_provider_token(&state, &id).await?;
-    match crate::channel::minimax::claim_signin(&client, &token).await {
+    match crate::channel::minimax_code::claim_signin(&client, &token).await {
         Ok(v) => Ok(axum::Json(v)),
         Err(e) => Err((axum::http::StatusCode::BAD_GATEWAY, e)),
     }
@@ -2225,18 +2225,20 @@ async fn minimax_checkin(
 
 async fn minimax_schedule_get(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::Json<crate::channel::minimax::CheckinSchedule> {
-    axum::Json(crate::channel::minimax::load_schedule(&state.store, &state.config).await)
+) -> axum::Json<crate::channel::minimax_code::CheckinSchedule> {
+    axum::Json(crate::channel::minimax_code::load_schedule(&state.store, &state.config).await)
 }
 
 async fn minimax_schedule_set(
     axum::extract::State(state): axum::extract::State<AppState>,
-    axum::Json(mut s): axum::Json<crate::channel::minimax::CheckinSchedule>,
-) -> Result<axum::Json<crate::channel::minimax::CheckinSchedule>, (axum::http::StatusCode, String)>
-{
+    axum::Json(mut s): axum::Json<crate::channel::minimax_code::CheckinSchedule>,
+) -> Result<
+    axum::Json<crate::channel::minimax_code::CheckinSchedule>,
+    (axum::http::StatusCode, String),
+> {
     s.hour = s.hour.min(23);
     s.minute = s.minute.min(59);
-    crate::channel::minimax::save_schedule(&state.store, &s)
+    crate::channel::minimax_code::save_schedule(&state.store, &s)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(axum::Json(s))
