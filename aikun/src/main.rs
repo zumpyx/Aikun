@@ -2158,7 +2158,7 @@ async fn minimax_provider_token(
             )
         })?
         .ok_or((axum::http::StatusCode::NOT_FOUND, "渠道不存在".into()))?;
-    if p.channel_kind.as_deref() != Some("minimax-code") {
+    if p.channel_kind.trim() != "minimax-code" {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
             "不是 MiniMax Code 渠道".into(),
