@@ -2,7 +2,7 @@
 // 国际/国内 × 订阅JWT/APIKey 四种接入预设与免费额度领取任务面板;
 // WorkBuddy/Qoder 为占位协议子页;Z.AI Chat 待接入。
 // 批量启停/删除、导入导出随应用(kind 过滤);表单复用批量粘贴。
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { healthLabel } from '@/lib/utils'
 import { Link, Navigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -77,6 +77,48 @@ export default function ProxyProviders() {
   const { app } = useParams<{ app?: string }>()
   if (!app || !(app in APPS)) return <Navigate to="/proxies/zcode" replace />
   return <AppPage appId={app as AppId} />
+}
+
+function MiniMaxSchedule() {
+  const [s, setS] = useState({ enabled: true, hour: 8, minute: 0, jitter_secs: 300 })
+  const [saved, setSaved] = useState('')
+  useEffect(() => {
+    void (async () => {
+      const r = await api<typeof s>('GET', '/api/settings/minimax-checkin')
+      if (r.ok) setS(r.data)
+    })()
+  }, [])
+  const save = async () => {
+    const r = await api<typeof s>('POST', '/api/settings/minimax-checkin', s)
+    if (r.ok) { setS(r.data); setSaved('已保存，下一轮按新时间执行') }
+    else setSaved(errMsg(r))
+  }
+  return (
+    <Card>
+      <CardContent className="flex flex-wrap items-end gap-3 p-3 text-sm">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={s.enabled} onChange={(e) => setS({ ...s, enabled: e.target.checked })} />
+          自动签到
+        </label>
+        <label className="flex items-center gap-1">
+          北京时间
+          <input className="w-14 rounded border px-1" type="number" min={0} max={23} value={s.hour}
+            onChange={(e) => setS({ ...s, hour: Number(e.target.value) })} />
+          :
+          <input className="w-14 rounded border px-1" type="number" min={0} max={59} value={s.minute}
+            onChange={(e) => setS({ ...s, minute: Number(e.target.value) })} />
+        </label>
+        <label className="flex items-center gap-1">
+          抖动
+          <input className="w-20 rounded border px-1" type="number" min={0} max={3600} value={s.jitter_secs}
+            onChange={(e) => setS({ ...s, jitter_secs: Number(e.target.value) })} />
+          秒
+        </label>
+        <Button size="sm" variant="outline" onClick={() => void save()}>保存</Button>
+        {saved && <span className="text-xs text-muted-foreground">{saved}</span>}
+      </CardContent>
+    </Card>
+  )
 }
 
 function AppPage({ appId }: { appId: AppId }) {
@@ -257,6 +299,8 @@ function AppPage({ appId }: { appId: AppId }) {
             <Button onClick={() => setBatchOpen(true)}>+ 批量添加</Button>
             {appId === 'zcode-cn' && <Button onClick={() => void claimAll()}>领取闲时额度</Button>}
           </div>
+
+          {appId === 'minimax-code-cn' && <MiniMaxSchedule />}
 
           {login.state !== 'idle' && (
             <Card>

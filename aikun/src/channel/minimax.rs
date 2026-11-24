@@ -259,3 +259,147 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     }
     Some(out)
 }
+
+/// 自动签到设置。库里有覆盖就用覆盖，否则用启动配置。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CheckinSchedule {
+    pub enabled: bool,
+    pub hour: u32,
+    pub minute: u32,
+    /// 到点后的随机抖动秒数。整批先抖一次，每个账号再抖一次。
+    pub jitter_secs: u64,
+}
+
+impl CheckinSchedule {
+    pub fn from_config(c: &crate::config::AppConfig) -> Self {
+        Self {
+            enabled: c.minimax_auto_checkin,
+            hour: c.minimax_checkin_hour.min(23),
+            minute: c.minimax_checkin_minute.min(59),
+            jitter_secs: c.minimax_checkin_jitter_secs,
+        }
+    }
+}
+
+const SETTING_KEY: &str = "minimax_checkin";
+
+pub async fn load_schedule(
+    store: &crate::store::AppStore,
+    fallback: &crate::config::AppConfig,
+) -> CheckinSchedule {
+    let mut res = match store
+        .handle
+        .db()
+        .query("SELECT * FROM type::record('setting', $k);")
+        .bind(("k", SETTING_KEY))
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return CheckinSchedule::from_config(fallback),
+    };
+    let rows: Vec<Value> = res.take(0).unwrap_or_default();
+    rows.first()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_else(|| CheckinSchedule::from_config(fallback))
+}
+
+pub async fn save_schedule(
+    store: &crate::store::AppStore,
+    s: &CheckinSchedule,
+) -> Result<(), String> {
+    store
+        .handle
+        .db()
+        .query(
+            "UPSERT type::record('setting', $k) SET enabled = $enabled, hour = $hour, minute = $minute, jitter_secs = $jitter;",
+        )
+        .bind(("k", SETTING_KEY))
+        .bind(("enabled", s.enabled))
+        .bind(("hour", s.hour))
+        .bind(("minute", s.minute))
+        .bind(("jitter", s.jitter_secs))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 每天北京时间 hour:minute 后，随机抖动再签到全部活跃 MiniMax 账号。
+pub fn spawn_auto_checkin(
+    store: std::sync::Arc<crate::store::AppStore>,
+    config: crate::config::AppConfig,
+) {
+    tokio::spawn(async move {
+        loop {
+            let sched = load_schedule(&store, &config).await;
+            if !sched.enabled {
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                continue;
+            }
+            let now = chrono::Utc::now().timestamp();
+            let wait = secs_until(sched.hour, sched.minute, now);
+            tracing::info!(
+                "minimax 自动签到:下次北京时间 {:02}:{:02}，抖动 {}s",
+                sched.hour,
+                sched.minute,
+                sched.jitter_secs
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            let jitter = rand_secs(sched.jitter_secs);
+            if jitter > 0 {
+                tracing::info!("minimax 自动签到:抖动 {jitter}s 后开始");
+                tokio::time::sleep(std::time::Duration::from_secs(jitter)).await;
+            }
+            run_checkins(&store, sched.jitter_secs).await;
+        }
+    });
+}
+
+async fn run_checkins(store: &crate::store::AppStore, jitter_secs: u64) {
+    let providers = match store.channels.active_channels().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("minimax 自动签到:读渠道失败: {e}");
+            return;
+        }
+    };
+    let targets: Vec<_> = providers
+        .into_iter()
+        .filter(|p| p.channel_kind.trim() == "minimax-code")
+        .collect();
+    if targets.is_empty() {
+        tracing::info!("minimax 自动签到:无活跃账号,跳过");
+        return;
+    }
+    tracing::info!("minimax 自动签到开始:{} 个账号", targets.len());
+    for p in targets {
+        let gap = rand_secs(jitter_secs.min(30).max(1));
+        tokio::time::sleep(std::time::Duration::from_secs(gap)).await;
+        let token = crate::crypto::decrypt_or_plain(&store.cipher, &p.api_key);
+        let client = reqwest::Client::new();
+        match claim_signin(&client, &token).await {
+            Ok(_) => tracing::info!("minimax 自动签到({}) 完成", p.id),
+            Err(e) => tracing::warn!("minimax 自动签到({}) 失败: {e}", p.id),
+        }
+    }
+}
+
+fn secs_until(hour: u32, minute: u32, now_unix: i64) -> u64 {
+    let target = i64::from(hour) * 3600 + i64::from(minute) * 60 - 8 * 3600;
+    let now = now_unix.rem_euclid(86_400);
+    let mut delta = target - now;
+    if delta <= 0 {
+        delta += 86_400;
+    }
+    delta as u64
+}
+
+fn rand_secs(max: u64) -> u64 {
+    if max == 0 {
+        return 0;
+    }
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    n % (max + 1)
+}

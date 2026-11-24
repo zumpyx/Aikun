@@ -36,6 +36,13 @@ pub struct AppConfig {
     /// 避开整点发放竞态)。默认 7:工作日早 7 点领取当晚窗口(3 亿),
     /// 周五领取周末包(5 亿);每天幂等执行。
     pub zcode_claim_hour: u32,
+    /// MiniMax Code 每日自动签到。默认开。
+    pub minimax_auto_checkin: bool,
+    /// 自动签到时刻(北京时间)。默认 08:00。
+    pub minimax_checkin_hour: u32,
+    pub minimax_checkin_minute: u32,
+    /// 到点后的随机抖动秒数。默认 300(5 分钟内随机开跑)。
+    pub minimax_checkin_jitter_secs: u64,
     /// ZCode OAuth 在线登录端点(渠道拆分批次):默认官方
     /// https://zcode.z.ai/api/v1;e2e 用 mock 覆盖。
     pub zcode_oauth_base: String,
@@ -99,6 +106,10 @@ impl Default for AppConfig {
             breaker_cooldown_secs: 30,
             zcode_auto_claim: true,
             zcode_claim_hour: 7,
+            minimax_auto_checkin: true,
+            minimax_checkin_hour: 8,
+            minimax_checkin_minute: 0,
+            minimax_checkin_jitter_secs: 300,
             zcode_oauth_base: "https://zcode.z.ai/api/v1".to_string(),
             request_timeout_secs: 120,
             connect_timeout_secs: 15,
@@ -176,6 +187,26 @@ const SETTINGS: &[(&str, &str, &str)] = &[
         "zcode-claim-hour",
         "AIKUN_ZCODE_CLAIM_HOUR",
         "自动领取时刻,北京时间整点 0..=23(默认 7=工作日早 7 点领取;实际在整点后 10 分钟)",
+    ),
+    (
+        "minimax-auto-checkin",
+        "AIKUN_MINIMAX_AUTO_CHECKIN",
+        "MiniMax Code 每日自动签到(默认 true)",
+    ),
+    (
+        "minimax-checkin-hour",
+        "AIKUN_MINIMAX_CHECKIN_HOUR",
+        "MiniMax 自动签到小时,北京时间 0..=23(默认 8)",
+    ),
+    (
+        "minimax-checkin-minute",
+        "AIKUN_MINIMAX_CHECKIN_MINUTE",
+        "MiniMax 自动签到分钟 0..=59(默认 0)",
+    ),
+    (
+        "minimax-checkin-jitter-secs",
+        "AIKUN_MINIMAX_CHECKIN_JITTER_SECS",
+        "到点后随机抖动秒数(默认 300)",
     ),
     (
         "zcode-oauth-base",
@@ -371,6 +402,26 @@ impl AppConfig {
                 "zcode-claim-hour 必须是 0..=23,当前值: {h}"
             );
             config.zcode_claim_hour = h;
+        }
+        if let Some(val) = get("minimax-auto-checkin", "AIKUN_MINIMAX_AUTO_CHECKIN") {
+            config.minimax_auto_checkin = matches!(
+                val.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+        }
+        if let Some(val) = get("minimax-checkin-hour", "AIKUN_MINIMAX_CHECKIN_HOUR") {
+            let h: u32 = val.trim().parse().unwrap_or(8);
+            config.minimax_checkin_hour = h.min(23);
+        }
+        if let Some(val) = get("minimax-checkin-minute", "AIKUN_MINIMAX_CHECKIN_MINUTE") {
+            let m: u32 = val.trim().parse().unwrap_or(0);
+            config.minimax_checkin_minute = m.min(59);
+        }
+        if let Some(val) = get(
+            "minimax-checkin-jitter-secs",
+            "AIKUN_MINIMAX_CHECKIN_JITTER_SECS",
+        ) {
+            config.minimax_checkin_jitter_secs = val.trim().parse().unwrap_or(300);
         }
         if let Some(val) = get("zcode-oauth-base", "AIKUN_ZCODE_OAUTH_BASE") {
             let v = val.trim().trim_end_matches('/');
