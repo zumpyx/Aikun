@@ -413,15 +413,36 @@ function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: b
   const [presetId, setPresetId] = useState(presets[0]?.id ?? '')
   const preset = presets.find((p) => p.id === presetId)
   const [keys, setKeys] = useState('')
-  const [models, setModels] = useState('GLM-5.3, GLM-5.3-Flash')
+  const [models, setModels] = useState('')
+  const [modelsStatus, setModelsStatus] = useState('填入凭证后点「获取模型」从上游拉取')
   const [priority, setPriority] = useState('0')
   const [weight, setWeight] = useState('1.0')
   const [busy, setBusy] = useState(false)
+
+  const pullModels = async () => {
+    const key = keys.split('\n').map((s) => s.trim()).filter(Boolean)[0]
+    if (!preset || !key) return setModelsStatus('请先粘贴凭证')
+    setModelsStatus('正在从上游获取模型…')
+    const r = await api<{ models?: string[] }>('POST', '/api/providers/fetch-models', {
+      base_url: preset.anthropic_base_url || preset.openai_base_url,
+      api_key: key,
+      protocol: preset.default_protocol,
+      channel_kind: preset.kind,
+      proxy_url: proxyUrl,
+    })
+    if (r.ok && (r.data.models ?? []).length > 0) {
+      setModels(r.data.models!.join(', '))
+      setModelsStatus(`已获取 ${r.data.models!.length} 个模型`)
+    } else {
+      setModelsStatus(errMsg(r) || '未能获取，可手动填写')
+    }
+  }
+
   const submit = async () => {
     const keyList = keys.split('\n').map((s) => s.trim()).filter(Boolean)
     if (!preset) return sonnerToast.error('请选择接入类型')
     if (keyList.length === 0) return sonnerToast.error('请至少粘贴一个凭证(每行一个)')
-    if (!models.trim()) return sonnerToast.error('请填写模型(逗号分隔)')
+    if (!models.trim()) return sonnerToast.error('请填写模型，或点「获取模型」从上游拉取')
     setBusy(true)
     try {
       const r = await api<{ created?: number; failed?: unknown[]; providers?: unknown[] }>('POST', '/api/providers/batch', {
@@ -486,12 +507,15 @@ function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: b
             </select>
             <p className="text-xs text-muted-foreground">socks5/http 代理在「代理」页统一管理</p>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">模型(逗号分隔)</label>
-              <Input value={models} onChange={(e) => setModels(e.target.value)} />
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground">模型(逗号分隔)</label>
+            <div className="flex gap-2">
+              <Input className="flex-1" value={models} onChange={(e) => setModels(e.target.value)} placeholder="留空则使用默认，或点右侧获取" />
+              <Button type="button" variant="outline" size="sm" onClick={() => void pullModels()}>获取模型</Button>
             </div>
-            <div className="grid grid-cols-2 gap-2">
+            <p className="text-xs text-muted-foreground">{modelsStatus}</p>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
               <div className="space-y-1.5">
                 <label className="text-xs font-medium text-muted-foreground">优先级</label>
                 <Input type="number" value={priority} onChange={(e) => setPriority(e.target.value)} />
@@ -501,7 +525,6 @@ function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: b
                 <Input type="number" step="0.1" value={weight} onChange={(e) => setWeight(e.target.value)} />
               </div>
             </div>
-          </div>
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
             <Button type="submit" disabled={busy}>{busy ? '创建中…' : `批量创建`}</Button>
@@ -685,8 +708,9 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
       const r = await api<ZcodeAccountInfo & { name_updated: boolean }>(
         'POST', `/api/providers/${target.id}/zcode/account-info`)
       if (r.ok) {
-        sonnerToast.success(`${target.name}:账号信息已获取${r.data.name_updated ? '(名称已回填)' : ''}`)
+        sonnerToast.success(`${target.name}:账号信息已获取${r.data.name_updated ? '(名称已回填)' : ''}，模型已同步`)
         void qc.invalidateQueries({ queryKey: ['zcode-account-cached', target.id] })
+        void qc.invalidateQueries({ queryKey: ['proxies'] })
         onDone()
       } else {
         sonnerToast.error(`${target.name} 获取失败:${errMsg(r)}`)

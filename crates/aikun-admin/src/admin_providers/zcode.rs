@@ -274,9 +274,11 @@ impl AdminProvidersService {
                                 .await;
                             // 免费额度不会自动到账:建好渠道后台自动领取一遍
                             // (fire-and-forget,结果入 proxy_task 快照;失败可随时手动再领)。
+                            // 同时拉一次账号信息，用 balance 回写实际可用模型。
                             let svc = self.clone();
                             let row_id = row.id.clone();
                             tokio::spawn(async move {
+                                let _ = svc.admin_zcode_account_info(row_id.clone()).await;
                                 let r = match svc.admin_zcode_claim_quota_sourced(row_id.clone(), "oauth").await {
                                     aikun_openapi::openapi::server::errors::AdminZcodeClaimQuotaResponse::Ok(r) => r,
                                     _ => {
@@ -481,6 +483,22 @@ impl AdminProvidersService {
             .and_then(|a| a.first())
             .and_then(|p| p["name"].as_str())
             .map(str::to_string);
+        // 从 balance.balances[].show_name 提取实际可用模型，合并默认列表后回写渠道。
+        let mut models: Vec<String> = aikun_channels::adapters::zcode::DEFAULT_MODELS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if let Some(arr) = balance["balances"].as_array() {
+            for b in arr {
+                if let Some(name) = b["show_name"].as_str() {
+                    let name = name.trim();
+                    if !name.is_empty() && !models.iter().any(|m| m == name) {
+                        models.push(name.to_string());
+                    }
+                }
+            }
+        }
+        let models_json = serde_json::to_string(&models).unwrap_or_else(|_| "[]".into());
         // 回填(2026-11-20 改版):**只回填名称**——列表名称即备注
         // (自由修改),自动生成名 zcode- 前缀才替换为账号标识;note 不再
         // 写摘要(仅保留 [国内] 归组标记,账号信息的持久化改走
@@ -496,6 +514,7 @@ impl AdminProvidersService {
             } else {
                 None
             },
+            models_json: Some(models_json),
             ..Default::default()
         };
         let _ = self.store.update_provider(&id, &patch).await;
