@@ -34,6 +34,7 @@ sha2 = "0.10"
 
 # Auth
 jsonwebtoken = "9"
+md-5 = "0.10"
 rand = "0.9"
 
 # HTTP client(rustls 替代系统 OpenSSL,便于静态构建)

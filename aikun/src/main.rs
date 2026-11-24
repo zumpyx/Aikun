@@ -223,6 +223,20 @@ async fn async_main() {
                 auth_middleware,
             ));
 
+    // MiniMax Code：账号信息 / 签到（手写路由，不进 OpenAPI 生成）
+    let minimax_routes = Router::new()
+        .route(
+            "/api/providers/{id}/minimax/account-info",
+            get(minimax_account_info).post(minimax_account_info),
+        )
+        .route("/api/providers/{id}/minimax/checkin", post(minimax_checkin))
+        .layer(middleware::from_fn(require_admin))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
+        .with_state(state.clone());
+
     // --- Public routes (no auth) ---
     // Auth tag 的 /、/static、/api/auth/login 已迁 crates/aikun-admin,
     // 由上方 auth_routes 承担;管理面(User/Admin tag)同样由生成路由承担。
@@ -312,6 +326,7 @@ async fn async_main() {
         .merge(public_routes)
         .merge(relay_routes)
         .merge(admin_routes.with_state(()))
+        .merge(minimax_routes)
         .merge(user_routes.with_state(()))
         .merge(auth_routes.with_state(()))
         .fallback(move |req: axum::extract::Request| {
@@ -1781,12 +1796,18 @@ impl providers_port::ProviderProbes for GatewayProbes {
             }
             return Ok(models);
         }
-        // MiniMax Code 官方 catalog（managed 端点没有独立 /models）。
+        // MiniMax Code：models-dev catalog，失败回退官方 catalog。
         if probe.channel_kind.trim() == aikun_channels::adapters::minimax_code::KIND {
-            return Ok(aikun_channels::adapters::minimax_code::DEFAULT_MODELS
-                .iter()
-                .map(|s| s.to_string())
-                .collect());
+            let client = crate::channel::transport::cached_client(
+                &self.clients,
+                &probe.proxy_url,
+                "minimax-models",
+                15,
+                self.config.connect_timeout_secs,
+            );
+            return crate::channel::minimax::fetch_models(&client, &probe.api_key)
+                .await
+                .map_err(|e| providers_port::FetchModelsError::Connect { message: e });
         }
         let resp = match upstream_req.send().await {
             Ok(r) => r,
@@ -2112,5 +2133,86 @@ impl stats_port::StatsStore for SurrealStatsStore {
             providers: stats.providers,
             requests_today,
         })
+    }
+}
+
+async fn minimax_provider_token(
+    state: &AppState,
+    id: &str,
+) -> Result<(String, reqwest::Client), (axum::http::StatusCode, String)> {
+    let p = state
+        .store
+        .channels
+        .get_provider(id)
+        .await
+        .map_err(|_| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "读取渠道失败".into(),
+            )
+        })?
+        .ok_or((axum::http::StatusCode::NOT_FOUND, "渠道不存在".into()))?;
+    if p.channel_kind.as_deref() != Some("minimax-code") {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "不是 MiniMax Code 渠道".into(),
+        ));
+    }
+    let token = crate::crypto::decrypt_or_plain(&state.store.cipher, &p.api_key);
+    let client = crate::channel::transport::cached_client(
+        &state.clients,
+        &p.proxy_url,
+        "minimax",
+        30,
+        state.config.connect_timeout_secs,
+    );
+    Ok((token, client))
+}
+
+async fn minimax_account_info(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let (token, client) = minimax_provider_token(&state, &id).await?;
+    let info = crate::channel::minimax::account_info(&client, &token).await;
+    if let Some(models) = info.get("models").and_then(|m| m.as_array()) {
+        let names: Vec<String> = models
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        if !names.is_empty() {
+            let patch = aikun_store::surreal::channels_store::ProviderPatch {
+                name: None,
+                provider_type: None,
+                channel_kind: None,
+                anthropic_base_url: None,
+                api_key_plain: None,
+                models_json: Some(serde_json::to_string(&names).unwrap_or_default()),
+                model_mapping_json: None,
+                protocols_json: None,
+                default_protocol: None,
+                priority: None,
+                weight: None,
+                is_active: None,
+                max_retries: None,
+                timeout_secs: None,
+                proxy_url: None,
+                note: None,
+                website_url: None,
+            };
+            let _ = state.store.channels.update_provider(&id, patch).await;
+        }
+    }
+    Ok(axum::Json(info))
+}
+
+async fn minimax_checkin(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let (token, client) = minimax_provider_token(&state, &id).await?;
+    match crate::channel::minimax::claim_signin(&client, &token).await {
+        Ok(v) => Ok(axum::Json(v)),
+        Err(e) => Err((axum::http::StatusCode::BAD_GATEWAY, e)),
     }
 }

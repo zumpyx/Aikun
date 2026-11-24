@@ -137,6 +137,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "jsonwebtoken 9.3.1",
+ "md-5 0.10.6",
  "rand 0.9.5",
  "reqwest",
  "serde",

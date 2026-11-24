@@ -596,7 +596,8 @@ export default function Providers() {
   const allProxies = proxies.data ?? []
   const isDomestic = (p: ProviderDetail) =>
     p.channel_kind === 'bigmodel-plan' || (p.note ?? '').trim().startsWith('[国内]')
-  const cnGroup = allProxies.filter(isDomestic)
+  const cnGroup = allProxies.filter((p) => isDomestic(p) && p.channel_kind !== 'minimax-code')
+  const intGroup = allProxies.filter((p) => !isDomestic(p) && (p.channel_kind === 'zcode' || p.channel_kind === 'zai-plan'))
   const cnMiniMax = allProxies.filter((p) =>
     p.channel_kind === 'minimax-code' && (
       (p.note ?? '').includes('国内') ||

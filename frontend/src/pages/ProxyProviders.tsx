@@ -726,6 +726,32 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
 }) {
   const qc = useQueryClient()
   const isZcode = target.channel_kind === 'zcode'
+  const isMiniMax = target.channel_kind === 'minimax-code'
+  const [mmInfo, setMmInfo] = useState<Record<string, unknown> | null>(null)
+  const [mmBusy, setMmBusy] = useState(false)
+
+  const refreshMiniMax = async () => {
+    setMmBusy(true)
+    try {
+      const r = await api<Record<string, unknown>>('POST', `/api/providers/${target.id}/minimax/account-info`)
+      if (r.ok) {
+        setMmInfo(r.data)
+        sonnerToast.success('已拉取模型、额度与签到状态')
+        void qc.invalidateQueries({ queryKey: ['proxies'] })
+        onDone()
+      } else sonnerToast.error(errMsg(r))
+    } finally { setMmBusy(false) }
+  }
+  const claimCheckin = async () => {
+    setMmBusy(true)
+    try {
+      const r = await api<Record<string, unknown>>('POST', `/api/providers/${target.id}/minimax/checkin`)
+      if (r.ok) {
+        sonnerToast.success('签到已提交')
+        void refreshMiniMax()
+      } else sonnerToast.error(errMsg(r))
+    } finally { setMmBusy(false) }
+  }
   const domestic = isZcode && isDomestic(target)
   const [resetBusy, setResetBusy] = useState<string | null>(null)
   const [fetching, setFetching] = useState(false)
@@ -900,6 +926,29 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
                     尚未获取账号信息——点击「获取账号信息」用渠道凭证查上游(零消耗:免费额度桶、订阅、5 小时/每周额度、重置次数),结果会保存在这里,下次打开直接显示。
                   </p>
                 </div>
+              )}
+            </section>
+          )}
+
+          {isMiniMax && (
+            <section className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h4 className="font-medium">账号 / 活动</h4>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" disabled={mmBusy} onClick={() => void claimCheckin()}>每日签到</Button>
+                  <Button size="sm" variant="outline" disabled={mmBusy} onClick={() => void refreshMiniMax()}>
+                    {mmBusy ? '获取中…' : '获取模型与额度'}
+                  </Button>
+                </div>
+              </div>
+              {mmInfo ? (
+                <pre className="max-h-48 overflow-auto rounded-md border bg-muted/40 p-2 text-[11px]">
+                  {JSON.stringify(mmInfo, null, 2)}
+                </pre>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  点「获取模型与额度」从官方拉模型列表、套餐额度和签到状态。每日签到领取积分（当天 400，连续第 4/7 天 1000）。
+                </p>
               )}
             </section>
           )}
