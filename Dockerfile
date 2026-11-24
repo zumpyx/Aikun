@@ -11,7 +11,8 @@ COPY . .
 # 不随源码变动,buildx gha 缓存可跨构建复用。
 RUN rustup toolchain install 1.100.0 --profile minimal && rustup default 1.100.0
 
-# cargo build 会在 build.rs 里跑 npm。镜像本身没有 Node。
+# cargo zigbuild 交叉编译时 build.rs 仍在构建机上跑，npm 也在构建机上。
+# 镜像本身没有 Node，按构建机架构装一份即可。
 RUN arch=$(uname -m) && \
     case "$arch" in x86_64) n=x64 ;; aarch64) n=arm64 ;; *) echo "no node for $arch" >&2; exit 1 ;; esac && \
     curl -fsSL "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-${n}.tar.xz" | tar -xJ -C /usr/local --strip-components=1 && \

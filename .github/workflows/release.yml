@@ -39,6 +39,7 @@ jobs:
           rustup default 1.100.0
           rustc --version
 
+      # zigbuild 交叉编译时 build.rs 仍在本容器（构建机）执行，需要 Node。
       - name: Install Node.js
         run: |
           arch=$(uname -m)
