@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, dev, refactor/modular-gateway]
+    branches: [main, dev]
   pull_request:
     branches: [main, dev]
 
