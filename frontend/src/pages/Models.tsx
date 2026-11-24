@@ -1,7 +1,6 @@
 // 模型列表:/v1/models + admin 渠道健康矩阵(models.js 迁移)
 import { useQuery } from '@tanstack/react-query'
 import { api, type Page } from '@/lib/api'
-import { fmtTime } from '@/lib/utils'
 import { useAuth } from '@/lib/auth'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
@@ -14,6 +13,9 @@ interface ProviderRow {
   is_active: boolean
   health_status: string
   latency_ms: number
+  error_rate?: number | null
+  disabled_reason?: string | null
+  channel_kind?: string | null
 }
 interface HealthRow {
   provider_id: string
@@ -24,19 +26,34 @@ interface HealthRow {
   error?: string | null
 }
 
-function cellTone(active: boolean, health?: string) {
-  if (!active) return 'bg-gray-300'
-  if (health === 'healthy') return 'bg-emerald-500'
-  if (health === 'unhealthy') return 'bg-red-500'
-  if (health) return 'bg-gray-300'
-  return undefined
+type CellKind = 'ok' | 'bad' | 'limited' | 'off'
+
+function cellKind(p: ProviderRow, h?: HealthRow): CellKind {
+  if (!p.is_active) return 'off'
+  const err = `${h?.error ?? ''} ${p.disabled_reason ?? ''}`.toLowerCase()
+  if (err.includes('429') || err.includes('rate') || err.includes('限速') || p.health_status === 'degraded') return 'limited'
+  if (h) return h.status === 'healthy' ? 'ok' : 'bad'
+  if (p.health_status === 'healthy') return 'ok'
+  if (p.health_status === 'down' || p.health_status === 'unhealthy') return 'bad'
+  return 'off'
 }
-function fallbackTone(p: ProviderRow) {
-  if (!p.is_active) return 'bg-gray-300'
-  if (p.health_status === 'healthy') return 'bg-emerald-500'
-  if (p.health_status === 'degraded') return 'bg-amber-400'
-  if (p.health_status === 'down') return 'bg-red-500'
+
+function cellColor(k: CellKind): string {
+  if (k === 'ok') return 'bg-emerald-500'
+  if (k === 'bad') return 'bg-red-500'
+  if (k === 'limited') return 'bg-amber-400'
   return 'bg-gray-300'
+}
+
+function healthPct(p: ProviderRow, h?: HealthRow): number {
+  if (typeof p.error_rate === 'number' && Number.isFinite(p.error_rate)) {
+    return Math.round((1 - Math.min(1, Math.max(0, p.error_rate))) * 100)
+  }
+  const k = cellKind(p, h)
+  if (k === 'ok') return 100
+  if (k === 'limited') return 50
+  if (k === 'bad') return 0
+  return 0
 }
 
 export default function Models() {
@@ -89,11 +106,11 @@ export default function Models() {
     <div className="space-y-4">
       <div><h2 className="text-xl font-bold">模型列表</h2><p className="text-sm text-muted-foreground">网关上所有可用模型</p></div>
       <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1.5"><i className="size-2.5 rounded-sm bg-emerald-500" />实测通过</span>
-        <span className="flex items-center gap-1.5"><i className="size-2.5 rounded-sm bg-amber-400" />降级</span>
-        <span className="flex items-center gap-1.5"><i className="size-2.5 rounded-sm bg-red-500" />实测失败</span>
-        <span className="flex items-center gap-1.5"><i className="size-2.5 rounded-sm bg-gray-300" />未测试/已禁用</span>
-        <span className="ml-auto">共 {data.length} 个模型 · 每 30 分钟自动实测更新</span>
+        <span className="flex items-center gap-1.5"><i className="size-2.5 rounded-[2px] bg-emerald-500" />正常</span>
+        <span className="flex items-center gap-1.5"><i className="size-2.5 rounded-[2px] bg-amber-400" />限速</span>
+        <span className="flex items-center gap-1.5"><i className="size-2.5 rounded-[2px] bg-red-500" />故障</span>
+        <span className="flex items-center gap-1.5"><i className="size-2.5 rounded-[2px] bg-gray-300" />未测/禁用</span>
+        <span className="ml-auto">共 {data.length} 个模型 · 悬停查看健康度</span>
       </div>
       <Card><CardContent className="p-0">
         <Table>
@@ -108,14 +125,22 @@ export default function Models() {
                     {provs.length === 0 ? (
                       <span className="text-xs text-muted-foreground">无渠道</span>
                     ) : (
-                      <div className="flex flex-wrap gap-1.5">
+                      <div
+                        className="inline-grid gap-px rounded border bg-background p-1"
+                        style={{ gridTemplateColumns: `repeat(${Math.min(12, Math.max(4, Math.ceil(Math.sqrt(provs.length))))}, 10px)` }}
+                      >
                         {provs.map((p) => {
                           const h = healthMap[`${p.id}|${m.id}`]
-                          const tone = h ? cellTone(p.is_active, h.status) : fallbackTone(p)
-                          const tip = h
-                            ? `${p.name} — 实测${h.status === 'healthy' ? '通过' : h.status === 'unhealthy' ? '失败' : '未知'}${h.checked_at ? ' · ' + fmtTime(h.checked_at) : ''}${h.latency_ms > 0 ? ` · ${Math.round(h.latency_ms)}ms` : ''}${h.error ? ' · ' + h.error : ''}`
-                            : `${p.name} — ${p.health_status}（未实测）${p.latency_ms > 0 ? ` · ${Math.round(p.latency_ms)}ms` : ''}`
-                          return <i key={p.id} title={tip} className={`size-3.5 rounded-sm ${tone ?? 'bg-gray-300'}`} />
+                          const kind = cellKind(p, h)
+                          const pct = healthPct(p, h)
+                          const tip = `${p.name}\n健康度 ${pct}%\n${kind === 'ok' ? '正常' : kind === 'limited' ? '限速' : kind === 'bad' ? '故障' : '未测/禁用'}${h?.latency_ms ? ` · ${Math.round(h.latency_ms)}ms` : ''}${h?.error ? `\n${h.error}` : ''}`
+                          return (
+                            <i
+                              key={p.id}
+                              title={tip}
+                              className={`size-2.5 rounded-[1px] ${cellColor(kind)}`}
+                            />
+                          )
                         })}
                       </div>
                     )}
