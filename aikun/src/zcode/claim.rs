@@ -522,4 +522,68 @@ impl aikun_admin::admin_providers::ZcodeClaimPort for ZcodeClaimImpl {
         let host = Self::monitor_host(domestic);
         self.monitor_get(&host, token, BM_QUOTA_PATH).await
     }
+
+    async fn fetch_coding_plan_models(
+        &self,
+        base: &str,
+        jwt: &str,
+        domestic: bool,
+    ) -> Result<Vec<String>, String> {
+        // ZCode: GET /api/v1/client/configs → data.configs.builtin_provider_config_json
+        // 再下载该 JSON，从 Coding Plan 模板取 builtinModelIds。
+        let cfg_path = "/api/v1/client/configs?app_version=4.0.0&platform=linux-x86_64";
+        let (status, body) = self
+            .request_json(reqwest::Method::GET, base, cfg_path, jwt, None)
+            .await?;
+        if status != 200 || body["code"].as_i64() != Some(0) {
+            return Err(format!(
+                "client/configs HTTP {status} code {}",
+                body["code"].as_i64().unwrap_or(-1)
+            ));
+        }
+        let url = body["data"]["configs"]["builtin_provider_config_json"]
+            .as_str()
+            .ok_or("configs 无 builtin_provider_config_json")?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let resp = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| e.without_url().to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("builtin config HTTP {}", resp.status()));
+        }
+        let release: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        Ok(coding_plan_model_ids(&release, domestic))
+    }
+}
+
+/// 从 ZCode builtin 配置取 Coding Plan 模板的 builtinModelIds。
+/// 国内用 bigmodel-api，国际用 zai-api。
+fn coding_plan_model_ids(release: &serde_json::Value, domestic: bool) -> Vec<String> {
+    let want = if domestic { "bigmodel-api" } else { "zai-api" };
+    let rules = release["config"]["providerConfigRules"]["templateRules"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut ids: Vec<String> = Vec::new();
+    for rule in &rules {
+        if rule["templateId"].as_str() != Some(want) {
+            continue;
+        }
+        if let Some(arr) = rule["config"]["builtinModelIds"].as_array() {
+            for id in arr {
+                if let Some(s) = id.as_str() {
+                    let s = s.trim();
+                    if !s.is_empty() && !ids.iter().any(|m| m == s) {
+                        ids.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+    ids
 }

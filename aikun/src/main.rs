@@ -1708,10 +1708,18 @@ impl providers_port::ProviderProbes for GatewayProbes {
         for (k, v) in adapter.auth_headers(&probe.api_key, protocol) {
             upstream_req = upstream_req.header(k, v);
         }
-        // zcode 无独立 /models 端点，models_url 指向零消耗 balance。
-        // 先验证凭证有效，再返回 Coding Plan 已知模型列表（可由账号快照覆盖）。
+        // zcode 无独立 /models 端点。按官方：client/configs → builtin 配置 → builtinModelIds。
         if probe.channel_kind.trim() == aikun_channels::adapters::zcode::KIND {
-            let resp = match upstream_req.send().await {
+            let domestic = probe.base_url.to_lowercase().contains("bigmodel");
+            let cfg_url = format!(
+                "{}/api/v1/client/configs?app_version=4.0.0&platform=linux-x86_64",
+                probe.base_url.trim_end_matches('/')
+            );
+            let mut cfg_req = client.get(&cfg_url);
+            for (k, v) in adapter.auth_headers(&probe.api_key, protocol) {
+                cfg_req = cfg_req.header(k, v);
+            }
+            let cfg_resp = match cfg_req.send().await {
                 Ok(r) => r,
                 Err(e) => {
                     return Err(providers_port::FetchModelsError::Connect {
@@ -1719,105 +1727,57 @@ impl providers_port::ProviderProbes for GatewayProbes {
                     });
                 }
             };
-            let status = resp.status();
-            let body: Value = crate::channel::transport::read_json_limited(
-                resp,
+            if !cfg_resp.status().is_success() {
+                return Err(providers_port::FetchModelsError::UpstreamStatus {
+                    status: cfg_resp.status().as_u16(),
+                    message: "client/configs 失败".into(),
+                });
+            }
+            let cfg: Value = crate::channel::transport::read_json_limited(
+                cfg_resp,
                 crate::channel::transport::MAX_RESP_BODY,
             )
             .await
             .unwrap_or(Value::Null);
-            if !status.is_success() {
-                let status = status.as_u16();
-                let message = body["error"]["message"]
-                    .as_str()
-                    .or_else(|| body["msg"].as_str())
-                    .unwrap_or("upstream rejected the request")
-                    .to_string();
-                return Err(providers_port::FetchModelsError::UpstreamStatus { status, message });
-            }
-            // 先试模型接口，再从 balance 提取，最后回退套餐内置列表。
-            let mut models: Vec<String> = Vec::new();
-            let models_paths = [
-                "/api/v1/ultra/anthropic/v1/models",
-                "/api/anthropic/v1/models",
-                "/v1/models",
-            ];
-            for path in models_paths {
-                let url = format!("{}{}", probe.base_url.trim_end_matches('/'), path);
-                let mut req = client.get(&url);
-                for (k, v) in adapter.auth_headers(&probe.api_key, protocol) {
-                    req = req.header(k, v);
+            let Some(url) = cfg["data"]["configs"]["builtin_provider_config_json"].as_str() else {
+                return Err(providers_port::FetchModelsError::Connect {
+                    message: "configs 无 builtin_provider_config_json".into(),
+                });
+            };
+            let release_resp = match client.get(url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(providers_port::FetchModelsError::Connect {
+                        message: e.without_url().to_string(),
+                    });
                 }
-                if let Ok(resp) = req.send().await {
-                    if resp.status().is_success() {
-                        if let Ok(body) = crate::channel::transport::read_json_limited(
-                            resp,
-                            crate::channel::transport::MAX_RESP_BODY,
-                        )
-                        .await
-                        {
-                            if let Some(arr) = body["data"].as_array() {
-                                for item in arr {
-                                    if let Some(id) = item["id"].as_str() {
-                                        if !id.is_empty() && !models.iter().any(|m| m == id) {
-                                            models.push(id.to_string());
-                                        }
-                                    }
-                                }
-                            }
-                            if !models.is_empty() {
-                                return Ok(models);
-                            }
-                        }
+            };
+            let release: Value = crate::channel::transport::read_json_limited(
+                release_resp,
+                crate::channel::transport::MAX_RESP_BODY,
+            )
+            .await
+            .unwrap_or(Value::Null);
+            let want = if domestic { "bigmodel-api" } else { "zai-api" };
+            let mut models: Vec<String> = Vec::new();
+            if let Some(rules) =
+                release["config"]["providerConfigRules"]["templateRules"].as_array()
+            {
+                for rule in rules {
+                    if rule["templateId"].as_str() != Some(want) {
+                        continue;
                     }
-                }
-            }
-            // 从 balance 的 capabilities / 像模型名的 show_name 提取，跳过 CREDIT_LIMIT。
-            let mut models: Vec<String> = Vec::new();
-            fn collect(v: &Value, out: &mut Vec<String>) {
-                match v {
-                    Value::Object(map) => {
-                        if let Some(caps) = map.get("capabilities").and_then(|c| c.as_array()) {
-                            for c in caps {
-                                if let Some(s) = c.as_str().and_then(|s| s.strip_prefix("model:")) {
-                                    let name = if s.to_ascii_lowercase().starts_with("glm") {
-                                        format!("GLM{}", &s[3..])
-                                    } else {
-                                        s.to_string()
-                                    };
-                                    if !out.iter().any(|m| m.eq_ignore_ascii_case(&name)) {
-                                        out.push(name);
-                                    }
+                    if let Some(arr) = rule["config"]["builtinModelIds"].as_array() {
+                        for id in arr {
+                            if let Some(s) = id.as_str() {
+                                let s = s.trim();
+                                if !s.is_empty() && !models.iter().any(|m| m == s) {
+                                    models.push(s.to_string());
                                 }
                             }
                         }
-                        if let Some(name) = map.get("show_name").and_then(|s| s.as_str()) {
-                            let l = name.to_ascii_lowercase();
-                            if (l.contains("glm") || l.contains("flash"))
-                                && !l.contains("credit")
-                                && !out.iter().any(|m| m.eq_ignore_ascii_case(name))
-                            {
-                                out.push(name.to_string());
-                            }
-                        }
-                        for val in map.values() {
-                            collect(val, out);
-                        }
                     }
-                    Value::Array(arr) => {
-                        for item in arr {
-                            collect(item, out);
-                        }
-                    }
-                    _ => {}
                 }
-            }
-            collect(&body["data"], &mut models);
-            if models.is_empty() {
-                models = aikun_channels::adapters::zcode::DEFAULT_MODELS
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
             }
             return Ok(models);
         }

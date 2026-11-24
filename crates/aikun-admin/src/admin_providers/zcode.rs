@@ -125,6 +125,16 @@ pub trait ZcodeClaimPort: Send + Sync + 'static {
     /// GET {monitor 域}/api/monitor/usage/quota/limit 的 data(5 小时窗
     /// 与每周窗的用量额度:`{level, limits:[...]}`)。
     async fn fetch_quota(&self, domestic: bool, token: &str) -> Result<serde_json::Value, String>;
+
+    /// 按 ZCode 官方流程拉模型：先 GET /api/v1/client/configs 拿
+    /// builtin_provider_config_json，再下载该 JSON，取 Coding Plan
+    /// 模板的 builtinModelIds。balance 里没有模型。
+    async fn fetch_coding_plan_models(
+        &self,
+        base: &str,
+        jwt: &str,
+        domestic: bool,
+    ) -> Result<Vec<String>, String>;
 }
 
 // ---- 服务方法(挂在主模块的服务上;子模块可访问其私有字段) ----
@@ -485,16 +495,24 @@ impl AdminProvidersService {
             .and_then(|a| a.first())
             .and_then(|p| p["name"].as_str())
             .map(str::to_string);
-        // 模型不在 balances[].show_name（那是额度桶名，如 CREDIT_LIMIT）。
-        // 先从 capabilities / entitlements 收集；收集不到就用套餐内置列表，避免空列表。
-        let mut models = extract_zcode_models(&balance);
-        if models.is_empty() {
-            models = aikun_channels::adapters::zcode::DEFAULT_MODELS
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            tracing::info!("zcode 账号 {id} balance 无模型字段，回退套餐内置列表");
-        }
+        // 模型不在 balance。按 ZCode 官方：client/configs → builtin 配置 → builtinModelIds。
+        let domestic =
+            row.note.contains("国内") || row.website_url.to_lowercase().contains("bigmodel");
+        let models = match self
+            .zcode_claim
+            .fetch_coding_plan_models(&base, &jwt, domestic)
+            .await
+        {
+            Ok(m) if !m.is_empty() => m,
+            Ok(_) => {
+                tracing::warn!("zcode 账号 {id} 官方配置无模型");
+                Vec::new()
+            }
+            Err(e) => {
+                tracing::warn!("zcode 账号 {id} 拉模型失败: {e}");
+                Vec::new()
+            }
+        };
         let models_json = serde_json::to_string(&models).unwrap_or_else(|_| "[]".into());
         // 回填(2026-11-20 改版):**只回填名称**——列表名称即备注
         // (自由修改),自动生成名 zcode- 前缀才替换为账号标识;note 不再
