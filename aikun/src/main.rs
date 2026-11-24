@@ -1781,6 +1781,13 @@ impl providers_port::ProviderProbes for GatewayProbes {
             }
             return Ok(models);
         }
+        // MiniMax Code 官方 catalog（managed 端点没有独立 /models）。
+        if probe.channel_kind.trim() == aikun_channels::adapters::minimax_code::KIND {
+            return Ok(aikun_channels::adapters::minimax_code::DEFAULT_MODELS
+                .iter()
+                .map(|s| s.to_string())
+                .collect());
+        }
         let resp = match upstream_req.send().await {
             Ok(r) => r,
             Err(e) => {

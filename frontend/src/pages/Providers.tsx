@@ -597,7 +597,12 @@ export default function Providers() {
   const isDomestic = (p: ProviderDetail) =>
     p.channel_kind === 'bigmodel-plan' || (p.note ?? '').trim().startsWith('[国内]')
   const cnGroup = allProxies.filter(isDomestic)
-  const intGroup = allProxies.filter((p) => !isDomestic(p) && (p.channel_kind === 'zcode' || p.channel_kind === 'zai-plan'))
+  const cnMiniMax = allProxies.filter((p) =>
+    p.channel_kind === 'minimax-code' && (
+      (p.note ?? '').includes('国内') ||
+      (p.anthropic_base_url ?? '').includes('minimax.cn') ||
+      (p.openai_base_url ?? '').includes('minimax.cn')
+    ))
 
   const renderAppRow = (label: string, items: ProviderDetail[], key: string) => {
     if (items.length === 0) return null
@@ -660,7 +665,7 @@ export default function Providers() {
       {batchOpen && <BatchModal onOpenChange={setBatchOpen} />}
       <Card>
         <CardContent className="p-0">
-          {data.length === 0 && cnGroup.length === 0 && intGroup.length === 0 ? (
+          {data.length === 0 && cnGroup.length === 0 && intGroup.length === 0 && cnMiniMax.length === 0 ? (
             <div className="py-10 text-center text-sm text-muted-foreground">{list.isLoading ? '加载中...' : '暂无渠道，点击上方按钮添加'}</div>
           ) : (
             <Table>
@@ -668,6 +673,7 @@ export default function Providers() {
               <TBody>
                 {renderAppRow('CN-ZCode', cnGroup, 'app-cn-zcode')}
                 {renderAppRow('INT-ZCode', intGroup, 'app-int-zcode')}
+                {renderAppRow('CN-MiniMax-Code', cnMiniMax, 'app-cn-minimax')}
                 {data.map((p) => (
                   <TR key={p.id}>
                     <TD><strong>{p.name}</strong></TD>

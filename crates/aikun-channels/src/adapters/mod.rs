@@ -1,5 +1,6 @@
 pub mod bigmodel_plan;
 pub mod generic;
+pub mod minimax_code;
 pub mod qoder;
 pub mod registry;
 pub mod workbuddy;

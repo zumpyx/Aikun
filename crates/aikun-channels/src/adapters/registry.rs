@@ -43,6 +43,7 @@ impl ChannelRegistry {
         reg.register(Arc::new(super::workbuddy::WorkBuddyAdapter));
         reg.register(Arc::new(super::qoder::QoderAdapter));
         reg.register(Arc::new(super::zcode::ZcodeAdapter));
+        reg.register(Arc::new(super::minimax_code::MiniMaxCodeAdapter));
         reg.register(Arc::new(super::zai_plan::ZaiPlanAdapter));
         reg.register(Arc::new(super::bigmodel_plan::BigModelPlanAdapter));
         reg

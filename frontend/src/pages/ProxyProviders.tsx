@@ -52,12 +52,18 @@ const APPS = {
     regionFilter: 'cn' as const,
     desc: 'GLM Coding Plan·国内(智谱 BigModel):订阅 JWT(API 走 zcode.z.ai ultra)与 API Key(open.bigmodel.cn);凭证与国际 z.ai 互不通用',
   },
+  'minimax-code-cn': {
+    region: 'cn',
+    label: 'CN-MiniMax-Code',
+    kinds: 'minimax-code',
+    desc: 'MiniMax Code·国内：managed-login access token，Base 填 https://agent.minimax.cn/mavis/api/v1/llm/v1，Anthropic',
+  },
 } as const
 
 /** 两行区域分组(第一行国际,第二行国内)。 */
 const REGION_ROWS: { label: string; apps: AppId[] }[] = [
   { label: '国际', apps: ['zcode', 'workbuddy', 'qoder'] },
-  { label: '国内', apps: ['zcode-cn'] },
+  { label: '国内', apps: ['zcode-cn', 'minimax-code-cn'] },
 ]
 
 /** 渠道是否国内(API 统一走 zcode.z.ai,分域看 kind/note 标记:
@@ -400,6 +406,15 @@ const PROXY_PRESETS: { id: string; kind: string; name: string; website_url: stri
     protocols: ['openai'], default_protocol: 'openai', openai_base_url: '', anthropic_base_url: '',
     key_placeholder: 'Qoder 凭证,每行一个', hint: '协议尚未接入(实验性),按 OpenAI 兼容转发。', apps: ['qoder'],
   },
+  {
+    id: 'minimax-code-cn', kind: 'minimax-code', name: 'CN-MiniMax-Code', website_url: 'https://agent.minimax.cn',
+    docs_url: 'https://github.com/MiniMax-AI/minimax-code', protocols: ['anthropic'], default_protocol: 'anthropic',
+    openai_base_url: 'https://agent.minimax.cn/mavis/api/v1/llm/v1',
+    anthropic_base_url: 'https://agent.minimax.cn/mavis/api/v1/llm/v1',
+    key_placeholder: 'MiniMax Code managed-login 的 access token，每行一个',
+    hint: '国内官方端点 agent.minimax.cn。API Key 填登录后的 access token，协议选 Anthropic。',
+    apps: ['minimax-code-cn'],
+  },
 ]
 
 function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: boolean) => void }) {
@@ -454,9 +469,13 @@ function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: b
         openai_base_url: preset.openai_base_url,
         anthropic_base_url: preset.anthropic_base_url,
         api_keys: keyList,
-        note: preset.kind === 'zcode' && preset.id === 'zcode-cn' ? '[国内] 手动添加' : undefined,
+        note: preset.id === 'zcode-cn' || preset.id === 'minimax-code-cn' ? '[国内] 手动添加' : undefined,
         proxy_url: proxyUrl,
-        models: models.split(',').map((s) => s.trim()).filter(Boolean),
+        models: (models.split(',').map((s) => s.trim()).filter(Boolean).length
+          ? models.split(',').map((s) => s.trim()).filter(Boolean)
+          : preset.id === 'minimax-code-cn'
+            ? ['MiniMax-M3', 'MiniMax-M3.1-Flash', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed']
+            : []),
         priority: parseInt(priority, 10) || 0,
         weight: parseFloat(weight) || 1.0,
       })
