@@ -64,26 +64,32 @@ pub async fn claim_signin(client: &reqwest::Client, token: &str) -> Result<Value
 
 pub async fn fetch_models(client: &reqwest::Client, token: &str) -> Result<Vec<String>, String> {
     let desc_url = format!("{CN_GATEWAY}{MODELS_DESC}");
-    if let Ok(r) = client
+    let Ok(r) = client
         .get(&desc_url)
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
-    {
-        if let Ok(body) = r.json::<Value>().await {
-            if let Some(url) = body.get("catalog_url").and_then(|v| v.as_str()) {
-                if let Ok(cat) = client.get(url).send().await {
-                    if let Ok(catalog) = cat.json::<Value>().await {
-                        let models = extract_model_ids(&catalog);
-                        if !models.is_empty() {
-                            return Ok(models);
-                        }
-                    }
-                }
-            }
-        }
+    else {
+        return Ok(minimax_fallback());
+    };
+    let Ok(body) = r.json::<Value>().await else {
+        return Ok(minimax_fallback());
+    };
+    let Some(url) = body.get("catalog_url").and_then(|v| v.as_str()) else {
+        return Ok(minimax_fallback());
+    };
+    let Ok(cat) = client.get(url).send().await else {
+        return Ok(minimax_fallback());
+    };
+    let Ok(catalog) = cat.json::<Value>().await else {
+        return Ok(minimax_fallback());
+    };
+    let models = extract_model_ids(&catalog);
+    if models.is_empty() {
+        Ok(minimax_fallback())
+    } else {
+        Ok(models)
     }
-    Ok(minimax_fallback())
 }
 
 fn minimax_fallback() -> Vec<String> {
@@ -213,10 +219,10 @@ fn jwt_user_id(token: &str) -> Option<String> {
     let bytes = b64_decode(payload)?;
     let v: Value = serde_json::from_slice(&bytes).ok()?;
     for key in ["user_id", "uid", "sub", "real_user_id"] {
-        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
+        if let Some(s) = v.get(key).and_then(|x| x.as_str())
+            && !s.is_empty()
+        {
+            return Some(s.to_string());
         }
         if let Some(n) = v.get(key).and_then(|x| x.as_i64()) {
             return Some(n.to_string());
@@ -227,7 +233,7 @@ fn jwt_user_id(token: &str) -> Option<String> {
 
 fn b64_decode(s: &str) -> Option<Vec<u8>> {
     let mut s = s.replace('-', "+").replace('_', "/");
-    while s.len() % 4 != 0 {
+    while !s.len().is_multiple_of(4) {
         s.push('=');
     }
     base64_decode(&s)
@@ -372,7 +378,7 @@ async fn run_checkins(store: &crate::store::AppStore, jitter_secs: u64) {
     }
     tracing::info!("minimax 自动签到开始:{} 个账号", targets.len());
     for p in targets {
-        let gap = rand_secs(jitter_secs.min(30).max(1));
+        let gap = rand_secs(jitter_secs.clamp(1, 30));
         tokio::time::sleep(std::time::Duration::from_secs(gap)).await;
         let token = crate::crypto::decrypt_or_plain(&store.cipher, &p.api_key);
         let client = reqwest::Client::new();
