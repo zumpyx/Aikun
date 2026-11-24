@@ -136,6 +136,16 @@ impl ChannelAdapter for ZcodeAdapter {
         join_absolute(crate::provider::base_url_for(provider, _protocol), path)
     }
 
+    /// 订阅额度路由需要 `x-coding-plan-api-key`（与 x-api-key / Bearer 同时带）。
+    /// 纯 JWT 缺此头时，上游常把请求算到免费桶，免费桶空了就报「额度已用尽」。
+    fn auth_headers(&self, api_key: &str, protocol: Protocol) -> Vec<(&'static str, String)> {
+        let mut headers = crate::default_auth_headers(api_key, protocol);
+        if protocol == Protocol::Anthropic {
+            headers.push(("x-coding-plan-api-key", api_key.to_string()));
+        }
+        headers
+    }
+
     fn models_url(&self, base_url: &str, _protocol: Protocol) -> String {
         join_absolute(
             base_url,

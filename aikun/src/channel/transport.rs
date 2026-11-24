@@ -302,6 +302,7 @@ pub async fn send_request(
             }
         }
         // 官方 ZCode 逻辑：有业务 token 时签发 PAT，打 ultra 路径。
+        // 订阅额度只认 PAT；纯 JWT 常被算到免费桶，免费桶空了就「额度已用尽」。
         if let Some(bm) = bm_token.filter(|t| !t.trim().is_empty()) {
             match crate::zcode::pat::ensure_pat(bm).await {
                 Ok(pat) => {
@@ -345,6 +346,10 @@ pub async fn send_request(
                     tracing::warn!("zcode PAT 签发失败:{e}");
                 }
             }
+        } else {
+            tracing::warn!(
+                "zcode 账号无业务 token，将用 JWT 打 ultra。若上游报额度已用尽，请在反代页重新在线登录以补全 business_token（订阅额度只认 PAT）"
+            );
         }
         // 无业务 token 或 PAT 失败时，仍走 adapter 动态路径（国内=ultra，国际=ultra-zai），
         // 使用渠道 JWT。不再强制降级到 off-peak / 旧 plan。
