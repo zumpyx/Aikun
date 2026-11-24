@@ -21,6 +21,12 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
@@ -46,6 +52,13 @@ jobs:
           rustup toolchain install 1.100.0 --profile minimal
           rustup default 1.100.0
           rustc --version
+
+      - name: Install Node.js
+        run: |
+          arch=$(uname -m)
+          case "$arch" in x86_64) n=x64 ;; aarch64) n=arm64 ;; *) exit 1 ;; esac
+          curl -fsSL "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-${n}.tar.xz" | tar -xJ -C /usr/local --strip-components=1
+          node -v && npm -v
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -75,9 +88,8 @@ jobs:
           bash scripts/gen-api.sh
           git diff --exit-code -- crates/aikun-openapi
 
-  # 前端构建一致性守卫:frontend/dist 是提交进仓库的构建产物,
-  # 重跑 npm build 必须与入库副本逐字节一致(防手改 dist / 忘重建)。
-  frontend-rebuild-check:
+  # 前端能单独编过即可。dist 不入库,cargo build 时由 build.rs 再编一次。
+  frontend-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -88,13 +100,11 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Rebuild and diff
+      - name: Build frontend
         run: |
           cd frontend
           npm ci
           npm run build
-          cd ..
-          git diff --exit-code -- frontend/dist
 
   # 完整走一遍 release 的 docker 路径(metadata-action → build-push),
   # 但不推送,只验证 Dockerfile 与元数据输出在 CI 环境中可用。

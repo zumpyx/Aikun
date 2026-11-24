@@ -11,6 +11,12 @@ COPY . .
 # 不随源码变动,buildx gha 缓存可跨构建复用。
 RUN rustup toolchain install 1.100.0 --profile minimal && rustup default 1.100.0
 
+# cargo build 会在 build.rs 里跑 npm。镜像本身没有 Node。
+RUN arch=$(uname -m) && \
+    case "$arch" in x86_64) n=x64 ;; aarch64) n=arm64 ;; *) echo "no node for $arch" >&2; exit 1 ;; esac && \
+    curl -fsSL "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-${n}.tar.xz" | tar -xJ -C /usr/local --strip-components=1 && \
+    node -v && npm -v
+
 ARG TARGETPLATFORM
 RUN case "$TARGETPLATFORM" in \
       "linux/amd64")  T=x86_64-unknown-linux-musl ;; \

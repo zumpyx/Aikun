@@ -39,6 +39,13 @@ jobs:
           rustup default 1.100.0
           rustc --version
 
+      - name: Install Node.js
+        run: |
+          arch=$(uname -m)
+          case "$arch" in x86_64) n=x64 ;; aarch64) n=arm64 ;; *) exit 1 ;; esac
+          curl -fsSL "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-${n}.tar.xz" | tar -xJ -C /usr/local --strip-components=1
+          node -v && npm -v
+
       - name: Add rust target
         run: rustup target add ${{ matrix.target }}
 

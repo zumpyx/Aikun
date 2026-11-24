@@ -1,25 +1,26 @@
-//! 前端资产嵌入(React 重写,2026-11-18):扫描仓库根 frontend/dist/
-//! 生成 `OUT_DIR/frontend_assets.rs`(`INDEX_HTML` + `STATIC_ASSETS` 表,
-//! 全部 include_str!),auth.rs include! 消费——单二进制零外部文件纪律不变。
-//!
-//! dist 是**提交进仓库的构建产物**(与 crates/aikun-openapi 生成物同一
-//! 纪律:cargo build 零外部工具);改前端 → `cd frontend && npm run build`
-//! → 提交 dist。缺失 dist 视为仓库不完整,直接报错。
+//! 前端资产嵌入:编译时先跑 `npm run build`，再把 frontend/dist 嵌进二进制。
+//! dist 不入库。改前端后直接 `cargo build` / `cargo run` 即可。
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
-    let dist = PathBuf::from("../../frontend/dist");
-    println!("cargo:rerun-if-changed=../../frontend/dist");
+    let frontend = PathBuf::from("../../frontend");
+    println!("cargo:rerun-if-changed=../../frontend/src");
+    println!("cargo:rerun-if-changed=../../frontend/index.html");
+    println!("cargo:rerun-if-changed=../../frontend/package.json");
+    println!("cargo:rerun-if-changed=../../frontend/package-lock.json");
+    println!("cargo:rerun-if-changed=../../frontend/vite.config.ts");
+    println!("cargo:rerun-if-changed=../../frontend/tsconfig.json");
 
+    build_frontend(&frontend);
+
+    let dist = frontend.join("dist");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let index = dist.join("index.html");
     if !index.is_file() {
-        panic!(
-            "frontend/dist/index.html 不存在——dist 是提交进仓库的构建产物,\
-             若缺失请先 `cd frontend && npm install && npm run build` 并提交 dist/"
-        );
+        panic!("frontend/dist/index.html 不存在——npm run build 未产出");
     }
 
     let mut assets = vec![];
@@ -44,6 +45,27 @@ fn main() {
     let _ = writeln!(rs, "];");
 
     std::fs::write(out_dir.join("frontend_assets.rs"), rs).expect("write frontend_assets.rs");
+}
+
+fn build_frontend(frontend: &Path) {
+    if !frontend.join("node_modules").is_dir() {
+        let status = Command::new("npm")
+            .args(["ci"])
+            .current_dir(frontend)
+            .status()
+            .unwrap_or_else(|e| panic!("找不到 npm({e})。请安装 Node.js 22+"));
+        if !status.success() {
+            panic!("npm ci 失败");
+        }
+    }
+    let status = Command::new("npm")
+        .args(["run", "build"])
+        .current_dir(frontend)
+        .status()
+        .unwrap_or_else(|e| panic!("找不到 npm({e})。请安装 Node.js 22+"));
+    if !status.success() {
+        panic!("npm run build 失败");
+    }
 }
 
 /// 递归收集 css/js(mime 表只覆盖这两类,与 asset_mime 口径一致)。
