@@ -2001,11 +2001,12 @@ async fn zcode_channel_anthropic_protocol_end_to_end() {
     assert_eq!(body["choices"][0]["message"]["content"], "OK");
 
     // 上游收到的请求:端点路径 + JWT 双头 + 伪装头
+    // 种子无国内标记 → 国际路径 ultra-zai
     let sent = mock
         .requests()
         .iter()
-        .find(|r| r.path.contains("/api/v1/ultra/anthropic/v1/messages"))
-        .expect("zcode-plan 端点被命中")
+        .find(|r| r.path.contains("/api/v1/ultra-zai/anthropic/v1/messages"))
+        .expect("ultra-zai 端点被命中")
         .clone();
     let h = &sent.headers;
     let get = |k: &str| -> String {
