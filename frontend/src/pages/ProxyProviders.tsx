@@ -668,13 +668,25 @@ function fmtNum(v?: number | null): string {
 }
 
 /// monitor 额度条标签(客户端 i18n 口径:5 小时提示词池/每周配额/月度)。
-function quotaLabel(l: { type?: string }): string {
+function quotaLabel(l: { type?: string; unit?: number }): string {
+  // unit 是窗口类型，不是总量：3=5小时窗，6=每周窗（ZCode 口径）
+  if (l.unit === 3) return '5 小时额度'
+  if (l.unit === 6) return '每周额度'
   const t = (l.type ?? '').toLowerCase()
   if (t.includes('five') || t.includes('5h')) return '5 小时额度'
   if (t.includes('week')) return '每周额度'
-  if (t.includes('credit') || t.includes('limit')) return '额度上限'
-  if (t.includes('time')) return '用量额度'
-  return l.type ?? '额度'
+  if (t.includes('credit') || t.includes('limit') || t.includes('token')) return '订阅额度'
+  return l.type || '额度'
+}
+
+function quotaUsedTotal(l: { usage?: number; remaining?: number; number?: number; unit?: number }): { used?: number; total?: number } {
+  const used = l.usage
+  // number 是窗口参数（5=5小时），不是 token 总量。总量用 usage+remaining。
+  if (used != null && l.remaining != null) {
+    return { used, total: used + l.remaining }
+  }
+  if (l.remaining != null) return { used: used ?? 0, total: (used ?? 0) + l.remaining }
+  return { used, total: undefined }
 }
 
 function bucketLabel(show?: string): string {
@@ -843,6 +855,9 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
                       {claiming.has(target.id) ? '领取中…' : '领取闲时额度'}
                     </Button>
                   )}
+                  <Button size="sm" variant="outline" disabled={pullingModels} onClick={() => void pullModels()}>
+                    {pullingModels ? '获取中…' : '获取模型'}
+                  </Button>
                   <Button size="sm" variant="outline" disabled={fetching} onClick={() => void refreshInfo()}>
                     {fetching ? '获取中…' : info ? '重新获取' : '获取账号信息'}
                   </Button>
@@ -879,7 +894,7 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
             </div>
             {lanes.length === 0 ? (
               <p className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
-                暂无模型。点「获取模型」从上游同步。
+                暂无模型。点右上角「获取模型」从上游同步。
               </p>
             ) : lanes.map((lane) => {
               const testing = testingModel === lane.key
@@ -975,12 +990,18 @@ function AccountInfoBody({ d, resetBusy, useReset }: {
       {d.plan_credentials && (
         <section className="space-y-1.5">
           {d.quota?.limits?.length ? (
-            d.quota.limits.map((l, i) => (
-              <div key={i} className="rounded-md border p-2">
-                <UsageBar label={quotaLabel(l)} used={l.usage} total={l.number} percentage={l.percentage} />
-                <div className="mt-1 text-[11px] text-muted-foreground">重置于 {ts(l.nextResetTime)}</div>
-              </div>
-            ))
+            d.quota.limits.map((l, i) => {
+              const { used, total } = quotaUsedTotal(l)
+              return (
+                <div key={i} className="rounded-md border p-2">
+                  <UsageBar label={quotaLabel(l)} used={used} total={total} percentage={l.percentage} />
+                  <div className="mt-1 flex justify-between text-[11px] text-muted-foreground">
+                    <span>剩余 {fmtNum(l.remaining)}</span>
+                    <span>重置于 {ts(l.nextResetTime)}</span>
+                  </div>
+                </div>
+              )
+            })
           ) : (
             <p className="text-xs text-muted-foreground">{d.quota ? '无额度记录(可能无付费订阅)' : '额度查询失败(见下方说明)'}</p>
           )}
@@ -1030,7 +1051,7 @@ function UsageBar({ label, used, total, percentage }: { label: string; used?: nu
       <div className="flex items-baseline justify-between text-xs">
         <span>{label}</span>
         <span className="font-mono text-muted-foreground">
-          {used != null && total ? `${fmtNum(used)} / ${fmtNum(total)}` : `${Math.round(clamped)}%`}
+          {used != null && total ? `${fmtNum(used)} / ${fmtNum(total)}` : used != null ? `已用 ${fmtNum(used)}` : `${Math.round(clamped)}%`}
         </span>
       </div>
       <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
