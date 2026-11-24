@@ -486,8 +486,15 @@ impl AdminProvidersService {
             .and_then(|p| p["name"].as_str())
             .map(str::to_string);
         // 模型不在 balances[].show_name（那是额度桶名，如 CREDIT_LIMIT）。
-        // 从 capabilities / entitlements / 像模型名的 show_name 收集。
-        let models = extract_zcode_models(&balance);
+        // 先从 capabilities / entitlements 收集；收集不到就用套餐内置列表，避免空列表。
+        let mut models = extract_zcode_models(&balance);
+        if models.is_empty() {
+            models = aikun_channels::adapters::zcode::DEFAULT_MODELS
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            tracing::info!("zcode 账号 {id} balance 无模型字段，回退套餐内置列表");
+        }
         let models_json = serde_json::to_string(&models).unwrap_or_else(|_| "[]".into());
         // 回填(2026-11-20 改版):**只回填名称**——列表名称即备注
         // (自由修改),自动生成名 zcode- 前缀才替换为账号标识;note 不再

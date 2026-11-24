@@ -1735,6 +1735,43 @@ impl providers_port::ProviderProbes for GatewayProbes {
                     .to_string();
                 return Err(providers_port::FetchModelsError::UpstreamStatus { status, message });
             }
+            // 先试模型接口，再从 balance 提取，最后回退套餐内置列表。
+            let mut models: Vec<String> = Vec::new();
+            let models_paths = [
+                "/api/v1/ultra/anthropic/v1/models",
+                "/api/anthropic/v1/models",
+                "/v1/models",
+            ];
+            for path in models_paths {
+                let url = format!("{}{}", probe.base_url.trim_end_matches('/'), path);
+                let mut req = client.get(&url);
+                for (k, v) in adapter.auth_headers(&probe.api_key, protocol) {
+                    req = req.header(k, v);
+                }
+                if let Ok(resp) = req.send().await {
+                    if resp.status().is_success() {
+                        if let Ok(body) = crate::channel::transport::read_json_limited(
+                            resp,
+                            crate::channel::transport::MAX_RESP_BODY,
+                        )
+                        .await
+                        {
+                            if let Some(arr) = body["data"].as_array() {
+                                for item in arr {
+                                    if let Some(id) = item["id"].as_str() {
+                                        if !id.is_empty() && !models.iter().any(|m| m == id) {
+                                            models.push(id.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            if !models.is_empty() {
+                                return Ok(models);
+                            }
+                        }
+                    }
+                }
+            }
             // 从 balance 的 capabilities / 像模型名的 show_name 提取，跳过 CREDIT_LIMIT。
             let mut models: Vec<String> = Vec::new();
             fn collect(v: &Value, out: &mut Vec<String>) {
@@ -1776,6 +1813,12 @@ impl providers_port::ProviderProbes for GatewayProbes {
                 }
             }
             collect(&body["data"], &mut models);
+            if models.is_empty() {
+                models = aikun_channels::adapters::zcode::DEFAULT_MODELS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+            }
             return Ok(models);
         }
         let resp = match upstream_req.send().await {
