@@ -886,15 +886,10 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
 
           {/* 能力矩阵(zcode:订阅×2 + 闲时免费;其他渠道逐模型) */}
           <section className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <h4 className="font-medium">可用模型</h4>
-              <Button size="sm" variant="outline" disabled={pullingModels} onClick={() => void pullModels()}>
-                {pullingModels ? '获取中…' : '获取模型'}
-              </Button>
-            </div>
+            <h4 className="font-medium">可用模型</h4>
             {lanes.length === 0 ? (
               <p className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
-                暂无模型。点右上角「获取模型」从上游同步。
+                暂无模型。点右上角「获取模型」从官方配置同步。
               </p>
             ) : lanes.map((lane) => {
               const testing = testingModel === lane.key
