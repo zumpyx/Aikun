@@ -563,15 +563,6 @@ function ImportModal({ appId, onOpenChange, onDone }: { appId: AppId; onOpenChan
       setBusy(false)
     }
   }
-      if (r.ok) {
-        setResult(r.data)
-        sonnerToast.success(`导入完成:导入 ${r.data.imported ?? 0} / 跳过 ${r.data.skipped ?? 0}`)
-        onDone()
-      } else sonnerToast.error(errMsg(r))
-    } finally {
-      setBusy(false)
-    }
-  }
 
   return (
     <Dialog open onOpenChange={onOpenChange}>

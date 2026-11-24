@@ -124,10 +124,7 @@ impl ChannelAdapter for ZcodeAdapter {
         } else {
             ULTRA_ZAI_MESSAGES_PATH
         };
-        join_absolute(
-            crate::provider::base_url_for(provider, _protocol),
-            path,
-        )
+        join_absolute(crate::provider::base_url_for(provider, _protocol), path)
     }
 
     fn models_url(&self, base_url: &str, _protocol: Protocol) -> String {

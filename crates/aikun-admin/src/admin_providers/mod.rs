@@ -1544,7 +1544,10 @@ impl AdminProvidersService {
                     .contains("bigmodel")
                     || cand.note.as_deref().unwrap_or("").contains("国内");
                 if is_cn && !cand.note.as_deref().unwrap_or("").contains("国内") {
-                    cand.note = Some(format!("[国内] {}", cand.note.as_deref().unwrap_or("导入账号")));
+                    cand.note = Some(format!(
+                        "[国内] {}",
+                        cand.note.as_deref().unwrap_or("导入账号")
+                    ));
                 }
                 if is_cn && cand.website_url.as_deref().unwrap_or("").is_empty() {
                     cand.website_url = Some("https://bigmodel.cn".into());

@@ -276,14 +276,9 @@ pub async fn send_request(
             } else {
                 provider.anthropic_base_url.trim()
             };
-            if let Ok((resp, waited)) = crate::zcode::offpeak::chat(
-                base,
-                &provider.api_key,
-                &request_body,
-                true,
-                bm_token,
-            )
-            .await
+            if let Ok((resp, waited)) =
+                crate::zcode::offpeak::chat(base, &provider.api_key, &request_body, true, bm_token)
+                    .await
             {
                 if resp.status().is_success() {
                     let latency = start.elapsed().as_millis() as f64;
