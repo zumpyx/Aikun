@@ -3,6 +3,7 @@
 // WorkBuddy/Qoder 为占位协议子页;Z.AI Chat 待接入。
 // 批量启停/删除、导入导出随应用(kind 过滤);表单复用批量粘贴。
 import { useRef, useState } from 'react'
+import { healthLabel } from '@/lib/utils'
 import { Link, Navigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, errMsg, type Page } from '@/lib/api'
@@ -318,7 +319,7 @@ function AppPage({ appId }: { appId: AppId }) {
                           <TD>
                             {!p.is_active
                               ? <Badge tone="destructive" title={p.disabled_reason ?? ''}>已禁用</Badge>
-                              : <Badge tone={p.health_status === 'healthy' ? 'success' : p.health_status === 'degraded' ? 'warn' : p.health_status === 'down' ? 'destructive' : 'muted'}>{p.health_status}</Badge>}
+                              : <Badge tone={p.health_status === 'healthy' ? 'success' : p.health_status === 'degraded' ? 'warn' : p.health_status === 'down' ? 'destructive' : 'muted'}>{healthLabel(p.health_status)}</Badge>}
                           </TD>
                           <TD>{p.latency_ms > 0 ? `${Math.round(p.latency_ms)}ms` : '-'}</TD>
                           <TD>{p.priority}</TD>
@@ -837,7 +838,7 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
               <span className="text-muted-foreground">类型</span><span>{target.channel_kind || target.provider_type}</span>
               <span className="text-muted-foreground">优先级 / 权重</span><span>{target.priority} / {target.weight}</span>
               <span className="text-muted-foreground">状态</span>
-              <span>{!target.is_active ? '已禁用' : `${target.health_status}${target.latency_ms > 0 ? ` · ${Math.round(target.latency_ms)}ms` : ''}`}</span>
+              <span>{!target.is_active ? '已禁用' : `${healthLabel(target.health_status)}${target.latency_ms > 0 ? ` · ${Math.round(target.latency_ms)}ms` : ''}`}</span>
               <span className="text-muted-foreground">端点</span>
               <span className="font-mono break-all text-[11px]">{target.anthropic_base_url || target.openai_base_url}</span>
             </div>

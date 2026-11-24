@@ -4,6 +4,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, errMsg, type Page } from '@/lib/api'
+import { healthLabel } from '@/lib/utils'
 import { sonnerToast } from '@/lib/toast'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -360,7 +361,7 @@ function ProviderModal({ editing, onOpenChange }: { editing: ProviderDetail | nu
     const recentErrors = appGroup
       .filter((p) => p.disabled_reason || p.health_status === 'down' || p.health_status === 'degraded')
       .slice(0, 5)
-      .map((p) => `${p.name}: ${p.disabled_reason || p.health_status}`)
+      .map((p) => `${p.name}: ${p.disabled_reason || healthLabel(p.health_status)}`)
     return (
       <Dialog open onOpenChange={onOpenChange}>
         <DialogContent title={`${editing?.name} 摘要`}>
@@ -685,7 +686,7 @@ export default function Providers() {
                     <TD>
                       {!p.is_active
                         ? <Badge tone="destructive" title={p.disabled_reason || '已手动禁用'}>已禁用</Badge>
-                        : <Badge tone={p.health_status === 'healthy' ? 'success' : p.health_status === 'degraded' ? 'warn' : p.health_status === 'down' ? 'destructive' : 'muted'} title={p.disabled_reason ?? ''}>{p.health_status}</Badge>}
+                        : <Badge tone={p.health_status === 'healthy' ? 'success' : p.health_status === 'degraded' ? 'warn' : p.health_status === 'down' ? 'destructive' : 'muted'} title={p.disabled_reason ?? ''}>{healthLabel(p.health_status)}</Badge>}
                     </TD>
                     <TD>{p.latency_ms > 0 ? `${Math.round(p.latency_ms)}ms` : '-'}</TD>
                     <TD>{p.priority}</TD>

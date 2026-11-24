@@ -20,6 +20,18 @@ export const fmtTime = (v?: string | null) => {
   const d = new Date(s.includes('T') ? s : s.replace(' ', 'T'))
   return Number.isNaN(d.getTime()) ? s : d.toLocaleString()
 }
+
+/** 渠道健康状态中文。库内 unhealthy 在 API 侧映射为 down。 */
+export function healthLabel(s?: string | null): string {
+  switch ((s ?? '').toLowerCase()) {
+    case 'healthy': return '正常'
+    case 'degraded': return '降级'
+    case 'unhealthy':
+    case 'down': return '故障'
+    case 'unknown': return '未知'
+    default: return s || '未知'
+  }
+}
 // 字节截断(昵称 8 字节)
 export const truncBytes = (s: unknown, max: number) => {
   let bytes = 0

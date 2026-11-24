@@ -1,6 +1,7 @@
 // 仪表盘:统计卡 + 30 天趋势(纯 SVG)+ 模型分布 + 渠道状态表(dashboard.js 迁移)
 import { useQuery } from '@tanstack/react-query'
 import { api, type Page } from '@/lib/api'
+import { healthLabel } from '@/lib/utils'
 import { useAuth } from '@/lib/auth'
 import { fmtNum } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -195,7 +196,7 @@ export default function Dashboard() {
                     <TD><strong>{p.name}</strong></TD>
                     <TD><Badge>{p.provider_type}</Badge></TD>
                     <TD className="max-w-64 truncate">{(p.models ?? []).slice(0, 3).join(', ')}{(p.models?.length ?? 0) > 3 ? '...' : ''}</TD>
-                    <TD><Badge tone={healthTone(p.health_status)}>{p.health_status}</Badge></TD>
+                    <TD><Badge tone={healthTone(p.health_status)}>{healthLabel(p.health_status)}</Badge></TD>
                     <TD>{p.latency_ms > 0 ? `${Math.round(p.latency_ms)}ms` : '-'}</TD>
                     <TD>{p.priority}</TD>
                   </TR>
