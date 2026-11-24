@@ -2440,13 +2440,8 @@ async fn zcode_oauth_login_flow() {
         provider["name"]
     );
     assert_eq!(provider["default_protocol"], "anthropic");
-    assert!(
-        provider["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m == "GLM-5.3-Flash")
-    );
+    // 模型不再写死。登录后会拉一次官方配置；mock 不提供 catalog 时为空。
+    assert!(provider["models"].is_array());
 
     // 上游收到 init(poll_token Bearer)与 poll
     let reqs = oauth.requests();
