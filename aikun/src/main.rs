@@ -1719,14 +1719,15 @@ impl providers_port::ProviderProbes for GatewayProbes {
                     });
                 }
             };
-            if !resp.status().is_success() {
-                let status = resp.status().as_u16();
-                let body: Value = crate::channel::transport::read_json_limited(
-                    resp,
-                    crate::channel::transport::MAX_RESP_BODY,
-                )
-                .await
-                .unwrap_or(Value::Null);
+            let status = resp.status();
+            let body: Value = crate::channel::transport::read_json_limited(
+                resp,
+                crate::channel::transport::MAX_RESP_BODY,
+            )
+            .await
+            .unwrap_or(Value::Null);
+            if !status.is_success() {
+                let status = status.as_u16();
                 let message = body["error"]["message"]
                     .as_str()
                     .or_else(|| body["msg"].as_str())
@@ -1734,11 +1735,22 @@ impl providers_port::ProviderProbes for GatewayProbes {
                     .to_string();
                 return Err(providers_port::FetchModelsError::UpstreamStatus { status, message });
             }
-            // 凭证有效，返回官方 Coding Plan 模型基线
-            return Ok(aikun_channels::adapters::zcode::DEFAULT_MODELS
+            // 从 balance 的 balances[].show_name 提取实际可用模型，并与默认列表合并。
+            let mut models: Vec<String> = aikun_channels::adapters::zcode::DEFAULT_MODELS
                 .iter()
                 .map(|s| s.to_string())
-                .collect());
+                .collect();
+            if let Some(arr) = body["data"]["balances"].as_array() {
+                for b in arr {
+                    if let Some(name) = b["show_name"].as_str() {
+                        let name = name.trim();
+                        if !name.is_empty() && !models.iter().any(|m| m == name) {
+                            models.push(name.to_string());
+                        }
+                    }
+                }
+            }
+            return Ok(models);
         }
         let resp = match upstream_req.send().await {
             Ok(r) => r,

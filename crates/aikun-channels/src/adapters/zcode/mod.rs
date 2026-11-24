@@ -63,9 +63,18 @@ pub const ULTRA_ZAI_MESSAGES_PATH: &str = "/api/v1/ultra-zai/anthropic/v1/messag
 /// 默认路径(静态 endpoint_path 用;实际 chat_url 动态选择)。
 pub const MESSAGES_PATH: &str = ULTRA_MESSAGES_PATH;
 
-/// Coding Plan 已知模型（官方 builtin；上游无独立 list 端点时作为动态获取的基线，
-/// 实际可用以账号套餐为准，可由管理端 fetch-models 或账号信息快照覆盖）。
-pub const DEFAULT_MODELS: &[&str] = &["GLM-5.3", "GLM-5.3-Flash"];
+/// Coding Plan 已知模型基线（官方 builtin + 常见扩展）。
+/// 实际可用以账号套餐为准；fetch-models 会合并 balance 中的 show_name。
+pub const DEFAULT_MODELS: &[&str] = &[
+    "GLM-5.3",
+    "GLM-5.3-Flash",
+    "GLM-5.1",
+    "GLM-5.1-Highspeed",
+    "GLM-5",
+    "GLM-5-Turbo",
+    "GLM-4.7",
+    "GLM-4.7-Flash",
+];
 
 /// 零消耗健康/额度探测端点(GET,2xx = healthy;响应含 entitlements
 /// 的 remaining/limit/period_end,可用于人工核对剩余额度)。

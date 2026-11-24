@@ -276,14 +276,29 @@ pub async fn send_request(
             } else {
                 provider.anthropic_base_url.trim()
             };
-            if let Ok((resp, waited)) =
-                crate::zcode::offpeak::chat(base, &provider.api_key, &request_body, true, bm_token)
-                    .await
-                && resp.status().is_success()
+            match crate::zcode::offpeak::chat(
+                base,
+                &provider.api_key,
+                &request_body,
+                true,
+                bm_token,
+            )
+            .await
             {
-                let latency = start.elapsed().as_millis() as f64;
-                debug!("zcode 闲时免费优先命中(等待 {waited}s)");
-                return Ok((resp, latency));
+                Ok((resp, waited)) if resp.status().is_success() => {
+                    let latency = start.elapsed().as_millis() as f64;
+                    debug!("zcode 闲时免费优先命中(等待 {waited}s)");
+                    return Ok((resp, latency));
+                }
+                Ok((resp, _)) => {
+                    // 闲时免费桶用尽或不可用（常见「额度已用尽」）时继续走订阅路径，
+                    // 不把免费桶的错误直接返回给用户。
+                    let status = resp.status().as_u16();
+                    tracing::debug!("zcode off-peak 非 2xx({status})，回退订阅路径");
+                }
+                Err(e) => {
+                    tracing::debug!("zcode off-peak 失败，回退订阅路径: {e}");
+                }
             }
         }
         // 官方 ZCode 逻辑：有业务 token 时签发 PAT，打 ultra 路径。
