@@ -1735,18 +1735,47 @@ impl providers_port::ProviderProbes for GatewayProbes {
                     .to_string();
                 return Err(providers_port::FetchModelsError::UpstreamStatus { status, message });
             }
-            // 只用 balance 的 show_name，不回填默认模型。
+            // 从 balance 的 capabilities / 像模型名的 show_name 提取，跳过 CREDIT_LIMIT。
             let mut models: Vec<String> = Vec::new();
-            if let Some(arr) = body["data"]["balances"].as_array() {
-                for b in arr {
-                    if let Some(name) = b["show_name"].as_str() {
-                        let name = name.trim();
-                        if !name.is_empty() && !models.iter().any(|m| m == name) {
-                            models.push(name.to_string());
+            fn collect(v: &Value, out: &mut Vec<String>) {
+                match v {
+                    Value::Object(map) => {
+                        if let Some(caps) = map.get("capabilities").and_then(|c| c.as_array()) {
+                            for c in caps {
+                                if let Some(s) = c.as_str().and_then(|s| s.strip_prefix("model:")) {
+                                    let name = if s.to_ascii_lowercase().starts_with("glm") {
+                                        format!("GLM{}", &s[3..])
+                                    } else {
+                                        s.to_string()
+                                    };
+                                    if !out.iter().any(|m| m.eq_ignore_ascii_case(&name)) {
+                                        out.push(name);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(name) = map.get("show_name").and_then(|s| s.as_str()) {
+                            let l = name.to_ascii_lowercase();
+                            if (l.contains("glm") || l.contains("flash"))
+                                && !l.contains("credit")
+                                && !out.iter().any(|m| m.eq_ignore_ascii_case(name))
+                            {
+                                out.push(name.to_string());
+                            }
+                        }
+                        for val in map.values() {
+                            collect(val, out);
                         }
                     }
+                    Value::Array(arr) => {
+                        for item in arr {
+                            collect(item, out);
+                        }
+                    }
+                    _ => {}
                 }
             }
+            collect(&body["data"], &mut models);
             return Ok(models);
         }
         let resp = match upstream_req.send().await {

@@ -670,10 +670,17 @@ function fmtNum(v?: number | null): string {
 /// monitor 额度条标签(客户端 i18n 口径:5 小时提示词池/每周配额/月度)。
 function quotaLabel(l: { type?: string }): string {
   const t = (l.type ?? '').toLowerCase()
-  if (t.includes('five') || t.includes('5h')) return '5 小时提示词池'
-  if (t.includes('week')) return '每周配额'
+  if (t.includes('five') || t.includes('5h')) return '5 小时额度'
+  if (t.includes('week')) return '每周额度'
+  if (t.includes('credit') || t.includes('limit')) return '额度上限'
   if (t.includes('time')) return '用量额度'
   return l.type ?? '额度'
+}
+
+function bucketLabel(show?: string): string {
+  const s = (show ?? '').trim()
+  if (!s || /credit|limit|quota/i.test(s)) return '额度'
+  return s
 }
 
 // ---- 详情(条目信息 + 账号信息缓存 + 模型测试) ----
@@ -763,23 +770,19 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
   }
 
   const info = cached.data?.info
-  const models = target.models?.length ? target.models : ['GLM-5.3-Flash']
-  // zcode 能力矩阵(用户口径 2026-11-20):订阅档 GLM-5.3 与
-  // GLM-5.3-Flash 各测一次;闲时另有免费档 GLM-5.3-Flash(免费桶
-  // 仅闲时有效;非闲时同一请求走订阅额度)。非 zcode 渠道按渠道
-  // 模型逐项测。
-  const hasBig = models.some((m) => !m.toLowerCase().includes('flash'))
-  const hasFlash = models.some((m) => m.toLowerCase().includes('flash'))
+  const models = target.models ?? []
   const offPeak = beijingOffPeakNow()
-  const lanes: Array<{ key: string; model: string; badge: string; tone: 'default' | 'success'; hint?: string }> = isZcode ? [
-    ...(hasBig ? [{ key: 'sub-big', model: models.find((m) => !m.toLowerCase().includes('flash'))!, badge: '订阅', tone: 'default' as const }] : []),
-    ...(hasFlash ? [
-      { key: 'sub-flash', model: models.find((m) => m.toLowerCase().includes('flash'))!, badge: '订阅', tone: 'default' as const },
-      { key: 'free-flash', model: models.find((m) => m.toLowerCase().includes('flash'))!, badge: '免费 · 闲时', tone: 'success' as const, hint: offPeak ? '当前在闲时窗口(免费桶可用)' : '当前非闲时(免费桶未生效,此测试将走订阅额度)' },
-    ] : []),
-  ] : models.map((m) => ({
-    key: m, model: m, badge: '', tone: 'default' as const,
-  }))
+  // 按实际模型列表展示，不再写死 5.3 / Flash 车道。
+  const lanes: Array<{ key: string; model: string; badge: string; tone: 'default' | 'success'; hint?: string }> =
+    models.map((m) => ({
+      key: m,
+      model: m,
+      badge: m.toLowerCase().includes('flash') && offPeak ? '闲时优先' : '订阅',
+      tone: m.toLowerCase().includes('flash') && offPeak ? 'success' as const : 'default' as const,
+      hint: m.toLowerCase().includes('flash')
+        ? (offPeak ? '闲时窗口内优先走免费桶' : '非闲时走订阅额度')
+        : undefined,
+    }))
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -839,8 +842,12 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
 
           {/* 能力矩阵(zcode:订阅×2 + 闲时免费;其他渠道逐模型) */}
           <section className="space-y-1.5">
-            <h4 className="font-medium">可用模型(点击测试)</h4>
-            {lanes.map((lane) => {
+            <h4 className="font-medium">可用模型</h4>
+            {lanes.length === 0 ? (
+              <p className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
+                暂无模型。点「重新获取」从账号套餐同步（含 GLM-5.4 等实际可用模型）。
+              </p>
+            ) : lanes.map((lane) => {
               const testing = testingModel === lane.key
               const result = modelResult[lane.key]
               return (
@@ -889,17 +896,25 @@ function AccountInfoBody({ d, resetBusy, useReset }: {
 
   return (
     <div className="space-y-3 text-sm">
-      {/* 账号 + 免费额度桶 */}
       <section className="space-y-1.5">
         <div className="grid grid-cols-[5rem_1fr] items-baseline gap-x-2 text-xs">
-          <span className="text-muted-foreground">标识</span><span className="font-mono break-all">{d.display || d.account_id || '-'}</span>
-          {d.account_id && <><span className="text-muted-foreground">ID</span><span className="font-mono break-all">{d.account_id}</span></>}
-          <span className="text-muted-foreground">当前套餐</span><span>{d.plan_name || '-'}</span>
+          {(d.display || d.account_id) && (
+            <>
+              <span className="text-muted-foreground">标识</span>
+              <span className="font-mono break-all">{d.display || d.account_id}</span>
+            </>
+          )}
+          {d.plan_name && (
+            <>
+              <span className="text-muted-foreground">套餐</span>
+              <span>{d.plan_name}</span>
+            </>
+          )}
         </div>
         {(d.balance?.balances ?? []).map((b, i) => (
           <div key={i} className="rounded-md border p-2">
-            <UsageBar label={b.show_name || '额度'} used={b.used_units} total={b.total_units} />
-            <div className="mt-1 text-[11px] text-muted-foreground">到期 {ts(b.expires_at)}</div>
+            <UsageBar label={bucketLabel(b.show_name)} used={b.used_units} total={b.total_units} />
+            {b.expires_at ? <div className="mt-1 text-[11px] text-muted-foreground">到期 {ts(b.expires_at)}</div> : null}
           </div>
         ))}
       </section>
