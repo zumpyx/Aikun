@@ -1999,7 +1999,7 @@ async fn zcode_channel_anthropic_protocol_end_to_end() {
     let sent = mock
         .requests()
         .iter()
-        .find(|r| r.path.contains("/api/v1/zcode-plan/anthropic/v1/messages"))
+        .find(|r| r.path.contains("/api/v1/ultra/anthropic/v1/messages"))
         .expect("zcode-plan 端点被命中")
         .clone();
     let h = &sent.headers;

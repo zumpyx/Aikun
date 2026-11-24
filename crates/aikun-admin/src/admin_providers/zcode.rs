@@ -243,7 +243,10 @@ impl AdminProvidersService {
                     openai_base_url: Some(base.into()),
                     anthropic_base_url: Some(base.into()),
                     api_key: token.clone(),
-                    models: vec!["GLM-5.3".into(), "GLM-5.3-Flash".into()],
+                    models: aikun_channels::adapters::zcode::DEFAULT_MODELS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
                     priority: body.priority,
                     weight: body.weight,
                     max_retries: None,

@@ -1,6 +1,5 @@
-//! ZCode off-peak(闲时排队取号)通道——2026-11-20 上游改版后的免费/
-//! Lite credits 唯一 chat 通路(旧 billing 免费桶 + zcode-plan 端点对
-//! 非全量订阅同日起一律 1005;preview 已空,claim 通道下线)。
+//! ZCode off-peak(闲时排队取号)通道——仅用于免费/Lite credits。
+//! 付费 Coding Plan 账号走官方 ultra 路径，不再自动回退到此处。
 //!
 //! 完整链路(炼化自 ZCode 客户端 3.18.2 + 2026-11-20 活体验证):
 //! 1. `POST /api/v1/off-peak/ticket {"task_id":<UUID>}` 取号——task_id
@@ -19,7 +18,7 @@
 //! 网关策略:每渠道(api_key)缓存一张票,ready/active 窗口内复用;
 //! 排队等待受预算约束(AIKUN_ZCODE_OFFPEAK_WAIT_SECS,默认 90s;0=不
 //! 等待,取号后立即报排位错)。每日限额/超时等不可恢复错误向上抛,
-//! 由调用方(transport)回退 zcode-plan 端点保底。
+//! 由调用方(transport)在闲时窗口优先尝试;失败后回退 ultra 路径保底。
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};

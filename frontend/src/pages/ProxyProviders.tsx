@@ -49,7 +49,7 @@ const APPS = {
     label: 'ZCode',
     kinds: 'zcode,bigmodel-plan',
     regionFilter: 'cn' as const,
-    desc: 'GLM Coding Plan·国内(智谱 BigModel):订阅 JWT(API 走 zcode.z.ai)与 API Key(open.bigmodel.cn);凭证与国际 z.ai 互不通用',
+    desc: 'GLM Coding Plan·国内(智谱 BigModel):订阅 JWT(API 走 zcode.z.ai ultra)与 API Key(open.bigmodel.cn);凭证与国际 z.ai 互不通用',
   },
 } as const
 
@@ -278,7 +278,7 @@ function AppPage({ appId }: { appId: AppId }) {
             />
           )}
           {editFor && <EditModal target={editFor} onDone={invalidate} onClose={() => setEditFor(null)} />}
-          {importOpen && <ImportModal onOpenChange={setImportOpen} onDone={invalidate} />}
+          {importOpen && <ImportModal appId={appId} onOpenChange={setImportOpen} onDone={invalidate} />}
 
           {selected.size > 0 && (
             <Card>
@@ -514,22 +514,55 @@ function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: b
 
 // ---- 导入(文件 / 粘贴 JSON)----
 
-function ImportModal({ onOpenChange, onDone }: { onOpenChange: (v: boolean) => void; onDone: () => void }) {
+function ImportModal({ appId, onOpenChange, onDone }: { appId: AppId; onOpenChange: (v: boolean) => void; onDone: () => void }) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<{ imported?: number; skipped?: number; failed?: { index: number; code: string; message?: string }[] } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const submit = async (content: string) => {
-    let body: unknown
+    let body: any
     try {
       body = JSON.parse(content)
     } catch {
       return sonnerToast.error('不是有效的 JSON')
     }
+    // 在对应页面导入时强制规范化区域标记，方便网关调度（is_cn_account 依赖 note/website_url）
+    const isCn = appId === 'zcode-cn'
+    const providers = Array.isArray(body.providers) ? body.providers : (Array.isArray(body) ? body : [])
+    for (const p of providers) {
+      if (p.channel_kind === 'zcode' || !p.channel_kind) {
+        if (isCn) {
+          if (!(p.note || '').includes('国内')) {
+            p.note = `[国内] ${p.note || '导入账号'}`.trim()
+          }
+          if (!p.website_url || !p.website_url.includes('bigmodel')) {
+            p.website_url = 'https://bigmodel.cn'
+          }
+        } else if (appId === 'zcode') {
+          if ((p.note || '').includes('国内')) {
+            p.note = (p.note || '').replace(/\[国内\]\s*/g, '').trim() || '国际账号'
+          }
+          if (!p.website_url || p.website_url.includes('bigmodel')) {
+            p.website_url = 'https://zcode.z.ai'
+          }
+        }
+        p.channel_kind = p.channel_kind || 'zcode'
+      }
+    }
+    if (body.providers) body.providers = providers
     setBusy(true)
     try {
       const r = await api<{ imported?: number; skipped?: number; failed?: { index: number; code: string; message?: string }[] }>('POST', '/api/providers/import', body)
+      if (r.ok) {
+        setResult(r.data)
+        sonnerToast.success(`导入完成:导入 ${r.data.imported ?? 0} / 跳过 ${r.data.skipped ?? 0}`)
+        onDone()
+      } else sonnerToast.error(errMsg(r))
+    } finally {
+      setBusy(false)
+    }
+  }
       if (r.ok) {
         setResult(r.data)
         sonnerToast.success(`导入完成:导入 ${r.data.imported ?? 0} / 跳过 ${r.data.skipped ?? 0}`)

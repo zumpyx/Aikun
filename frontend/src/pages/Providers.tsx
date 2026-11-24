@@ -352,6 +352,40 @@ function buildBody(form: FormState, batch: boolean): Record<string, unknown> {
 }
 
 function ProviderModal({ editing, onOpenChange }: { editing: ProviderDetail | null; onOpenChange: (v: boolean) => void }) {
+  const appGroup = (editing as any)?._appGroup as ProviderDetail[] | undefined
+  if (appGroup) {
+    const enabled = appGroup.filter((p) => p.is_active).length
+    const maxPrio = Math.max(...appGroup.map((p) => p.priority), 0)
+    const models = Array.from(new Set(appGroup.flatMap((p) => p.models ?? [])))
+    const recentErrors = appGroup
+      .filter((p) => p.disabled_reason || p.health_status === 'down' || p.health_status === 'degraded')
+      .slice(0, 5)
+      .map((p) => `${p.name}: ${p.disabled_reason || p.health_status}`)
+    return (
+      <Dialog open onOpenChange={onOpenChange}>
+        <DialogContent title={`${editing?.name} 摘要`}>
+          <div className="space-y-3 text-sm">
+            <div>账号数量：{appGroup.length}（启用 {enabled}）</div>
+            <div>组内最高优先级：{maxPrio}</div>
+            <div>健康度：{appGroup.filter((p) => p.health_status === 'healthy').length}/{appGroup.length} 健康</div>
+            <div>可用模型：{models.join(', ') || '-'}</div>
+            <div>
+              最近错误：
+              {recentErrors.length === 0 ? ' 无' : (
+                <ul className="mt-1 list-disc pl-4 text-xs text-destructive">
+                  {recentErrors.map((e, i) => <li key={i}>{e}</li>)}
+                </ul>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">账号级配置与优先级请到「反代」页管理。此处优先级决定本应用整体与标准渠道的选路顺序。</p>
+          </div>
+          <div className="mt-4 flex justify-end">
+            <Button onClick={() => onOpenChange(false)}>关闭</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    )
+  }
   const qc = useQueryClient()
   const [form, setForm] = useState(() => initialForm(editing))
   const [busy, setBusy] = useState(false)
@@ -513,7 +547,14 @@ export default function Providers() {
     queryKey: ['providers'],
     queryFn: async () => (await api<Page<ProviderDetail>>('GET', '/api/providers?category=standard')).data.items ?? [],
   })
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['providers'] })
+  const proxies = useQuery({
+    queryKey: ['proxies-all'],
+    queryFn: async () => (await api<Page<ProviderDetail>>('GET', '/api/providers?category=proxy&limit=200')).data.items ?? [],
+  })
+  const invalidate = () => {
+    void qc.invalidateQueries({ queryKey: ['providers'] })
+    void qc.invalidateQueries({ queryKey: ['proxies-all'] })
+  }
 
   const toggle = useMutation({
     mutationFn: async (p: ProviderDetail) => ({ r: await api('PATCH', `/api/providers/${p.id}`, { is_active: !p.is_active }), active: !p.is_active }),
@@ -551,6 +592,52 @@ export default function Providers() {
   }
 
   const data = list.data ?? []
+  const allProxies = proxies.data ?? []
+  const isDomestic = (p: ProviderDetail) =>
+    p.channel_kind === 'bigmodel-plan' || (p.note ?? '').trim().startsWith('[国内]')
+  const cnGroup = allProxies.filter(isDomestic)
+  const intGroup = allProxies.filter((p) => !isDomestic(p) && (p.channel_kind === 'zcode' || p.channel_kind === 'zai-plan'))
+
+  const renderAppRow = (label: string, items: ProviderDetail[], key: string) => {
+    if (items.length === 0) return null
+    const enabled = items.filter((p) => p.is_active)
+    const maxPrio = Math.max(...items.map((p) => p.priority), 0)
+    const models = Array.from(new Set(items.flatMap((p) => p.models ?? []))).slice(0, 4)
+    const healthy = items.filter((p) => p.health_status === 'healthy').length
+    return (
+      <TR key={key} className="bg-muted/30">
+        <TD><strong>{label}</strong> <Badge tone="muted">应用</Badge></TD>
+        <TD><Badge>anthropic</Badge></TD>
+        <TD className="text-xs text-muted-foreground">反代应用 · {items.length} 账号</TD>
+        <TD className="text-xs">{models.join(', ') || '-'}</TD>
+        <TD>
+          <Badge tone={healthy === items.length ? 'success' : healthy > 0 ? 'warn' : 'destructive'}>
+            {healthy}/{items.length} 健康
+          </Badge>
+        </TD>
+        <TD>-</TD>
+        <TD>{maxPrio}</TD>
+        <TD>-</TD>
+        <TD>
+          <div className="flex flex-wrap gap-1.5">
+            <Button size="sm" variant="outline" onClick={() => setEditModal({ open: true, provider: { id: key, name: label, is_active: enabled.length > 0, priority: maxPrio, models, health_status: healthy === items.length ? 'healthy' : 'degraded', _appGroup: items } as any })}>摘要</Button>
+            <Button size="sm" variant="outline" onClick={async () => {
+              const input = prompt(`设置 ${label} 组优先级（当前最高 ${maxPrio}，组内相对顺序保持）`, String(maxPrio))
+              const target = parseInt(input ?? '', 10)
+              if (Number.isNaN(target)) return
+              for (const p of items) {
+                const rel = maxPrio === 0 ? 0 : p.priority - maxPrio
+                const np = target + rel
+                if (np !== p.priority) await api('PATCH', `/api/providers/${p.id}`, { priority: np })
+              }
+              sonnerToast.success(`${label} 组优先级已更新`)
+              invalidate()
+            }}>优先级</Button>
+          </div>
+        </TD>
+      </TR>
+    )
+  }
   const protoBadges = (p: ProviderDetail) =>
     ((p.protocols?.length ? p.protocols : [p.provider_type]) as string[]).map((t) => (
       <Badge key={t} tone={t === p.default_protocol ? 'default' : 'muted'} title={t === p.default_protocol ? '默认协议' : '支持协议'}>{t}</Badge>
@@ -558,11 +645,10 @@ export default function Providers() {
 
   return (
     <div className="space-y-4">
-      <ProxyGroupCard />
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold">渠道管理(标准协议)</h2>
-          <p className="text-sm text-muted-foreground">点选预设渠道后只填 API Key，模型列表向官方实时拉取</p>
+          <h2 className="text-xl font-bold">渠道管理</h2>
+          <p className="text-sm text-muted-foreground">标准协议渠道与反代应用（CN-ZCode / INT-ZCode）同级，按优先级统一选路</p>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" onClick={() => setBatchOpen(true)}>批量添加</Button>
@@ -573,12 +659,14 @@ export default function Providers() {
       {batchOpen && <BatchModal onOpenChange={setBatchOpen} />}
       <Card>
         <CardContent className="p-0">
-          {data.length === 0 ? (
+          {data.length === 0 && cnGroup.length === 0 && intGroup.length === 0 ? (
             <div className="py-10 text-center text-sm text-muted-foreground">{list.isLoading ? '加载中...' : '暂无渠道，点击上方按钮添加'}</div>
           ) : (
             <Table>
               <THead><TR><TH>名称</TH><TH>协议</TH><TH>地址</TH><TH>模型</TH><TH>状态</TH><TH>延迟</TH><TH>优先级</TH><TH>权重</TH><TH>操作</TH></TR></THead>
               <TBody>
+                {renderAppRow('CN-ZCode', cnGroup, 'app-cn-zcode')}
+                {renderAppRow('INT-ZCode', intGroup, 'app-int-zcode')}
                 {data.map((p) => (
                   <TR key={p.id}>
                     <TD><strong>{p.name}</strong></TD>

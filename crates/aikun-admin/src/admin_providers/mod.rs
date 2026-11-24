@@ -1511,7 +1511,7 @@ impl AdminProvidersService {
         let mut skipped = 0i64;
         let mut failed: Vec<BatchFailureItem> = Vec::new();
         for (i, item) in items.iter().enumerate() {
-            let cand = ProviderCandidate {
+            let mut cand = ProviderCandidate {
                 name: item.name.clone(),
                 provider_type: item.provider_type.clone(),
                 openai_base_url: item.openai_base_url.clone(),
@@ -1534,6 +1534,22 @@ impl AdminProvidersService {
                 website_url: item.website_url.clone(),
                 channel_kind: item.channel_kind.clone(),
             };
+            // zcode 渠道：若未带区域标记，按 website_url 补全，保证调度可靠
+            if cand.channel_kind.as_deref() == Some("zcode") {
+                let is_cn = cand
+                    .website_url
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains("bigmodel")
+                    || cand.note.as_deref().unwrap_or("").contains("国内");
+                if is_cn && !cand.note.as_deref().unwrap_or("").contains("国内") {
+                    cand.note = Some(format!("[国内] {}", cand.note.as_deref().unwrap_or("导入账号")));
+                }
+                if is_cn && cand.website_url.as_deref().unwrap_or("").is_empty() {
+                    cand.website_url = Some("https://bigmodel.cn".into());
+                }
+            }
             let fail = |i: i64, p: &Problem| BatchFailureItem {
                 index: i,
                 status: p.status,

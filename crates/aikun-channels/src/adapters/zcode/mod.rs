@@ -1,9 +1,13 @@
 //! ZCode 渠道适配器(GLM Coding Plan:个人订阅 + 官方闲时免费额度)。
 //!
 //! 协议细节炼化自社区实现 D3-vin/Zcode2Api(MIT 级公开仓库,Go)与
-//! zcode.z.ai 官方文档(2026-11-18 调研):
-//! * 上游为 **Anthropic Messages 形态**:`POST {base}/api/v1/zcode-plan/
-//!   anthropic/v1/messages`,base = `https://zcode.z.ai`;
+//! zcode.z.ai 官方文档(2026-11-18 调研),并对照 zai-org/ZCode 开源源码
+//! (official-coding-plan-gateway.ts)完善订阅档路径:
+//! * 上游为 **Anthropic Messages 形态**;
+//! * **国内账号(BigModel)**:优先 `POST {base}/api/v1/ultra/anthropic/v1/messages`
+//!   (官方 Coding Plan gateway 转发 ultra 路径);有业务 token 时用 PAT 鉴权打同一 ultra 路径;
+//! * **国际账号**:`POST {base}/api/v1/ultra-zai/anthropic/v1/messages`;
+//! * 旧 `zcode-plan` 路径仅作兼容保底;
 //! * 鉴权:**JWT(ZCode 客户端登录态,渠道的 api_key 字段)同时放
 //!   `x-api-key` 与 `Authorization: Bearer`**——与 generic 的 Anthropic
 //!   默认鉴权头一致,无需覆写;
@@ -47,9 +51,21 @@ pub struct ZcodeAdapter;
 
 pub const KIND: &str = "zcode";
 
-/// 上游聊天端点(Anthropic 形态;ZCode 计划只有这一条通道,渠道应只勾选
-/// anthropic 协议——其他协议返回同一路径,误配时请求形状不符会被上游拒绝)。
-pub const MESSAGES_PATH: &str = "/api/v1/zcode-plan/anthropic/v1/messages";
+/// 旧 plan 路径(兼容保底;官方订阅档已迁移到 ultra)。
+pub const PLAN_MESSAGES_PATH: &str = "/api/v1/zcode-plan/anthropic/v1/messages";
+
+/// 国内 BigModel 账号官方 Coding Plan gateway 转发路径(ultra)。
+pub const ULTRA_MESSAGES_PATH: &str = "/api/v1/ultra/anthropic/v1/messages";
+
+/// 国际账号官方路径(ultra-zai)。
+pub const ULTRA_ZAI_MESSAGES_PATH: &str = "/api/v1/ultra-zai/anthropic/v1/messages";
+
+/// 默认路径(静态 endpoint_path 用;实际 chat_url 动态选择)。
+pub const MESSAGES_PATH: &str = ULTRA_MESSAGES_PATH;
+
+/// Coding Plan 已知模型（官方 builtin；上游无独立 list 端点时作为动态获取的基线，
+/// 实际可用以账号套餐为准，可由管理端 fetch-models 或账号信息快照覆盖）。
+pub const DEFAULT_MODELS: &[&str] = &["GLM-5.3", "GLM-5.3-Flash"];
 
 /// 零消耗健康/额度探测端点(GET,2xx = healthy;响应含 entitlements
 /// 的 remaining/limit/period_end,可用于人工核对剩余额度)。
@@ -65,6 +81,19 @@ pub const CLIENT_VERSION: &str = "3.18.2";
 const OFF_PEAK_START_HOUR: u32 = 23;
 const OFF_PEAK_END_HOUR: u32 = 9;
 
+/// 根据账号信息判断是否国内 BigModel 账号。
+/// 检测 note 含「国内」、website_url / base_url 含 bigmodel。
+fn is_cn_account(provider: &Provider) -> bool {
+    let note = provider.note.to_lowercase();
+    let website = provider.website_url.to_lowercase();
+    let base = provider.openai_base_url.to_lowercase();
+    let anth = provider.anthropic_base_url.to_lowercase();
+    note.contains("国内")
+        || website.contains("bigmodel")
+        || base.contains("bigmodel")
+        || anth.contains("bigmodel")
+}
+
 impl ChannelAdapter for ZcodeAdapter {
     fn kind(&self) -> &'static str {
         KIND
@@ -76,21 +105,28 @@ impl ChannelAdapter for ZcodeAdapter {
 
     fn description(&self) -> &'static str {
         "智谱 ZCode 订阅渠道:API Key 填 ZCode 客户端 JWT(登录后从客户端复制),\
-         只勾选 Anthropic 协议,Base URL 填 https://zcode.z.ai。国内/国外账号\
-         (z.ai / 智谱 BigModel)都打同一 API 域(实测 zcode.bigmodel.cn 的 API\
-         全部 301 不可用);凭证互不通用,免费窗口 Flash 零计费"
+         只勾选 Anthropic 协议,Base URL 填 https://zcode.z.ai。国内账号自动走\
+         ultra 路径,国际走 ultra-zai;有业务 token 时用 PAT 鉴权打同一 ultra 路径。\
+         凭证互不通用,免费窗口 Flash 零计费"
     }
 
     fn endpoint_path(&self, _protocol: Protocol) -> &'static str {
+        // 静态默认;实际请求用 chat_url 动态选择。
         MESSAGES_PATH
     }
 
     /// 端点路径是完整绝对路径(/api/v1/...),不经 `build_api_url` 的
     /// `/v1` 追加逻辑(base 无版本段时会被补 /v1 打坏路径)。
+    /// 根据账号信息自动选择 ultra(国内) / ultra-zai(国际)。
     fn chat_url(&self, provider: &crate::provider::Provider, _protocol: Protocol) -> String {
+        let path = if is_cn_account(provider) {
+            ULTRA_MESSAGES_PATH
+        } else {
+            ULTRA_ZAI_MESSAGES_PATH
+        };
         join_absolute(
             crate::provider::base_url_for(provider, _protocol),
-            MESSAGES_PATH,
+            path,
         )
     }
 
@@ -419,7 +455,7 @@ mod tests {
         let a = ZcodeAdapter;
         assert_eq!(
             a.endpoint_path(Protocol::Anthropic),
-            "/api/v1/zcode-plan/anthropic/v1/messages"
+            "/api/v1/ultra/anthropic/v1/messages"
         );
         assert_eq!(
             a.models_url("https://zcode.z.ai", Protocol::Anthropic),
@@ -433,10 +469,18 @@ mod tests {
         let mut p = crate::provider::tests::bare_provider();
         p.openai_base_url = "https://zcode.z.ai".into();
         p.anthropic_base_url = "https://zcode.z.ai".into();
+        // 无国内标记 → ultra-zai
         assert_eq!(
             a.chat_url(&p, Protocol::Anthropic),
-            "https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages",
-            "完整绝对路径,不被追加 /v1"
+            "https://zcode.z.ai/api/v1/ultra-zai/anthropic/v1/messages",
+            "国际账号走 ultra-zai"
+        );
+        // 国内标记 → ultra
+        p.note = "[国内] 测试账号".into();
+        assert_eq!(
+            a.chat_url(&p, Protocol::Anthropic),
+            "https://zcode.z.ai/api/v1/ultra/anthropic/v1/messages",
+            "国内账号走 ultra"
         );
         let headers = a.extra_headers(Protocol::Anthropic);
         let names: Vec<_> = headers.iter().map(|(k, _)| *k).collect();

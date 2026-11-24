@@ -1708,6 +1708,38 @@ impl providers_port::ProviderProbes for GatewayProbes {
         for (k, v) in adapter.auth_headers(&probe.api_key, protocol) {
             upstream_req = upstream_req.header(k, v);
         }
+        // zcode 无独立 /models 端点，models_url 指向零消耗 balance。
+        // 先验证凭证有效，再返回 Coding Plan 已知模型列表（可由账号快照覆盖）。
+        if probe.channel_kind.trim() == aikun_channels::adapters::zcode::KIND {
+            let resp = match upstream_req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(providers_port::FetchModelsError::Connect {
+                        message: e.without_url().to_string(),
+                    });
+                }
+            };
+            if !resp.status().is_success() {
+                let status = resp.status().as_u16();
+                let body: Value = crate::channel::transport::read_json_limited(
+                    resp,
+                    crate::channel::transport::MAX_RESP_BODY,
+                )
+                .await
+                .unwrap_or(Value::Null);
+                let message = body["error"]["message"]
+                    .as_str()
+                    .or_else(|| body["msg"].as_str())
+                    .unwrap_or("upstream rejected the request")
+                    .to_string();
+                return Err(providers_port::FetchModelsError::UpstreamStatus { status, message });
+            }
+            // 凭证有效，返回官方 Coding Plan 模型基线
+            return Ok(aikun_channels::adapters::zcode::DEFAULT_MODELS
+                .iter()
+                .map(|s| s.to_string())
+                .collect());
+        }
         let resp = match upstream_req.send().await {
             Ok(r) => r,
             Err(e) => {
