@@ -1054,7 +1054,16 @@ impl AdminProvidersService {
                     message: p.detail.clone(),
                 }),
                 Ok(config) => match insert_checked(self.store.as_ref(), &cand, config).await {
-                    Ok(row) => created.push(row),
+                    Ok(row) => {
+                        if cand.channel_kind.as_deref() == Some("zcode") {
+                            let svc = self.clone();
+                            let id = row.id.clone();
+                            tokio::spawn(async move {
+                                let _ = svc.admin_zcode_account_info(id).await;
+                            });
+                        }
+                        created.push(row);
+                    }
                     Err(p) => failed.push(BatchFailureItem {
                         index: i as i64,
                         status: p.status,
@@ -1573,7 +1582,16 @@ impl AdminProvidersService {
             }
             match validate_candidate(&cand) {
                 Ok(config) => match insert_checked(self.store.as_ref(), &cand, config).await {
-                    Ok(_) => imported += 1,
+                    Ok(row) => {
+                        if cand.channel_kind.as_deref() == Some("zcode") {
+                            let svc = self.clone();
+                            let id = row.id.clone();
+                            tokio::spawn(async move {
+                                let _ = svc.admin_zcode_account_info(id).await;
+                            });
+                        }
+                        imported += 1;
+                    }
                     Err(p) => failed.push(fail(i as i64, &p)),
                 },
                 Err(p) => failed.push(fail(i as i64, &p)),

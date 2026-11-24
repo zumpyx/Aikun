@@ -1735,11 +1735,8 @@ impl providers_port::ProviderProbes for GatewayProbes {
                     .to_string();
                 return Err(providers_port::FetchModelsError::UpstreamStatus { status, message });
             }
-            // 从 balance 的 balances[].show_name 提取实际可用模型，并与默认列表合并。
-            let mut models: Vec<String> = aikun_channels::adapters::zcode::DEFAULT_MODELS
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+            // 只用 balance 的 show_name，不回填默认模型。
+            let mut models: Vec<String> = Vec::new();
             if let Some(arr) = body["data"]["balances"].as_array() {
                 for b in arr {
                     if let Some(name) = b["show_name"].as_str() {

@@ -414,7 +414,7 @@ function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: b
   const preset = presets.find((p) => p.id === presetId)
   const [keys, setKeys] = useState('')
   const [models, setModels] = useState('')
-  const [modelsStatus, setModelsStatus] = useState('填入凭证后点「获取模型」从上游拉取')
+  const [modelsStatus, setModelsStatus] = useState('可留空。zcode 建号后会自动获取账号信息并写入模型')
   const [priority, setPriority] = useState('0')
   const [weight, setWeight] = useState('1.0')
   const [busy, setBusy] = useState(false)
@@ -442,7 +442,6 @@ function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: b
     const keyList = keys.split('\n').map((s) => s.trim()).filter(Boolean)
     if (!preset) return sonnerToast.error('请选择接入类型')
     if (keyList.length === 0) return sonnerToast.error('请至少粘贴一个凭证(每行一个)')
-    if (!models.trim()) return sonnerToast.error('请填写模型，或点「获取模型」从上游拉取')
     setBusy(true)
     try {
       const r = await api<{ created?: number; failed?: unknown[]; providers?: unknown[] }>('POST', '/api/providers/batch', {
@@ -510,7 +509,7 @@ function BatchModal({ appId, onOpenChange }: { appId: AppId; onOpenChange: (v: b
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-muted-foreground">模型(逗号分隔)</label>
             <div className="flex gap-2">
-              <Input className="flex-1" value={models} onChange={(e) => setModels(e.target.value)} placeholder="留空则使用默认，或点右侧获取" />
+              <Input className="flex-1" value={models} onChange={(e) => setModels(e.target.value)} placeholder="留空则建号后自动获取" />
               <Button type="button" variant="outline" size="sm" onClick={() => void pullModels()}>获取模型</Button>
             </div>
             <p className="text-xs text-muted-foreground">{modelsStatus}</p>

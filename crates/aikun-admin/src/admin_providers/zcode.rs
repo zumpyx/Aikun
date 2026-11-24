@@ -243,10 +243,7 @@ impl AdminProvidersService {
                     openai_base_url: Some(base.into()),
                     anthropic_base_url: Some(base.into()),
                     api_key: token.clone(),
-                    models: aikun_channels::adapters::zcode::DEFAULT_MODELS
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect(),
+                    models: Vec::new(),
                     priority: body.priority,
                     weight: body.weight,
                     max_retries: None,
@@ -322,6 +319,11 @@ impl AdminProvidersService {
                                 Some(pid) => {
                                     self.persist_business_token(&pid, business_token.as_deref())
                                         .await;
+                                    let svc = self.clone();
+                                    let pid2 = pid.clone();
+                                    tokio::spawn(async move {
+                                        let _ = svc.admin_zcode_account_info(pid2).await;
+                                    });
                                     let row = self.store.find_provider(&pid).await.ok().flatten();
                                     AdminZcodeLoginPollResponse::Ok(ZcodeLoginPollResult {
                                         status: ZcodeLoginPollResultStatus::Ready,
@@ -483,11 +485,8 @@ impl AdminProvidersService {
             .and_then(|a| a.first())
             .and_then(|p| p["name"].as_str())
             .map(str::to_string);
-        // 从 balance.balances[].show_name 提取实际可用模型，合并默认列表后回写渠道。
-        let mut models: Vec<String> = aikun_channels::adapters::zcode::DEFAULT_MODELS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        // 只用 balance.balances[].show_name，不写默认模型。
+        let mut models: Vec<String> = Vec::new();
         if let Some(arr) = balance["balances"].as_array() {
             for b in arr {
                 if let Some(name) = b["show_name"].as_str() {
