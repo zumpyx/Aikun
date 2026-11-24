@@ -37,7 +37,7 @@ jsonwebtoken = "9"
 rand = "0.9"
 
 # HTTP client(rustls 替代系统 OpenSSL,便于静态构建)
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "socks", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "socks", "rustls"] }
 
 # Streaming (SSE)
 futures-util = "0.3"
@@ -67,7 +67,7 @@ dotenvy = "0.15"
 # E2E:拉起真实二进制 + axum mock 上游(tests/);检查通道为管理面 API,
 # 不含数据库直连依赖(阶段 S,docs/surreal-migration.md §七)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 axum = { version = "0.8", features = ["macros"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
