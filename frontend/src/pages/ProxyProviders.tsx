@@ -697,6 +697,7 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
   const domestic = isZcode && isDomestic(target)
   const [resetBusy, setResetBusy] = useState<string | null>(null)
   const [fetching, setFetching] = useState(false)
+  const [pullingModels, setPullingModels] = useState(false)
   const [testingModel, setTestingModel] = useState<string | null>(null)
   const [modelResult, setModelResult] = useState<Record<string, string>>({})
 
@@ -723,6 +724,34 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
       }
     } finally {
       setFetching(false)
+    }
+  }
+
+  const pullModels = async () => {
+    setPullingModels(true)
+    try {
+      const base = target.anthropic_base_url || target.openai_base_url
+      const r = await api<{ models?: string[] }>('POST', '/api/providers/fetch-models', {
+        base_url: base,
+        protocol: 'anthropic',
+        channel_kind: target.channel_kind || 'zcode',
+        provider_id: target.id,
+      })
+      if (!r.ok || !(r.data.models ?? []).length) {
+        sonnerToast.error(errMsg(r) || '上游没有返回模型')
+        return
+      }
+      const models = r.data.models!
+      const u = await api('PATCH', `/api/providers/${target.id}`, { models })
+      if (u.ok) {
+        sonnerToast.success(`已同步 ${models.length} 个模型`)
+        void qc.invalidateQueries({ queryKey: ['proxies'] })
+        onDone()
+      } else {
+        sonnerToast.error(errMsg(u))
+      }
+    } finally {
+      setPullingModels(false)
     }
   }
 
@@ -842,10 +871,15 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
 
           {/* 能力矩阵(zcode:订阅×2 + 闲时免费;其他渠道逐模型) */}
           <section className="space-y-1.5">
-            <h4 className="font-medium">可用模型</h4>
+            <div className="flex items-center justify-between">
+              <h4 className="font-medium">可用模型</h4>
+              <Button size="sm" variant="outline" disabled={pullingModels} onClick={() => void pullModels()}>
+                {pullingModels ? '获取中…' : '获取模型'}
+              </Button>
+            </div>
             {lanes.length === 0 ? (
               <p className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
-                暂无模型。点「重新获取」从账号套餐同步（含 GLM-5.4 等实际可用模型）。
+                暂无模型。点「获取模型」从上游同步。
               </p>
             ) : lanes.map((lane) => {
               const testing = testingModel === lane.key
