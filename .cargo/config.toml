@@ -1,0 +1,8 @@
+# macOS ld: 大型二进制（surrealdb 等）的 __eh_frame 超过 16MB 时，
+# 无法编码 compact unwind，只影响异常展开性能，不影响正确性。
+# 跳过 compact unwind 表以消除该链接器警告。
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-no_compact_unwind"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-no_compact_unwind"]
