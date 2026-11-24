@@ -1925,7 +1925,7 @@ async fn circuit_breaker_skips_channel_within_cooldown_then_recovers() {
 }
 
 /// ZCode 渠道适配器(GLM Coding Plan):协议链路端到端——上游收到
-/// Anthropic 形态请求打到 zcode-plan 专用端点,JWT 同时出现在
+/// Anthropic 形态请求打到 ultra 路径,JWT 同时出现在
 /// x-api-key 与 Authorization(Bearer),伪装头(anthropic-beta /
 /// X-ZCode-Agent 等)到达上游;OpenAI 客户端请求经协议转换正常返回;
 /// 计费行落库(闲时免费口径由 channels crate 单测锁定,时间不可控)。
@@ -1964,10 +1964,15 @@ async fn zcode_channel_anthropic_protocol_end_to_end() {
         .unwrap();
     assert_eq!(r.status(), 200, "PATCH channel_kind=zcode");
 
-    // mock 上游:一条 off-peak 取号失败(zcode chat 现在先走 off-peak 排队
-    // 通道,mock 无该端点语义——先喂 404 让其立即回退 plan 端点)+
-    // 一条 Anthropic 形态的 chat 响应 + 一条 SSE(流式路径)
-    mock.push_json(404, json!({"code": 404, "msg": "no mock route"}));
+    // mock 上游：闲时窗口内会先打 off-peak（推 404 让其回退），非闲时直接打 ultra。
+    // 无论哪种情况，最终都要有一条 200 的 Anthropic 响应。
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if aikun_channels::adapters::zcode::is_off_peak(now) {
+        mock.push_json(404, json!({"code": 404, "msg": "no mock route"}));
+    }
     mock.push_json(
         200,
         json!({

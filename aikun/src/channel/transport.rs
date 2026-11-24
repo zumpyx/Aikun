@@ -279,12 +279,11 @@ pub async fn send_request(
             if let Ok((resp, waited)) =
                 crate::zcode::offpeak::chat(base, &provider.api_key, &request_body, true, bm_token)
                     .await
+                && resp.status().is_success()
             {
-                if resp.status().is_success() {
-                    let latency = start.elapsed().as_millis() as f64;
-                    debug!("zcode 闲时免费优先命中(等待 {waited}s)");
-                    return Ok((resp, latency));
-                }
+                let latency = start.elapsed().as_millis() as f64;
+                debug!("zcode 闲时免费优先命中(等待 {waited}s)");
+                return Ok((resp, latency));
             }
         }
         // 官方 ZCode 逻辑：有业务 token 时签发 PAT，打 ultra 路径。
