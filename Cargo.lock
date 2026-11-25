@@ -164,7 +164,6 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
- "serde",
  "serde_json",
  "tokio",
  "tracing",

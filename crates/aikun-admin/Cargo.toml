@@ -25,7 +25,6 @@ chrono = { version = "0.4", features = ["serde"] }
 # Problem.r#type 是 Option<url::Url>
 url = { version = "2", features = ["serde"] }
 
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 日志门面(限流/内部错误可观测性)
 tracing = "0.1"
