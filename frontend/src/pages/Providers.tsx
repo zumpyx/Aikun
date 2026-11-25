@@ -172,11 +172,11 @@ function ProviderForm({
     if (!apiKey && !editing?.id) return
     setForm((f) => ({ ...f, modelsStatus: '正在从官方获取最新模型…' }))
     const r = await api<{ models?: string[] }>('POST', '/api/providers/fetch-models', {
-      base_url: urlFor(proto),
+      base_url: preset ? preset.openai_base_url : urlFor(proto),
       api_key: apiKey,
       protocol: proto,
       proxy_url: form.proxy.trim(),
-      channel_kind: form.kind,
+      channel_kind: preset && 'kind' in preset ? preset.kind : form.kind,
       provider_id: editing?.id ?? null,
     })
     if (r.ok && (r.data.models ?? []).length > 0) {

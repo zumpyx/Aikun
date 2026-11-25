@@ -1731,7 +1731,14 @@ impl providers_port::ProviderProbes for GatewayProbes {
             15,
             self.config.connect_timeout_secs,
         );
-        let adapter = aikun_channels::registry().resolve(&probe.channel_kind);
+        let kind = if probe.channel_kind.trim().is_empty()
+            && probe.base_url.to_lowercase().contains("api.deepseek.com")
+        {
+            aikun_channels::adapters::deepseek::KIND.to_string()
+        } else {
+            probe.channel_kind.trim().to_string()
+        };
+        let adapter = aikun_channels::registry().resolve(&kind);
         let url = adapter.models_url(&probe.base_url, protocol);
         let mut upstream_req = client.get(&url);
         for (k, v) in adapter.auth_headers(&probe.api_key, protocol) {

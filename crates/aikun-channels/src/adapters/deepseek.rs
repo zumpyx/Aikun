@@ -1,9 +1,10 @@
-//! DeepSeek 官方渠道。
+//! DeepSeek 官方渠道。三条地址分开，互不混用：
 //!
-//! 对照官方文档：
-//! * 对话固定 `https://api.deepseek.com`，`POST /chat/completions`（适配器写死，不看渠道协议）
-//! * 模型列表：`GET https://api.deepseek.com/models`
-//! * 模型：deepseek-flash、deepseek-v4-pro
+//! * base：`https://api.deepseek.com`（不是 /v1）
+//! * 对话：`POST https://api.deepseek.com/chat/completions`
+//! * 模型列表 / 健康：`GET https://api.deepseek.com/models`
+//!
+//! 适配器写死，不看渠道上存的协议和 base。
 
 use aikun_protocol::Protocol;
 use serde_json::Value;
@@ -16,6 +17,7 @@ pub struct DeepSeekAdapter;
 pub const KIND: &str = "deepseek";
 
 pub const OPENAI_BASE: &str = "https://api.deepseek.com";
+pub const CHAT_URL: &str = "https://api.deepseek.com/chat/completions";
 pub const MODELS_URL: &str = "https://api.deepseek.com/models";
 
 pub const DEFAULT_MODELS: &[&str] = &["deepseek-flash", "deepseek-v4-pro"];
@@ -30,16 +32,14 @@ impl ChannelAdapter for DeepSeekAdapter {
     }
 
     fn description(&self) -> &'static str {
-        "DeepSeek 官方。固定走 OpenAI 对话（POST /chat/completions）。\
-         健康和模型列表固定 GET https://api.deepseek.com/models。"
+        "DeepSeek 官方。对话 POST /chat/completions，模型列表 GET /models，\
+         都在 https://api.deepseek.com，不带 /v1。"
     }
 
     fn chat_url(&self, _provider: &Provider, _protocol: Protocol) -> String {
-        // 协议和地址由适配器决定，不看渠道上存的协议/URL。
-        crate::url::build_api_url(OPENAI_BASE, "/chat/completions")
+        CHAT_URL.to_string()
     }
 
-    /// 健康和拉模型都打官方 /models，不跟协议 base 走。
     fn models_url(&self, _base_url: &str, _protocol: Protocol) -> String {
         MODELS_URL.to_string()
     }
