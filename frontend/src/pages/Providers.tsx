@@ -197,17 +197,6 @@ function ProviderForm({
     }, 600)
   }
 
-  const toggleProto = (t: string, on: boolean) => {
-    setForm((f) => {
-      const protocols = on ? [...new Set([...f.protocols, t])] : f.protocols.filter((x) => x !== t)
-      let defaultProtocol = f.defaultProtocol
-      if (defaultProtocol === t || !protocols.includes(defaultProtocol)) {
-        defaultProtocol = ['openai', 'anthropic'].find((x) => protocols.includes(x)) ?? protocols[0] ?? 'openai'
-      }
-      return { ...f, protocols, defaultProtocol }
-    })
-  }
-
   const kindRow = kinds.find((k) => (k.kind === 'generic' ? '' : k.kind) === form.kind)
 
   return (

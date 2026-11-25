@@ -17,7 +17,6 @@ pub struct DeepSeekAdapter;
 pub const KIND: &str = "deepseek";
 
 pub const OPENAI_BASE: &str = "https://api.deepseek.com";
-pub const ANTHROPIC_BASE: &str = "https://api.deepseek.com/anthropic";
 pub const MODELS_URL: &str = "https://api.deepseek.com/models";
 
 pub const DEFAULT_MODELS: &[&str] = &["deepseek-flash", "deepseek-v4-pro"];
