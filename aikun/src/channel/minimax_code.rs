@@ -420,11 +420,8 @@ const AUDIENCE: &str = "agent-backend";
 pub struct DeviceFlow {
     pub device_code: String,
     pub user_code: String,
-    pub verification_uri: String,
     pub verification_uri_complete: String,
     pub code_verifier: String,
-    pub interval_sec: u64,
-    pub expires_in: u64,
     pub poll_as_user_code: bool,
 }
 
@@ -473,10 +470,7 @@ pub async fn start_device_flow(client: &reqwest::Client, cn: bool) -> Result<Dev
             .as_str()
             .unwrap_or(&verification_uri)
             .to_string(),
-        verification_uri,
         code_verifier: verifier,
-        interval_sec: body["interval"].as_u64().unwrap_or(5),
-        expires_in: body["expires_in"].as_u64().unwrap_or(300),
         poll_as_user_code,
     })
 }
