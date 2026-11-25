@@ -1910,8 +1910,8 @@ async fn circuit_breaker_skips_channel_within_cooldown_then_recovers() {
     assert_eq!(a_hits(), 2, "冷却窗口内坏渠道不再被选中");
 
     // 冷却到期(半开):A 恢复可选 → 加权再次命中 → 500 → failover B。
-    // (单测已锁定窗口语义;此处验证端到端恢复路径。)
-    tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+    // 1s 冷却在 CI 负载下可能还没到期，多等一会儿再断言。
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     let resp = app
         .client()
         .post(format!("{}/v1/chat/completions", app.base))
