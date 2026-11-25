@@ -125,6 +125,7 @@ pub struct ProviderConfig {
     pub note: String,
     pub website_url: String,
     pub channel_kind: String,
+    pub balance_url: String,
 }
 
 /// 部分更新载荷:`Some` 字段才进 SET(等价旧实现的动态 SQL);全 None =
@@ -138,6 +139,7 @@ pub struct ProviderPatch {
     pub note: Option<String>,
     pub website_url: Option<String>,
     pub channel_kind: Option<String>,
+    pub balance_url: Option<String>,
     /// 密文与哈希成对更新(换 key)。
     pub api_key_stored: Option<String>,
     pub key_hash: Option<String>,
@@ -166,6 +168,7 @@ impl ProviderPatch {
             && self.note.is_none()
             && self.website_url.is_none()
             && self.channel_kind.is_none()
+            && self.balance_url.is_none()
             && self.api_key_stored.is_none()
             && self.key_hash.is_none()
             && self.models_json.is_none()
@@ -611,6 +614,7 @@ fn to_api_provider(row: &ChannelRow) -> ApiProvider {
         note: Some(row.note.clone()),
         website_url: Some(row.website_url.clone()),
         channel_kind: Some(row.channel_kind.clone()),
+        balance_url: Some(row.balance_url.clone()),
         created_at: crate::sqlite_utc(&row.created_at),
         updated_at: crate::sqlite_utc(&row.updated_at),
     }
@@ -648,6 +652,7 @@ fn fresh_row_from_config(id: &str, config: &ProviderConfig) -> ChannelRow {
         note: config.note.clone(),
         website_url: config.website_url.clone(),
         channel_kind: config.channel_kind.clone(),
+        balance_url: config.balance_url.clone(),
     }
 }
 
@@ -671,6 +676,7 @@ struct ProviderCandidate {
     note: Option<String>,
     website_url: Option<String>,
     channel_kind: Option<String>,
+    balance_url: Option<String>,
 }
 
 impl ProviderCandidate {
@@ -700,6 +706,7 @@ impl ProviderCandidate {
             note: b.note.clone(),
             website_url: b.website_url.clone(),
             channel_kind: b.channel_kind.clone(),
+            balance_url: b.balance_url.clone(),
         }
     }
 
@@ -741,6 +748,7 @@ impl ProviderCandidate {
             note: shared.note.clone(),
             website_url: shared.website_url.clone(),
             channel_kind: shared.channel_kind.clone(),
+            balance_url: shared.balance_url.clone(),
         }
     }
 }
@@ -892,6 +900,12 @@ fn validate_candidate(cand: &ProviderCandidate) -> Result<ProviderConfig, Proble
             .trim()
             .to_string(),
         channel_kind,
+        balance_url: cand
+            .balance_url
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
     })
 }
 
@@ -1143,6 +1157,9 @@ impl AdminProvidersService {
         }
         if let Some(website_url) = &body.website_url {
             patch.website_url = Some(website_url.trim().to_string());
+        }
+        if let Some(balance_url) = &body.balance_url {
+            patch.balance_url = Some(balance_url.trim().to_string());
         }
         if let Some(kind) = &body.channel_kind {
             let kind = kind.trim().to_string();

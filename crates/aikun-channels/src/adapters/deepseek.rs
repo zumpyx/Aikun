@@ -19,6 +19,7 @@ pub const KIND: &str = "deepseek";
 pub const OPENAI_BASE: &str = "https://api.deepseek.com";
 pub const CHAT_URL: &str = "https://api.deepseek.com/chat/completions";
 pub const MODELS_URL: &str = "https://api.deepseek.com/models";
+pub const BALANCE_URL: &str = "https://api.deepseek.com/user/balance";
 
 pub const DEFAULT_MODELS: &[&str] = &["deepseek-flash", "deepseek-v4-pro"];
 

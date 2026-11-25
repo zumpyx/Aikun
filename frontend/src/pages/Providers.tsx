@@ -27,6 +27,7 @@ const PRESETS = [
     docs_url: 'https://api-docs.deepseek.com/zh-cn/', protocols: ['openai'],
     default_protocol: 'openai', openai_base_url: 'https://api.deepseek.com',
     anthropic_base_url: '', key_placeholder: 'DeepSeek API Key', kind: 'deepseek',
+    balance_url: 'https://api.deepseek.com/user/balance',
   },
   {
     id: 'glm', name: '智谱 GLM', website_url: 'https://bigmodel.cn',
@@ -54,6 +55,7 @@ export interface ProviderDetail {
   default_protocol: string
   openai_base_url: string
   anthropic_base_url: string
+  balance_url?: string | null
   api_key?: string
   models: string[]
   priority: number
@@ -86,6 +88,7 @@ interface FormState {
   defaultProtocol: string
   urlOpenai: string
   urlAnthropic: string
+  balanceUrl: string
   key: string
   models: string
   priority: string
@@ -96,6 +99,7 @@ interface FormState {
   mapping: string
   modelsAuto: string
   modelsStatus: string
+  balanceStatus: string
 }
 
 function initialForm(provider: ProviderDetail | null): FormState {
@@ -110,6 +114,7 @@ function initialForm(provider: ProviderDetail | null): FormState {
     defaultProtocol: provider?.default_protocol || protocols[0],
     urlOpenai: provider?.openai_base_url ?? '',
     urlAnthropic: provider?.anthropic_base_url ?? '',
+    balanceUrl: provider?.balance_url ?? '',
     key: '',
     models: (provider?.models ?? []).join(', '),
     priority: String(provider?.priority ?? 0),
@@ -120,6 +125,7 @@ function initialForm(provider: ProviderDetail | null): FormState {
     mapping: provider?.model_mapping && Object.keys(provider.model_mapping).length > 0 ? JSON.stringify(provider.model_mapping) : '',
     modelsAuto: '',
     modelsStatus: '',
+    balanceStatus: '',
   }
 }
 
@@ -154,10 +160,12 @@ function ProviderForm({
         defaultProtocol: p.default_protocol,
         urlOpenai: p.openai_base_url,
         urlAnthropic: p.anthropic_base_url,
+        balanceUrl: 'balance_url' in p ? p.balance_url : '',
         kind: 'kind' in p ? p.kind : '',
         models: '',
         modelsAuto: '',
         modelsStatus: '填入 API Key 后会自动向官方拉取最新模型',
+        balanceStatus: '',
       }
     })
   }
@@ -195,6 +203,27 @@ function ProviderForm({
       const manual = form.models.trim() && form.models.trim() !== form.modelsAuto
       if (!manual) void pullModels()
     }, 600)
+  }
+
+  const pullBalance = async () => {
+    const url = preset && 'balance_url' in preset ? preset.balance_url : form.balanceUrl.trim()
+    if (!url) return setForm((f) => ({ ...f, balanceStatus: '未配置余额地址，不支持查询' }))
+    const apiKey = batch ? form.key.split('\n').map((s) => s.trim()).filter(Boolean)[0] || '' : form.key.trim()
+    setForm((f) => ({ ...f, balanceStatus: '正在查询余额…' }))
+    const r = await api<Record<string, unknown>>('POST', '/api/providers/fetch-balance', {
+      balance_url: url,
+      api_key: apiKey,
+      provider_id: editing?.id ?? null,
+    })
+    if (r.ok) {
+      const infos = (r.data as { balance_infos?: Array<{ currency?: string; total_balance?: string }> }).balance_infos
+      const text = infos?.length
+        ? infos.map((i) => `${i.currency ?? ''} ${i.total_balance ?? ''}`.trim()).join(' · ')
+        : JSON.stringify(r.data)
+      setForm((f) => ({ ...f, balanceStatus: text || '已返回' }))
+    } else {
+      setForm((f) => ({ ...f, balanceStatus: errMsg(r) || '查询失败' }))
+    }
   }
 
   const kindRow = kinds.find((k) => (k.kind === 'generic' ? '' : k.kind) === form.kind)
@@ -275,6 +304,14 @@ function ProviderForm({
             />
           </div>
           <p className="text-xs text-muted-foreground">自定义渠道选一个协议，填地址和密钥即可。</p>
+          <div className="space-y-1.5">
+            <Label>余额地址（可选）</Label>
+            <Input
+              value={form.balanceUrl}
+              onChange={(e) => setForm((f) => ({ ...f, balanceUrl: e.target.value }))}
+              placeholder="不填则不支持查余额，例如 https://api.example.com/user/balance"
+            />
+          </div>
         </div>
       ) : null}
       {batch ? (
@@ -296,6 +333,14 @@ function ProviderForm({
         </div>
         {form.modelsStatus && <p className="text-xs text-muted-foreground">{form.modelsStatus}</p>}
       </div>
+      {(preset && 'balance_url' in preset && preset.balance_url) || form.balanceUrl.trim() ? (
+        <div className="space-y-1.5">
+          <div className="flex gap-2">
+            <Button type="button" variant="outline" className="shrink-0" onClick={() => void pullBalance()}>查询余额</Button>
+            {form.balanceStatus && <p className="self-center text-xs text-muted-foreground">{form.balanceStatus}</p>}
+          </div>
+        </div>
+      ) : null}
       <div className="grid grid-cols-4 gap-3">
         <div className="space-y-1.5"><Label>优先级</Label><Input type="number" value={form.priority} onChange={(e) => setForm((f) => ({ ...f, priority: e.target.value }))} /></div>
         <div className="space-y-1.5"><Label>权重</Label><Input type="number" step="0.1" value={form.weight} onChange={(e) => setForm((f) => ({ ...f, weight: e.target.value }))} /></div>
@@ -334,6 +379,7 @@ function buildBody(form: FormState, batch: boolean): Record<string, unknown> {
     default_protocol: preset ? preset.default_protocol : form.defaultProtocol,
     openai_base_url: preset ? preset.openai_base_url : form.urlOpenai.trim(),
     anthropic_base_url: preset ? preset.anthropic_base_url : form.urlAnthropic.trim(),
+    balance_url: preset && 'balance_url' in preset ? preset.balance_url : form.balanceUrl.trim(),
     models: form.models.split(',').map((s) => s.trim()).filter(Boolean),
     priority: toInt(form.priority, 0),
     weight: toNum(form.weight, 1.0),

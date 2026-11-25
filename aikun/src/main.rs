@@ -244,6 +244,7 @@ async fn async_main() {
             "/api/providers/minimax/login-poll",
             post(minimax_login_poll),
         )
+        .route("/api/providers/fetch-balance", post(fetch_balance))
         .layer(middleware::from_fn(require_admin))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1449,6 +1450,7 @@ impl providers_port::ProviderStore for SurrealProviderStore {
                 note: c.note,
                 website_url: c.website_url,
                 channel_kind: c.channel_kind,
+                balance_url: c.balance_url,
             }))
     }
 
@@ -1481,6 +1483,7 @@ impl providers_port::ProviderStore for SurrealProviderStore {
                     note: config.note.clone(),
                     website_url: config.website_url.clone(),
                     channel_kind: config.channel_kind.clone(),
+                    balance_url: config.balance_url.clone(),
                 },
             )
             .await
@@ -1509,6 +1512,7 @@ impl providers_port::ProviderStore for SurrealProviderStore {
             note: patch.note.clone(),
             website_url: patch.website_url.clone(),
             channel_kind: patch.channel_kind.clone(),
+            balance_url: patch.balance_url.clone(),
             api_key_stored: patch.api_key_stored.clone(),
             key_hash: patch.key_hash.clone(),
             models_json: patch.models_json.clone(),
@@ -2343,6 +2347,7 @@ async fn minimax_login_poll(
         proxy_url: String::new(),
         note: note.into(),
         website_url: "https://agent.minimax.cn".into(),
+        balance_url: String::new(),
     };
     let created = state
         .store
@@ -2360,4 +2365,36 @@ async fn minimax_login_poll(
         "provider_id": created.id,
         "name": created.name,
     })))
+}
+
+/// 按渠道上存的余额地址查询。地址为空 = 不支持。
+async fn fetch_balance(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let url = body.get("balance_url").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let api_key = body.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let provider_id = body.get("provider_id").and_then(|v| v.as_str()).unwrap_or("");
+    if url.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "未配置余额地址，不支持查询".into()));
+    }
+    let mut key = api_key;
+    if key.is_empty() && !provider_id.is_empty() {
+        if let Ok(Some(p)) = state.store.channels.get_provider(provider_id).await {
+            key = crate::crypto::decrypt_or_plain(&state.store.cipher, &p.api_key);
+        }
+    }
+    if key.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "缺少 API Key".into()));
+    }
+    let client = reqwest::Client::new();
+    let resp = client.get(&url).bearer_auth(&key).send().await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, format!("请求失败: {}", e.without_url())))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err((axum::http::StatusCode::BAD_GATEWAY, format!("上游返回 {status}: {text}")));
+    }
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+    Ok(axum::Json(value))
 }

@@ -710,6 +710,7 @@ mod tests {
             note: String::new(),
             website_url: String::new(),
             channel_kind: String::new(),
+            balance_url: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
         }

@@ -350,6 +350,7 @@ pub struct StoredProviderConfig {
     pub note: String,
     pub website_url: String,
     pub channel_kind: String,
+    pub balance_url: String,
 }
 
 /// 管理面 PATCH(Some 才进 SET;`api_key_stored`/`key_hash` 成对)。
@@ -362,6 +363,7 @@ pub struct StoredProviderPatch {
     pub note: Option<String>,
     pub website_url: Option<String>,
     pub channel_kind: Option<String>,
+    pub balance_url: Option<String>,
     pub api_key_stored: Option<String>,
     pub key_hash: Option<String>,
     pub models_json: Option<String>,
@@ -400,6 +402,7 @@ pub struct NewProvider {
     pub proxy_url: String,
     pub note: String,
     pub website_url: String,
+    pub balance_url: String,
 }
 
 /// 渠道部分更新(None = 不动)。base_url 三态(None=不动/Some(Some(v)=设)/
@@ -423,6 +426,7 @@ pub struct ProviderPatch {
     pub proxy_url: Option<String>,
     pub note: Option<String>,
     pub website_url: Option<String>,
+    pub balance_url: Option<String>,
 }
 
 /// 模型级健康行。
@@ -563,6 +567,7 @@ fn provider_from_json(v: &serde_json::Value) -> Option<Provider> {
         note: j_str(v, "note"),
         website_url: j_str(v, "website_url"),
         channel_kind: j_str(v, "channel_kind"),
+        balance_url: j_str(v, "balance_url"),
         created_at: j_str(v, "created_at"),
         updated_at: j_str(v, "updated_at"),
     })
@@ -646,6 +651,7 @@ impl SurrealChannels {
                     proxy_url = $proxy_url,
                     note = $note,
                     website_url = $website_url,
+                    balance_url = $balance_url,
                     created_at = time::now(),
                     updated_at = time::now()
                  RETURN AFTER",
@@ -669,6 +675,7 @@ impl SurrealChannels {
             .bind(("proxy_url", row.proxy_url))
             .bind(("note", row.note))
             .bind(("website_url", row.website_url))
+            .bind(("balance_url", row.balance_url))
             .await
             .map_err(qerr)?
             .check()
@@ -1320,6 +1327,7 @@ impl ChannelStore for SurrealChannels {
                     proxy_url = $proxy_url,
                     note = $note,
                     website_url = $website_url,
+                    balance_url = $balance_url,
                     created_at = time::now(),
                     updated_at = time::now()
                  RETURN AFTER",
@@ -1346,6 +1354,7 @@ impl ChannelStore for SurrealChannels {
             .bind(("proxy_url", config.proxy_url.clone()))
             .bind(("note", config.note.clone()))
             .bind(("website_url", config.website_url.clone()))
+            .bind(("balance_url", config.balance_url.clone()))
             .await
             .map_err(qerr)?
             .check()
@@ -1408,6 +1417,14 @@ impl ChannelStore for SurrealChannels {
                 &mut sets,
                 &mut params,
                 "website_url",
+                serde_json::Value::String(v),
+            );
+        }
+        if let Some(v) = patch.balance_url {
+            p(
+                &mut sets,
+                &mut params,
+                "balance_url",
                 serde_json::Value::String(v),
             );
         }
@@ -1995,6 +2012,7 @@ mod tests {
             proxy_url: String::new(),
             note: String::new(),
             website_url: String::new(),
+            balance_url: String::new(),
         }
     }
 

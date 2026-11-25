@@ -478,6 +478,8 @@ pub struct UpdateProviderRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_protocol: Option<UpdateProviderRequestDefaultProtocol>,
@@ -872,6 +874,9 @@ pub struct Provider {
     ///空 = 回退 openai_base_url(协议专属地址为空时互为回退)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anthropic_base_url: Option<String>,
+    ///余额查询地址。空 = 该渠道不支持查余额。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance_url: Option<String>,
     ///适配器 kind(见 GET /api/channel-kinds);空 = generic
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_kind: Option<String>,
@@ -1660,6 +1665,8 @@ pub struct CreateProvidersBatchRequest {
     ///Constraint: minItems=1, maxItems=100
     pub api_keys: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_protocol: Option<CreateProvidersBatchRequestDefaultProtocol>,
@@ -1699,6 +1706,7 @@ impl CreateProvidersBatchRequest {
             models,
             name,
             anthropic_base_url: None,
+            balance_url: None,
             channel_kind: None,
             default_protocol: None,
             max_retries: None,
@@ -1740,6 +1748,12 @@ impl CreateProvidersBatchRequestBuilder {
     #[must_use]
     pub fn anthropic_base_url(mut self, anthropic_base_url: String) -> Self {
         self.value.anthropic_base_url = Some(anthropic_base_url);
+        self
+    }
+    #[doc = concat!("Set the optional `", "balance_url", "` request field.")]
+    #[must_use]
+    pub fn balance_url(mut self, balance_url: String) -> Self {
+        self.value.balance_url = Some(balance_url);
         self
     }
     #[doc = concat!("Set the optional `", "channel_kind", "` request field.")]
@@ -1931,6 +1945,9 @@ pub struct CreateProviderRequest {
     pub anthropic_base_url: Option<String>,
     ///入库静态加密(enc:v1:);key_hash 用于重复检测
     pub api_key: String,
+    ///余额查询地址。空或不传 = 不支持查余额。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1971,6 +1988,7 @@ impl CreateProviderRequest {
             models,
             name,
             anthropic_base_url: None,
+            balance_url: None,
             channel_kind: None,
             default_protocol: None,
             max_retries: None,
@@ -2012,6 +2030,12 @@ impl CreateProviderRequestBuilder {
     #[must_use]
     pub fn anthropic_base_url(mut self, anthropic_base_url: String) -> Self {
         self.value.anthropic_base_url = Some(anthropic_base_url);
+        self
+    }
+    #[doc = concat!("Set the optional `", "balance_url", "` request field.")]
+    #[must_use]
+    pub fn balance_url(mut self, balance_url: String) -> Self {
+        self.value.balance_url = Some(balance_url);
         self
     }
     #[doc = concat!("Set the optional `", "channel_kind", "` request field.")]
@@ -2463,6 +2487,8 @@ pub struct ProviderExportItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anthropic_base_url: Option<String>,
     pub api_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -53,6 +53,9 @@ pub struct Provider {
     /// 渠道类型(适配器 kind,见 crate::channel::adapter)。空串 = generic。
     #[serde(default)]
     pub channel_kind: String,
+    /// 余额查询地址。空 = 该渠道不支持查余额。
+    #[serde(default)]
+    pub balance_url: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -86,6 +89,7 @@ impl std::fmt::Debug for Provider {
             .field("note", &self.note)
             .field("website_url", &self.website_url)
             .field("channel_kind", &self.channel_kind)
+            .field("balance_url", &self.balance_url)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -220,6 +224,7 @@ pub(crate) mod tests {
             note: String::new(),
             website_url: String::new(),
             channel_kind: String::new(),
+            balance_url: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
         }

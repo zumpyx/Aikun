@@ -329,6 +329,7 @@ mod tests {
                 note: String::new(),
                 website_url: String::new(),
                 channel_kind: String::new(),
+            balance_url: String::new(),
             })
         };
 
@@ -379,6 +380,7 @@ mod tests {
             note: String::new(),
             website_url: String::new(),
             channel_kind: String::new(),
+            balance_url: String::new(),
         }]);
 
         // latency=0 ⇒ 直接取新值(SQL CASE 首支);成功衰减 error_rate
@@ -441,6 +443,7 @@ mod tests {
                 note: String::new(),
                 website_url: String::new(),
                 channel_kind: String::new(),
+            balance_url: String::new(),
             })
         };
         let snap = TopologySnapshot {
