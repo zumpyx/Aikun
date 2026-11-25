@@ -2224,6 +2224,7 @@ async fn minimax_account_info(
                 proxy_url: None,
                 note: None,
                 website_url: None,
+                balance_url: None,
             };
             let _ = state.store.channels.update_provider(&id, patch).await;
         }
