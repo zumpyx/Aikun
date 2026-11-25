@@ -1294,6 +1294,7 @@ impl ChannelStore for SurrealChannels {
                 note: j_str(r, "note"),
                 website_url: j_str(r, "website_url"),
                 channel_kind: j_str(r, "channel_kind"),
+                balance_url: j_str(r, "balance_url"),
             })
         }))
     }
