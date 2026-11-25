@@ -1485,6 +1485,7 @@ impl AdminProvidersService {
                 note: opt_str(&row.note),
                 website_url: opt_str(&row.website_url),
                 channel_kind: opt_str(&row.channel_kind),
+                balance_url: opt_str(&row.balance_url),
                 provider_type: Some(row.provider_type.clone()),
                 protocols: Some(channel_protocols(row)),
                 default_protocol: Some(row.default_protocol.clone()),
@@ -1562,6 +1563,7 @@ impl AdminProvidersService {
                 note: item.note.clone(),
                 website_url: item.website_url.clone(),
                 channel_kind: item.channel_kind.clone(),
+                balance_url: item.balance_url.clone(),
             };
             // zcode 渠道：若未带区域标记，按 website_url 补全，保证调度可靠
             if cand.channel_kind.as_deref() == Some("zcode") {
@@ -2110,6 +2112,7 @@ mod tests {
             note: None,
             website_url: None,
             channel_kind: None,
+            balance_url: None,
         }
     }
 

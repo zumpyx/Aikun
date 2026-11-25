@@ -272,6 +272,7 @@ impl AdminProvidersService {
                         .into(),
                     ),
                     channel_kind: Some("zcode".into()),
+                    balance_url: None,
                 };
                 match validate_candidate(&cand) {
                     Ok(config) => match insert_checked(self.store.as_ref(), &cand, config).await {
