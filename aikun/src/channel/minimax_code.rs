@@ -409,3 +409,158 @@ fn rand_secs(max: u64) -> u64 {
         .unwrap_or(0);
     n % (max + 1)
 }
+
+/// MiniMax Code 在线登录：OAuth device code。
+/// 对照 minimax-code：account.minimax.cn /oauth2/device/code + /oauth2/token。
+const CLIENT_ID: &str = "mcode-public";
+const SCOPE: &str = "agent.default";
+const AUDIENCE: &str = "agent-backend";
+
+#[derive(Clone)]
+pub struct DeviceFlow {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: String,
+    pub code_verifier: String,
+    pub interval_sec: u64,
+    pub expires_in: u64,
+    pub poll_as_user_code: bool,
+}
+
+pub async fn start_device_flow(client: &reqwest::Client, cn: bool) -> Result<DeviceFlow, String> {
+    let origin = if cn {
+        "https://account.minimax.cn"
+    } else {
+        "https://account.minimax.io"
+    };
+    let verifier = random_b64url(32);
+    let challenge = sha256_b64url(verifier.as_bytes());
+    let resp = client
+        .post(format!("{origin}/oauth2/device/code"))
+        .form(&[
+            ("client_id", CLIENT_ID),
+            ("scope", SCOPE),
+            ("audience", AUDIENCE),
+            ("code_challenge", &challenge),
+            ("code_challenge_method", "S256"),
+        ])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("device/code HTTP {}", resp.status()));
+    }
+    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let user_code = body["user_code"].as_str().unwrap_or("").to_string();
+    let device_code = body["device_code"]
+        .as_str()
+        .unwrap_or(user_code.as_str())
+        .to_string();
+    let verification_uri = body["verification_uri"]
+        .as_str()
+        .or_else(|| body["verification_url"].as_str())
+        .unwrap_or("")
+        .to_string();
+    if user_code.is_empty() || verification_uri.is_empty() {
+        return Err("device/code 响应缺少 user_code 或 verification_uri".into());
+    }
+    let poll_as_user_code = body.get("device_code").and_then(|v| v.as_str()).is_none();
+    Ok(DeviceFlow {
+        device_code,
+        user_code,
+        verification_uri_complete: body["verification_uri_complete"]
+            .as_str()
+            .unwrap_or(&verification_uri)
+            .to_string(),
+        verification_uri,
+        code_verifier: verifier,
+        interval_sec: body["interval"].as_u64().unwrap_or(5),
+        expires_in: body["expires_in"].as_u64().unwrap_or(300),
+        poll_as_user_code,
+    })
+}
+
+pub async fn poll_device_token(
+    client: &reqwest::Client,
+    cn: bool,
+    flow: &DeviceFlow,
+) -> Result<Option<Value>, String> {
+    let origin = if cn {
+        "https://account.minimax.cn"
+    } else {
+        "https://account.minimax.io"
+    };
+    let mut form = vec![
+        (
+            "grant_type",
+            "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+        ),
+        ("client_id", CLIENT_ID.to_string()),
+        ("code_verifier", flow.code_verifier.clone()),
+    ];
+    if flow.poll_as_user_code {
+        form.push(("user_code", flow.user_code.clone()));
+    } else {
+        form.push(("device_code", flow.device_code.clone()));
+    }
+    let resp = client
+        .post(format!("{origin}/oauth2/token"))
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    if status.is_success() {
+        let st = body["status"].as_str().unwrap_or("");
+        if st == "pending" || st == "slow_down" {
+            return Ok(None);
+        }
+        if body.get("access_token").is_some() {
+            return Ok(Some(body));
+        }
+        return Ok(None);
+    }
+    let err = body["error"].as_str().unwrap_or("");
+    if err == "authorization_pending" || err == "slow_down" {
+        return Ok(None);
+    }
+    Err(err.to_string())
+}
+
+fn random_b64url(n: usize) -> String {
+    use rand::RngCore;
+    let mut buf = vec![0u8; n];
+    rand::rng().fill_bytes(&mut buf);
+    b64url(&buf)
+}
+
+fn sha256_b64url(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    b64url(&h.finalize())
+}
+
+fn b64url(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut i = 0;
+    while i < data.len() {
+        let a = data[i] as u32;
+        let b = *data.get(i + 1).unwrap_or(&0) as u32;
+        let c = *data.get(i + 2).unwrap_or(&0) as u32;
+        let triple = (a << 16) | (b << 8) | c;
+        out.push(T[((triple >> 18) & 63) as usize] as char);
+        out.push(T[((triple >> 12) & 63) as usize] as char);
+        if i + 1 < data.len() {
+            out.push(T[((triple >> 6) & 63) as usize] as char);
+        }
+        if i + 2 < data.len() {
+            out.push(T[(triple & 63) as usize] as char);
+        }
+        i += 3;
+    }
+    out.replace('+', "-").replace('/', "_")
+}

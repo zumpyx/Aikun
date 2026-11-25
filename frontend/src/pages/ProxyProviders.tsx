@@ -211,6 +211,28 @@ function AppPage({ appId }: { appId: AppId }) {
     loginTimer.current = window.setTimeout(() => void tick(), 3000)
   }
 
+  const startMiniMaxLogin = async () => {
+    setLogin({ state: 'waiting', message: '正在发起 MiniMax 授权…' })
+    const r = await api<{ flow_id: string; authorize_url: string; user_code: string }>('POST', '/api/providers/minimax/login-init', { env: 'cn' })
+    if (!r.ok) { setLogin({ state: 'error', message: errMsg(r) }); return }
+    window.open(r.data.authorize_url, '_blank', 'noopener')
+    setLogin({ state: 'waiting', authorizeUrl: r.data.authorize_url, message: `已打开授权窗口，用户码 ${r.data.user_code}，完成后自动创建渠道` })
+    const started = Date.now()
+    const tick = async () => {
+      if (Date.now() - started > 5 * 60_000) { setLogin({ state: 'error', message: '授权超时' }); return }
+      const p = await api<{ status: string; name?: string }>('POST', '/api/providers/minimax/login-poll', { flow_id: r.data.flow_id })
+      if (!p.ok) { setLogin({ state: 'error', message: errMsg(p) }); return }
+      if (p.data.status === 'ready') {
+        sonnerToast.success(`授权成功，渠道 ${p.data.name ?? ''} 已创建`)
+        setLogin({ state: 'done' })
+        invalidate()
+        return
+      }
+      loginTimer.current = window.setTimeout(() => void tick(), 3000)
+    }
+    loginTimer.current = window.setTimeout(() => void tick(), 3000)
+  }
+
   // ---- 领取免费额度 / 账号信息 / 手动备注 ----
   const [claiming, setClaiming] = useState<Set<string>>(new Set())
   const [detailFor, setDetailFor] = useState<ProviderDetail | null>(null)
@@ -296,6 +318,11 @@ function AppPage({ appId }: { appId: AppId }) {
                 {login.state === 'waiting' ? '授权中…' : '在线登录'}
               </Button>
             )}
+            {appId === 'minimax-code-cn' && (
+              <Button variant="outline" onClick={() => void startMiniMaxLogin()} disabled={login.state === 'waiting'}>
+                {login.state === 'waiting' ? '授权中…' : '在线登录'}
+              </Button>
+            )}
             <Button onClick={() => setBatchOpen(true)}>+ 批量添加</Button>
             {appId === 'zcode-cn' && <Button onClick={() => void claimAll()}>领取闲时额度</Button>}
           </div>
@@ -347,7 +374,7 @@ function AppPage({ appId }: { appId: AppId }) {
             <CardContent className="p-0">
               {data.length === 0 ? (
                 <div className="py-10 text-center text-sm text-muted-foreground">
-                  {list.isLoading ? '加载中...' : `暂无${conf.label}渠道——批量粘贴凭证添加${appId.startsWith('zcode') ? ',或用「在线登录」一键接入' : ''}`}
+                  {list.isLoading ? '加载中...' : `暂无${conf.label}渠道——批量粘贴凭证添加${appId.startsWith('zcode') || appId === 'minimax-code-cn' ? ',或用「在线登录」一键接入' : ''}`}
                 </div>
               ) : (
                 <Table>

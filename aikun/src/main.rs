@@ -236,6 +236,14 @@ async fn async_main() {
             "/api/settings/minimax-checkin",
             get(minimax_schedule_get).post(minimax_schedule_set),
         )
+        .route(
+            "/api/providers/minimax/login-init",
+            post(minimax_login_init),
+        )
+        .route(
+            "/api/providers/minimax/login-poll",
+            post(minimax_login_poll),
+        )
         .layer(middleware::from_fn(require_admin))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -2242,4 +2250,107 @@ async fn minimax_schedule_set(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(axum::Json(s))
+}
+
+static MINIMAX_FLOWS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<String, (crate::channel::minimax_code::DeviceFlow, bool)>,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+async fn minimax_login_init(
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let cn = body.get("env").and_then(|v| v.as_str()) != Some("intl");
+    let client = reqwest::Client::new();
+    let flow = crate::channel::minimax_code::start_device_flow(&client, cn)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let uri = flow.verification_uri_complete.clone();
+    let code = flow.user_code.clone();
+    MINIMAX_FLOWS.lock().unwrap().insert(id.clone(), (flow, cn));
+    Ok(axum::Json(serde_json::json!({
+        "flow_id": id,
+        "authorize_url": uri,
+        "user_code": code,
+    })))
+}
+
+async fn minimax_login_poll(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let id = body.get("flow_id").and_then(|v| v.as_str()).unwrap_or("");
+    let Some((flow, cn)) = MINIMAX_FLOWS.lock().unwrap().get(id).cloned() else {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "登录流不存在或已过期".into(),
+        ));
+    };
+    let client = reqwest::Client::new();
+    let token = crate::channel::minimax_code::poll_device_token(&client, cn, &flow)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+    let Some(tok) = token else {
+        return Ok(axum::Json(serde_json::json!({ "status": "pending" })));
+    };
+    MINIMAX_FLOWS.lock().unwrap().remove(id);
+    let access = tok["access_token"].as_str().unwrap_or("").to_string();
+    if access.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            "没有 access_token".into(),
+        ));
+    }
+    let base = if cn {
+        aikun_channels::adapters::minimax_code::CN_BASE
+    } else {
+        aikun_channels::adapters::minimax_code::INTL_BASE
+    };
+    let name = format!(
+        "minimax-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..6]
+    );
+    let note = if cn {
+        "[国内] MiniMax Code 在线登录"
+    } else {
+        "国际 MiniMax Code 在线登录"
+    };
+    let row = aikun_store::surreal::channels_store::NewProvider {
+        id: None,
+        name,
+        provider_type: "anthropic".into(),
+        channel_kind: "minimax-code".into(),
+        anthropic_base_url: base.into(),
+        openai_base_url: base.into(),
+        api_key_plain: access,
+        models_json: "[]".into(),
+        model_mapping_json: "{}".into(),
+        protocols_json: "[\"anthropic\"]".into(),
+        default_protocol: "anthropic".into(),
+        priority: 0,
+        weight: 1.0,
+        max_retries: 3,
+        timeout_secs: 120,
+        proxy_url: String::new(),
+        note: note.into(),
+        website_url: "https://agent.minimax.cn".into(),
+    };
+    let created = state
+        .store
+        .channels
+        .create_provider(row)
+        .await
+        .map_err(|_| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "建渠道失败".into(),
+            )
+        })?;
+    Ok(axum::Json(serde_json::json!({
+        "status": "ready",
+        "provider_id": created.id,
+        "name": created.name,
+    })))
 }

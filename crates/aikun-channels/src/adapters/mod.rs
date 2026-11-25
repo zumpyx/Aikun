@@ -1,4 +1,5 @@
 pub mod bigmodel_plan;
+pub mod deepseek;
 pub mod generic;
 pub mod minimax_code;
 pub mod qoder;

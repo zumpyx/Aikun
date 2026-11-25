@@ -40,6 +40,7 @@ impl ChannelRegistry {
     pub fn builtin() -> Self {
         let mut reg = Self::empty();
         reg.register(Arc::new(super::generic::GenericAdapter));
+        reg.register(Arc::new(super::deepseek::DeepSeekAdapter));
         reg.register(Arc::new(super::workbuddy::WorkBuddyAdapter));
         reg.register(Arc::new(super::qoder::QoderAdapter));
         reg.register(Arc::new(super::zcode::ZcodeAdapter));

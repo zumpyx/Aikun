@@ -14,8 +14,8 @@
 //! * 客户端伪装头(`anthropic-beta` / `HTTP-Referer` / `User-Agent` /
 //!   `X-ZCode-*` 等)经 [`ChannelAdapter::extra_headers`] 注入(炼化自
 //!   Zcode2Api chatheaders.go,自 ZCode 3.16.3 抓包);
-//! * 健康 / 额度探测:GET `{base}/api/v1/zcode-plan/billing/balance`
-//!   (2xx 即健康,**零消耗**,不打聊天端点烧额度);
+//! * 健康探测:GET `{base}/api/v1/client/configs`（2xx 即健康）。
+//!   billing/balance 需要完整 billing 头，缺一项就 400，不用于探测。
 //! * 模型:GLM-5.3 / GLM-5.3-Flash(以渠道配置为准,可从 ZCode 客户端
 //!   或账单页抄)。
 //!
@@ -76,8 +76,11 @@ pub const DEFAULT_MODELS: &[&str] = &[
     "GLM-4.7-Flash",
 ];
 
-/// 零消耗健康/额度探测端点(GET,2xx = healthy;响应含 entitlements
-/// 的 remaining/limit/period_end,可用于人工核对剩余额度)。
+/// 健康探测走 client/configs。billing/balance 需要完整 billing 头，
+/// 缺一项就 400，不适合做周期性探测。configs 是官方客户端配置接口，2xx 即健康。
+pub const HEALTH_PATH: &str = "/api/v1/client/configs";
+
+/// 零消耗额度端点（账号信息用，不用于健康探测）。
 pub const BALANCE_PATH: &str = "/api/v1/zcode-plan/billing/balance";
 
 /// 伪装客户端版本(上游按此校验 User-Agent / X-ZCode-App-Version;
@@ -149,7 +152,7 @@ impl ChannelAdapter for ZcodeAdapter {
     fn models_url(&self, base_url: &str, _protocol: Protocol) -> String {
         join_absolute(
             base_url,
-            &format!("{BALANCE_PATH}?app_version={CLIENT_VERSION}"),
+            &format!("{HEALTH_PATH}?app_version={CLIENT_VERSION}&platform=linux-x86_64"),
         )
     }
 
@@ -475,12 +478,11 @@ mod tests {
         );
         assert_eq!(
             a.models_url("https://zcode.z.ai", Protocol::Anthropic),
-            "https://zcode.z.ai/api/v1/zcode-plan/billing/balance?app_version=3.18.2"
+            "https://zcode.z.ai/api/v1/client/configs?app_version=3.18.2&platform=linux-x86_64"
         );
-        // 国内版:同一端点族,仅 base 不同(2026-11-18 双环境支持)
         assert_eq!(
             a.models_url("https://zcode.bigmodel.cn", Protocol::Anthropic),
-            "https://zcode.bigmodel.cn/api/v1/zcode-plan/billing/balance?app_version=3.18.2"
+            "https://zcode.bigmodel.cn/api/v1/client/configs?app_version=3.18.2&platform=linux-x86_64"
         );
         let mut p = crate::provider::tests::bare_provider();
         p.openai_base_url = "https://zcode.z.ai".into();

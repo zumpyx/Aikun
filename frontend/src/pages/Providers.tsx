@@ -24,9 +24,9 @@ const PRESETS = [
   },
   {
     id: 'deepseek', name: 'DeepSeek', website_url: 'https://platform.deepseek.com',
-    docs_url: 'https://api-docs.deepseek.com/zh-cn/', protocols: ['openai', 'anthropic', 'responses'],
+    docs_url: 'https://api-docs.deepseek.com/zh-cn/', protocols: ['openai'],
     default_protocol: 'openai', openai_base_url: 'https://api.deepseek.com',
-    anthropic_base_url: 'https://api.deepseek.com/anthropic', key_placeholder: 'DeepSeek API Key',
+    anthropic_base_url: '', key_placeholder: 'DeepSeek API Key', kind: 'deepseek',
   },
   {
     id: 'glm', name: '智谱 GLM', website_url: 'https://bigmodel.cn',
@@ -154,6 +154,7 @@ function ProviderForm({
         defaultProtocol: p.default_protocol,
         urlOpenai: p.openai_base_url,
         urlAnthropic: p.anthropic_base_url,
+        kind: 'kind' in p ? p.kind : '',
         models: '',
         modelsAuto: '',
         modelsStatus: '填入 API Key 后会自动向官方拉取最新模型',
@@ -247,7 +248,7 @@ function ProviderForm({
         </select>
         {kindRow?.description && <p className="text-xs text-muted-foreground">{kindRow.experimental ? '⚠ ' : ''}{kindRow.description}</p>}
       </div>
-      {!preset && (
+      {!preset ? (
         <div className="space-y-1.5">
           <Label>API 协议与 Base URL</Label>
           <div className="grid grid-cols-[auto_auto_1fr] items-center gap-2.5 gap-x-3.5">
@@ -278,8 +279,30 @@ function ProviderForm({
             <label className="flex items-center gap-1.5 text-sm">
               <input type="checkbox" checked={form.protocols.includes('responses')} onChange={(e) => toggleProto('responses', e.target.checked)} /> Responses
             </label>
-            <span className="text-xs text-muted-foreground">复用 OpenAI Base URL（/v1/responses 原生透传，不作默认协议）</span>
           </div>
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          <Label>协议</Label>
+          <div className="flex gap-3 text-sm">
+            {(['openai', 'anthropic'] as const).map((t) => (
+              <label key={t} className="flex items-center gap-1.5">
+                <input
+                  type="radio"
+                  checked={form.defaultProtocol === t}
+                  onChange={() => setForm((f) => ({
+                    ...f,
+                    protocols: [t],
+                    defaultProtocol: t,
+                    urlOpenai: t === 'openai' ? (preset.openai_base_url || 'https://api.deepseek.com') : '',
+                    urlAnthropic: t === 'anthropic' ? (preset.anthropic_base_url || (preset.id === 'deepseek' ? 'https://api.deepseek.com/anthropic' : f.urlAnthropic)) : '',
+                  }))}
+                />
+                {t === 'openai' ? 'OpenAI' : 'Anthropic'}
+              </label>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">标准渠道选一个协议即可。DeepSeek OpenAI 走 api.deepseek.com，Anthropic 走 api.deepseek.com/anthropic。</p>
         </div>
       )}
       {batch ? (
