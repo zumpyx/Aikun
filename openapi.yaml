@@ -287,8 +287,7 @@ paths:
         **代理端点,契约属各厂商;经 openapi-to-rust 生成(混合宽松 schema,
         未知字段 flatten 透传,见 Proxy tag)。**
         声明 responses 协议的渠道原样转发;其余渠道转换到其原生协议
-        (chat/completions 或 Anthropic 组合)。注意:渠道侧 responses
-        只能作为附加协议(必须同时勾选 openai 或 anthropic)。
+        (chat/completions 或 Anthropic 组合)。responses 可单独成渠道。
       security:
         - apiKeyAuth: []
         - bearerAuth: []

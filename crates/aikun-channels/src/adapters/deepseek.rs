@@ -1,9 +1,8 @@
 //! DeepSeek 官方渠道。
 //!
 //! 对照官方文档：
-//! * OpenAI：`https://api.deepseek.com`，`POST /chat/completions`
-//! * Anthropic：`https://api.deepseek.com/anthropic`，`POST /messages`
-//! * 模型列表：`GET https://api.deepseek.com/models`（不在 anthropic 前缀下，也不是 /v1/models）
+//! * 对话固定 `https://api.deepseek.com`，`POST /chat/completions`（适配器写死，不看渠道协议）
+//! * 模型列表：`GET https://api.deepseek.com/models`
 //! * 模型：deepseek-flash、deepseek-v4-pro
 
 use aikun_protocol::Protocol;

@@ -136,8 +136,7 @@ pub fn channel_protocol(p: &Provider) -> Protocol {
 
 /// 决定与上游通话的协议:客户端为 Responses API 且渠道声明支持 responses
 /// 时原生直通;否则回退渠道默认协议,由 convert 层做协议转换降级。
-/// responses 只作支持协议声明,不作 default_protocol,故此处只需处理
-/// 客户端协议为 responses 的情形。
+/// responses 可作默认协议。
 pub fn upstream_protocol_for(p: &Provider, client_protocol: Protocol) -> Protocol {
     if client_protocol == Protocol::Responses
         && channel_protocols(p)
