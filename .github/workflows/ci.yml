@@ -106,9 +106,9 @@ jobs:
           npm ci
           npm run build
 
-  # 完整走一遍 release 的 docker 路径(metadata-action → build-push),
-  # 但不推送,只验证 Dockerfile 与元数据输出在 CI 环境中可用。
-  # 只在 main（含指向 main 的 PR）跑；dev 只做编译和单元测试。
+  # 只验证 Dockerfile 能编过，不推送镜像。
+  # 真正出镜像（多架构 + 推 GHCR）在 release.yml，仅 tag 触发。
+  # main（含指向 main 的 PR）跑本检查；dev 不跑。
   docker-build-check:
     if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
     runs-on: ubuntu-latest
