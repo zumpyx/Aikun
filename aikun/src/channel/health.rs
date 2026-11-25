@@ -40,19 +40,8 @@ pub async fn check_provider_health(
     for (k, v) in adapter.auth_headers(api_key, protocol) {
         req = req.header(k, v);
     }
-    // zcode 探测打的是 billing/balance，必须用 billing 头（含 X-Device-Mid /
-    // X-Os-Version / x-request-id）。聊天伪装头打这个端点会 400。
-    if channel_kind.trim() == aikun_channels::adapters::zcode::KIND {
-        use aikun_channels::adapters::zcode::{billing_request_headers, device_mid_for};
-        let mid = device_mid_for(api_key);
-        let rid = uuid::Uuid::new_v4().to_string();
-        for (k, v) in billing_request_headers(api_key, &mid, &rid) {
-            req = req.header(k, v);
-        }
-    } else {
-        for (k, v) in adapter.extra_headers(protocol) {
-            req = req.header(k, v);
-        }
+    for (k, v) in adapter.extra_headers(protocol) {
+        req = req.header(k, v);
     }
 
     let result = req.send().await;

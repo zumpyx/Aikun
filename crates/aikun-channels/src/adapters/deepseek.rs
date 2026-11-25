@@ -32,8 +32,8 @@ impl ChannelAdapter for DeepSeekAdapter {
     }
 
     fn description(&self) -> &'static str {
-        "DeepSeek 官方。选一个协议即可：OpenAI 用 https://api.deepseek.com，\
-         Anthropic 用 https://api.deepseek.com/anthropic。模型列表固定走 /models。"
+        "DeepSeek 官方。默认走 OpenAI Responses（POST /responses）。\
+         健康和模型列表固定 GET https://api.deepseek.com/models。"
     }
 
     fn chat_url(&self, provider: &Provider, protocol: Protocol) -> String {

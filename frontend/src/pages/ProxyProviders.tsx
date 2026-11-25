@@ -1013,9 +1013,31 @@ function DetailModal({ target, onClose, onDone, onClaim, claiming }: {
                 </div>
               </div>
               {mmInfo ? (
-                <pre className="max-h-48 overflow-auto rounded-md border bg-muted/40 p-2 text-[11px]">
-                  {JSON.stringify(mmInfo, null, 2)}
-                </pre>
+                <div className="space-y-2 text-xs">
+                  {Array.isArray(mmInfo.models) && mmInfo.models.length > 0 && (
+                    <div className="rounded-md border p-2">
+                      <div className="mb-1 text-muted-foreground">模型</div>
+                      <div className="flex flex-wrap gap-1">
+                        {(mmInfo.models as string[]).map((m) => <Badge key={m}>{m}</Badge>)}
+                      </div>
+                    </div>
+                  )}
+                  {mmInfo.quota != null && (
+                    <div className="rounded-md border p-2">
+                      <div className="mb-1 text-muted-foreground">额度</div>
+                      <pre className="overflow-auto text-[11px]">{JSON.stringify(mmInfo.quota, null, 2)}</pre>
+                    </div>
+                  )}
+                  {mmInfo.signin != null && (
+                    <div className="rounded-md border p-2">
+                      <div className="mb-1 text-muted-foreground">签到</div>
+                      <pre className="overflow-auto text-[11px]">{JSON.stringify(mmInfo.signin, null, 2)}</pre>
+                    </div>
+                  )}
+                  {!mmInfo.models && !mmInfo.quota && !mmInfo.signin && (
+                    <pre className="max-h-48 overflow-auto rounded-md border bg-muted/40 p-2 text-[11px]">{JSON.stringify(mmInfo, null, 2)}</pre>
+                  )}
+                </div>
               ) : (
                 <p className="text-xs text-muted-foreground">
                   点「获取模型与额度」从官方拉模型列表、套餐额度和签到状态。每日签到领取积分（当天 400，连续第 4/7 天 1000）。

@@ -24,8 +24,8 @@ const PRESETS = [
   },
   {
     id: 'deepseek', name: 'DeepSeek', website_url: 'https://platform.deepseek.com',
-    docs_url: 'https://api-docs.deepseek.com/zh-cn/', protocols: ['openai'],
-    default_protocol: 'openai', openai_base_url: 'https://api.deepseek.com',
+    docs_url: 'https://api-docs.deepseek.com/zh-cn/', protocols: ['responses'],
+    default_protocol: 'responses', openai_base_url: 'https://api.deepseek.com',
     anthropic_base_url: '', key_placeholder: 'DeepSeek API Key', kind: 'deepseek',
   },
   {
@@ -281,6 +281,11 @@ function ProviderForm({
             </label>
           </div>
         </div>
+      ) : form.preset === 'deepseek' ? (
+        <div className="space-y-1.5">
+          <Label>协议</Label>
+          <p className="text-xs text-muted-foreground">DeepSeek 固定使用 OpenAI Responses（POST /responses）。健康和模型列表走 api.deepseek.com/models。</p>
+        </div>
       ) : (
         <div className="space-y-1.5">
           <Label>协议</Label>
@@ -294,15 +299,15 @@ function ProviderForm({
                     ...f,
                     protocols: [t],
                     defaultProtocol: t,
-                    urlOpenai: t === 'openai' ? (preset.openai_base_url || 'https://api.deepseek.com') : '',
-                    urlAnthropic: t === 'anthropic' ? (preset.anthropic_base_url || (preset.id === 'deepseek' ? 'https://api.deepseek.com/anthropic' : f.urlAnthropic)) : '',
+                    urlOpenai: t === 'openai' ? (preset.openai_base_url || f.urlOpenai) : '',
+                    urlAnthropic: t === 'anthropic' ? (preset.anthropic_base_url || f.urlAnthropic) : '',
                   }))}
                 />
                 {t === 'openai' ? 'OpenAI' : 'Anthropic'}
               </label>
             ))}
           </div>
-          <p className="text-xs text-muted-foreground">标准渠道选一个协议即可。DeepSeek OpenAI 走 api.deepseek.com，Anthropic 走 api.deepseek.com/anthropic。</p>
+          <p className="text-xs text-muted-foreground">标准渠道选一个协议即可。</p>
         </div>
       )}
       {batch ? (
@@ -338,7 +343,7 @@ function ProviderForm({
 
 function validate(form: FormState, batch: boolean, editing: ProviderDetail | null): string | null {
   if (form.protocols.length === 0) return '请至少勾选一个支持协议'
-  if (form.protocols.includes('responses') && !form.protocols.includes('openai') && !form.protocols.includes('anthropic'))
+  if (form.protocols.includes('responses') && form.preset !== 'deepseek' && !form.protocols.includes('openai') && !form.protocols.includes('anthropic'))
     return 'Responses 为附加协议，需同时勾选 OpenAI 或 Anthropic'
   if (!form.name.trim()) return batch ? '请填写基础名称' : '请填写名称'
   if (batch && form.key.split('\n').map((s) => s.trim()).filter(Boolean).length === 0) return '请至少填写一个 API Key(每行一个)'
@@ -637,7 +642,6 @@ export default function Providers() {
     return (
       <TR key={key} className="bg-muted/30">
         <TD><strong>{label}</strong> <Badge tone="muted">应用</Badge></TD>
-        <TD><Badge>anthropic</Badge></TD>
         <TD className="text-xs text-muted-foreground">反代应用 · {items.length} 账号</TD>
         <TD className="text-xs">{models.join(', ') || '-'}</TD>
         <TD>
@@ -668,10 +672,6 @@ export default function Providers() {
       </TR>
     )
   }
-  const protoBadges = (p: ProviderDetail) =>
-    ((p.protocols?.length ? p.protocols : [p.provider_type]) as string[]).map((t) => (
-      <Badge key={t} tone={t === p.default_protocol ? 'default' : 'muted'} title={t === p.default_protocol ? '默认协议' : '支持协议'}>{t}</Badge>
-    ))
 
   return (
     <div className="space-y-4">
@@ -693,7 +693,7 @@ export default function Providers() {
             <div className="py-10 text-center text-sm text-muted-foreground">{list.isLoading ? '加载中...' : '暂无渠道，点击上方按钮添加'}</div>
           ) : (
             <Table>
-              <THead><TR><TH>名称</TH><TH>协议</TH><TH>地址</TH><TH>模型</TH><TH>状态</TH><TH>延迟</TH><TH>优先级</TH><TH>权重</TH><TH>操作</TH></TR></THead>
+              <THead><TR><TH>名称</TH><TH>地址</TH><TH>模型</TH><TH>状态</TH><TH>延迟</TH><TH>优先级</TH><TH>权重</TH><TH>操作</TH></TR></THead>
               <TBody>
                 {renderAppRow('CN-ZCode', cnGroup, 'app-cn-zcode')}
                 {renderAppRow('INT-ZCode', intGroup, 'app-int-zcode')}
@@ -701,7 +701,6 @@ export default function Providers() {
                 {data.map((p) => (
                   <TR key={p.id}>
                     <TD><strong>{p.name}</strong></TD>
-                    <TD><div className="flex flex-wrap gap-1">{protoBadges(p)}</div></TD>
                     <TD className="max-w-56">
                       <div className="flex items-center gap-1.5 truncate">
                         {p.website_url
