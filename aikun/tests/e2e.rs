@@ -1146,22 +1146,19 @@ async fn admin_provider_responses_protocol_validation() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 400);
-    let v: Value = r.json().await.unwrap();
-    assert_eq!(v["code"], "invalid_protocols");
+    assert_eq!(r.status(), 201);
 
-    // responses 不能作为 default_protocol:schema enum 只有 openai/anthropic,
-    // 生成层直接拦成 422(0.5 实测行为;spec 的 400 示例对该取值不可达)
+    // responses 可单独成渠道，也可作默认协议
     let r = create(json!({
-        "protocols": ["openai", "responses"],
+        "protocols": ["responses"],
         "default_protocol": "responses"
     }))
     .send()
     .await
     .unwrap();
-    assert_eq!(r.status(), 422);
+    assert_eq!(r.status(), 201);
     let v: Value = r.json().await.unwrap();
-    assert_eq!(v["code"], "request_validation_failed");
+    assert_eq!(v["default_protocol"], "responses");
 
     // impl 侧联动校验仍可达:default_protocol 合法枚举值但未勾选
     // (anthropic 不在 protocols 里)→ 400 invalid_default_protocol

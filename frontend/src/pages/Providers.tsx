@@ -24,8 +24,8 @@ const PRESETS = [
   },
   {
     id: 'deepseek', name: 'DeepSeek', website_url: 'https://platform.deepseek.com',
-    docs_url: 'https://api-docs.deepseek.com/zh-cn/', protocols: ['responses'],
-    default_protocol: 'responses', openai_base_url: 'https://api.deepseek.com',
+    docs_url: 'https://api-docs.deepseek.com/zh-cn/', protocols: ['openai'],
+    default_protocol: 'openai', openai_base_url: 'https://api.deepseek.com',
     anthropic_base_url: '', key_placeholder: 'DeepSeek API Key', kind: 'deepseek',
   },
   {
@@ -230,9 +230,9 @@ function ProviderForm({
         </div>
         <p className="text-xs text-muted-foreground">
           {preset ? (
-            <>只需填写 API Key，不用写 URL。模型在填入 Key 后自动向官方拉取。 <a className="text-primary hover:underline" href={preset.docs_url} target="_blank" rel="noopener">文档</a></>
+            <>只需填写 API Key。协议和地址由渠道适配器决定。 <a className="text-primary hover:underline" href={preset.docs_url} target="_blank" rel="noopener">文档</a></>
           ) : (
-            '自定义渠道需要填写 Base URL。模型仍可点「获取模型列表」从该地址拉取。'
+            '自定义渠道需要选择一个协议并填写 Base URL。'
           )}
         </p>
       </div>
@@ -241,6 +241,7 @@ function ProviderForm({
         <div className="space-y-1.5"><Label>备注</Label><Input value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} /></div>
       </div>
       <div className="space-y-1.5"><Label>官网地址</Label><Input value={form.website} onChange={(e) => setForm((f) => ({ ...f, website: e.target.value }))} placeholder="https://..." /></div>
+      {!preset && (
       <div className="space-y-1.5">
         <Label>渠道类型(适配器)</Label>
         <select className="h-9 w-full rounded-md border border-border bg-card px-3 text-sm" value={form.kind} onChange={(e) => setForm((f) => ({ ...f, kind: e.target.value }))}>
@@ -248,49 +249,16 @@ function ProviderForm({
         </select>
         {kindRow?.description && <p className="text-xs text-muted-foreground">{kindRow.experimental ? '⚠ ' : ''}{kindRow.description}</p>}
       </div>
+      )}
       {!preset ? (
-        <div className="space-y-1.5">
-          <Label>API 协议与 Base URL</Label>
-          <div className="grid grid-cols-[auto_auto_1fr] items-center gap-2.5 gap-x-3.5">
-            <span className="text-center text-xs font-semibold text-muted-foreground">默认</span>
-            <span className="text-xs font-semibold text-muted-foreground">API 协议</span>
-            <span className="text-xs font-semibold text-muted-foreground">Base URL</span>
-            {(['openai', 'anthropic'] as const).map((t) => (
-              <div key={t} className="contents">
-                <input
-                  type="radio"
-                  className="mx-auto"
-                  checked={form.defaultProtocol === t}
-                  disabled={!form.protocols.includes(t)}
-                  onChange={() => setForm((f) => ({ ...f, defaultProtocol: t }))}
-                />
-                <label className="flex items-center gap-1.5 text-sm">
-                  <input type="checkbox" checked={form.protocols.includes(t)} onChange={(e) => toggleProto(t, e.target.checked)} /> {t === 'openai' ? 'OpenAI' : 'Anthropic'}
-                </label>
-                <Input
-                  value={t === 'openai' ? form.urlOpenai : form.urlAnthropic}
-                  disabled={!form.protocols.includes(t)}
-                  onChange={(e) => setForm((f) => (t === 'openai' ? { ...f, urlOpenai: e.target.value } : { ...f, urlAnthropic: e.target.value }))}
-                  placeholder={t === 'openai' ? 'https://api.openai.com' : 'https://api.anthropic.com'}
-                />
-              </div>
-            ))}
-            <span />
-            <label className="flex items-center gap-1.5 text-sm">
-              <input type="checkbox" checked={form.protocols.includes('responses')} onChange={(e) => toggleProto('responses', e.target.checked)} /> Responses
-            </label>
-          </div>
-        </div>
-      ) : form.preset === 'deepseek' ? (
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           <Label>协议</Label>
-          <p className="text-xs text-muted-foreground">DeepSeek 固定使用 OpenAI Responses（POST /responses）。健康和模型列表走 api.deepseek.com/models。</p>
-        </div>
-      ) : (
-        <div className="space-y-1.5">
-          <Label>协议</Label>
-          <div className="flex gap-3 text-sm">
-            {(['openai', 'anthropic'] as const).map((t) => (
+          <div className="flex flex-wrap gap-3 text-sm">
+            {([
+              ['openai', 'OpenAI 对话'],
+              ['responses', 'OpenAI Responses'],
+              ['anthropic', 'Anthropic'],
+            ] as const).map(([t, label]) => (
               <label key={t} className="flex items-center gap-1.5">
                 <input
                   type="radio"
@@ -299,17 +267,27 @@ function ProviderForm({
                     ...f,
                     protocols: [t],
                     defaultProtocol: t,
-                    urlOpenai: t === 'openai' ? (preset.openai_base_url || f.urlOpenai) : '',
-                    urlAnthropic: t === 'anthropic' ? (preset.anthropic_base_url || f.urlAnthropic) : '',
                   }))}
                 />
-                {t === 'openai' ? 'OpenAI' : 'Anthropic'}
+                {label}
               </label>
             ))}
           </div>
-          <p className="text-xs text-muted-foreground">标准渠道选一个协议即可。</p>
+          <div className="space-y-1.5">
+            <Label>Base URL</Label>
+            <Input
+              value={form.defaultProtocol === 'anthropic' ? form.urlAnthropic : form.urlOpenai}
+              onChange={(e) => setForm((f) => (
+                f.defaultProtocol === 'anthropic'
+                  ? { ...f, urlAnthropic: e.target.value, urlOpenai: '' }
+                  : { ...f, urlOpenai: e.target.value, urlAnthropic: '' }
+              ))}
+              placeholder={form.defaultProtocol === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.example.com/v1'}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">自定义渠道选一个协议，填地址和密钥即可。</p>
         </div>
-      )}
+      ) : null}
       {batch ? (
         <div className="space-y-1.5">
           <Label>API Keys(每行一个,每个 key 建一个渠道)</Label>
@@ -342,30 +320,31 @@ function ProviderForm({
 }
 
 function validate(form: FormState, batch: boolean, editing: ProviderDetail | null): string | null {
-  if (form.protocols.length === 0) return '请至少勾选一个支持协议'
-  if (form.protocols.includes('responses') && form.preset !== 'deepseek' && !form.protocols.includes('openai') && !form.protocols.includes('anthropic'))
-    return 'Responses 为附加协议，需同时勾选 OpenAI 或 Anthropic'
+  const preset = PRESETS.find((p) => p.id === form.preset)
+  if (!preset && form.protocols.length === 0) return '请至少勾选一个支持协议'
   if (!form.name.trim()) return batch ? '请填写基础名称' : '请填写名称'
   if (batch && form.key.split('\n').map((s) => s.trim()).filter(Boolean).length === 0) return '请至少填写一个 API Key(每行一个)'
   if (!batch && !editing && !form.key.trim()) return '请填写名称和 API Key'
-  const hasOpenai = form.protocols.includes('openai') || form.protocols.includes('responses')
-  if (hasOpenai && !form.urlOpenai.trim()) return '已勾选 OpenAI/Responses 协议，请填写 OPENAI_BASE_URL'
-  if (form.protocols.includes('anthropic') && !form.urlAnthropic.trim()) return '已勾选 Anthropic 协议，请填写 ANTHROPIC_BASE_URL'
+  if (!preset) {
+    const hasOpenai = form.protocols.includes('openai') || form.protocols.includes('responses')
+    if (hasOpenai && !form.urlOpenai.trim()) return '已勾选 OpenAI/Responses 协议，请填写 Base URL'
+    if (form.protocols.includes('anthropic') && !form.urlAnthropic.trim()) return '已勾选 Anthropic 协议，请填写 Base URL'
+  }
   return null
 }
 
 function buildBody(form: FormState, batch: boolean): Record<string, unknown> {
+  const preset = PRESETS.find((p) => p.id === form.preset)
   const body: Record<string, unknown> = {
     name: form.name.trim(),
     note: form.note.trim(),
     website_url: form.website.trim(),
     channel_kind: form.kind,
-    protocols: form.protocols,
-    default_protocol: ['openai', 'anthropic'].includes(form.defaultProtocol)
-      ? form.defaultProtocol
-      : ['openai', 'anthropic'].find((t) => form.protocols.includes(t)) ?? form.protocols[0],
-    openai_base_url: form.urlOpenai.trim(),
-    anthropic_base_url: form.urlAnthropic.trim(),
+    // 预设渠道的协议和地址由适配器决定，这里只占位，不作为调用依据。
+    protocols: preset ? [...preset.protocols] : form.protocols,
+    default_protocol: preset ? preset.default_protocol : form.defaultProtocol,
+    openai_base_url: preset ? preset.openai_base_url : form.urlOpenai.trim(),
+    anthropic_base_url: preset ? preset.anthropic_base_url : form.urlAnthropic.trim(),
     models: form.models.split(',').map((s) => s.trim()).filter(Boolean),
     priority: toInt(form.priority, 0),
     weight: toNum(form.weight, 1.0),

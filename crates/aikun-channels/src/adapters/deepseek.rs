@@ -32,31 +32,13 @@ impl ChannelAdapter for DeepSeekAdapter {
     }
 
     fn description(&self) -> &'static str {
-        "DeepSeek 官方。默认走 OpenAI Responses（POST /responses）。\
+        "DeepSeek 官方。固定走 OpenAI 对话（POST /chat/completions）。\
          健康和模型列表固定 GET https://api.deepseek.com/models。"
     }
 
-    fn chat_url(&self, provider: &Provider, protocol: Protocol) -> String {
-        let configured = crate::provider::base_url_for(provider, protocol);
-        let base = if configured.trim().is_empty() {
-            match protocol {
-                Protocol::Anthropic => ANTHROPIC_BASE,
-                Protocol::OpenAi | Protocol::Responses => OPENAI_BASE,
-            }
-        } else {
-            configured
-        };
-        let path = match protocol {
-            Protocol::Anthropic => "/messages",
-            Protocol::OpenAi => "/chat/completions",
-            Protocol::Responses => "/responses",
-        };
-        // Anthropic base 已含 /anthropic，不能再被 build_api_url 补 /v1。
-        if protocol == Protocol::Anthropic {
-            format!("{}{}", base.trim_end_matches('/'), path)
-        } else {
-            crate::url::build_api_url(base, path)
-        }
+    fn chat_url(&self, _provider: &Provider, _protocol: Protocol) -> String {
+        // 协议和地址由适配器决定，不看渠道上存的协议/URL。
+        crate::url::build_api_url(OPENAI_BASE, "/chat/completions")
     }
 
     /// 健康和拉模型都打官方 /models，不跟协议 base 走。

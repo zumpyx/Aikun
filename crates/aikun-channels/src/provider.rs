@@ -96,8 +96,8 @@ impl std::fmt::Debug for Provider {
 pub const VALID_PROTOCOLS: [&str; 3] = ["openai", "anthropic", "responses"];
 
 /// Protocols eligible as a channel's default (upstream traffic protocol).
-/// responses 只作附加的支持协议声明,不能作为默认协议。
-pub const DEFAULTABLE_PROTOCOLS: [&str; 2] = ["openai", "anthropic"];
+/// responses 与 openai / anthropic 同级，可单独成渠道（DeepSeek 等）。
+pub const DEFAULTABLE_PROTOCOLS: [&str; 3] = ["openai", "anthropic", "responses"];
 
 /// A channel's declared protocol list must be non-empty and only contain
 /// known protocols.
@@ -105,8 +105,7 @@ pub fn valid_protocol_list(list: &[String]) -> bool {
     !list.is_empty() && list.iter().all(|p| VALID_PROTOCOLS.contains(&p.as_str()))
 }
 
-/// responses 是附加协议,不能单独成渠道——其上游地址、凭证与默认协议
-/// 语义都依附于 openai/anthropic 配置,协议列表至少含一个可作默认的协议。
+/// responses 复用 openai 地址与 Bearer 鉴权，可单独成渠道。
 pub fn has_defaultable_protocol(list: &[String]) -> bool {
     list.iter()
         .any(|p| DEFAULTABLE_PROTOCOLS.contains(&p.as_str()))
@@ -129,11 +128,9 @@ pub fn first_defaultable_protocol(protocols: &[String]) -> String {
 /// The protocol used to talk to this channel upstream: its configured
 /// default, falling back to the legacy provider_type mapping.
 pub fn channel_protocol(p: &Provider) -> Protocol {
-    // responses 不可作 default_protocol(DEFAULTABLE_PROTOCOLS),
-    // 空值 / 非法值按旧 provider_type 映射兜底(未迁移行)。
     match Protocol::parse(&p.default_protocol) {
-        Some(proto @ (Protocol::OpenAi | Protocol::Anthropic)) => proto,
-        Some(Protocol::Responses) | None => Protocol::for_provider_type(&p.provider_type),
+        Some(proto) => proto,
+        None => Protocol::for_provider_type(&p.provider_type),
     }
 }
 
@@ -314,12 +311,11 @@ pub(crate) mod tests {
         let responses = || "responses".to_string();
         let anthropic = || "anthropic".to_string();
 
-        // responses 不能单独成渠道,也不能作默认协议
-        assert!(!has_defaultable_protocol(&[responses()]));
-        assert!(has_defaultable_protocol(&[openai(), responses()]));
-        assert!(!valid_default_protocol(
+        // responses 可单独成渠道，也可作默认协议
+        assert!(has_defaultable_protocol(&[responses()]));
+        assert!(valid_default_protocol(
             "responses",
-            &[openai(), responses()]
+            &[responses()]
         ));
         assert!(valid_default_protocol("openai", &[openai(), responses()]));
         // 默认必须已勾选

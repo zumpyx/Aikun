@@ -590,12 +590,15 @@ pub enum UpdateProviderRequestDefaultProtocol {
     Openai,
     #[serde(rename = "anthropic")]
     Anthropic,
+    #[serde(rename = "responses")]
+    Responses,
 }
 impl UpdateProviderRequestDefaultProtocol {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
+            Self::Responses => "responses",
         }
     }
 }
@@ -873,7 +876,7 @@ pub struct Provider {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_kind: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    ///上行流量协议;必须已在 protocols 内(responses 不可作默认)
+    ///上行流量协议;必须已在 protocols 内
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_protocol: Option<ProviderDefaultProtocol>,
     ///自动禁用原因;is_active=true 时清空
@@ -906,7 +909,7 @@ pub struct Provider {
     pub openai_base_url: url::Url,
     ///0..=100,大者优先
     pub priority: i64,
-    ///声明协议;responses 必须伴随 openai 或 anthropic(跨字段约束)
+    ///声明协议;openai / anthropic / responses 均可单独成渠道
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocols: Option<Vec<ProviderProtocolsItem>>,
     ///刻意不含 azure(apply_auth 不支持 api-key 头)
@@ -1022,7 +1025,7 @@ impl AsRef<str> for ProviderHealthStatus {
         self.as_str()
     }
 }
-///上行流量协议;必须已在 protocols 内(responses 不可作默认)
+///上行流量协议;必须已在 protocols 内
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum ProviderDefaultProtocol {
     #[default]
@@ -1030,12 +1033,15 @@ pub enum ProviderDefaultProtocol {
     Openai,
     #[serde(rename = "anthropic")]
     Anthropic,
+    #[serde(rename = "responses")]
+    Responses,
 }
 impl ProviderDefaultProtocol {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
+            Self::Responses => "responses",
         }
     }
 }
@@ -1537,12 +1543,15 @@ pub enum FetchModelsRequestProtocol {
     Openai,
     #[serde(rename = "anthropic")]
     Anthropic,
+    #[serde(rename = "responses")]
+    Responses,
 }
 impl FetchModelsRequestProtocol {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
+            Self::Responses => "responses",
         }
     }
 }
@@ -1891,12 +1900,15 @@ pub enum CreateProvidersBatchRequestDefaultProtocol {
     Openai,
     #[serde(rename = "anthropic")]
     Anthropic,
+    #[serde(rename = "responses")]
+    Responses,
 }
 impl CreateProvidersBatchRequestDefaultProtocol {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
+            Self::Responses => "responses",
         }
     }
 }
@@ -2160,12 +2172,15 @@ pub enum CreateProviderRequestDefaultProtocol {
     Openai,
     #[serde(rename = "anthropic")]
     Anthropic,
+    #[serde(rename = "responses")]
+    Responses,
 }
 impl CreateProviderRequestDefaultProtocol {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
+            Self::Responses => "responses",
         }
     }
 }

@@ -1668,7 +1668,7 @@ paths:
         跨字段约束(创建与更新共用同一口径):
         * openai_base_url / anthropic_base_url 按勾选协议必填对应地址,
           空则回退另一路(base_url_for 回退口径);
-        * protocols 仅 openai/anthropic/responses,且 responses 必须伴随
+        * protocols 仅 openai/anthropic/responses，均可作默认；
           openai 或 anthropic(不能单独成渠道);
         * default_protocol 必须已勾选且属于 openai/anthropic;
         * provider_type 白名单 openai/anthropic/custom —— **刻意不含 azure**
@@ -4073,11 +4073,11 @@ components:
           items:
             type: string
             enum: [openai, anthropic, responses]
-          description: 声明协议;responses 必须伴随 openai 或 anthropic(跨字段约束)
+          description: 声明协议;openai / anthropic / responses 均可单独成渠道
         default_protocol:
           type: string
-          enum: [openai, anthropic]
-          description: 上行流量协议;必须已在 protocols 内(responses 不可作默认)
+          enum: [openai, anthropic, responses]
+          description: 上行流量协议;必须已在 protocols 内
         note:
           type: string
         website_url:
@@ -4155,7 +4155,7 @@ components:
             enum: [openai, anthropic, responses]
         default_protocol:
           type: string
-          enum: [openai, anthropic]
+          enum: [openai, anthropic, responses]
         note:
           type: string
         website_url:
@@ -4220,7 +4220,7 @@ components:
             enum: [openai, anthropic, responses]
         default_protocol:
           type: string
-          enum: [openai, anthropic]
+          enum: [openai, anthropic, responses]
         note:
           type: string
         website_url:
@@ -4275,7 +4275,7 @@ components:
             enum: [openai, anthropic, responses]
         default_protocol:
           type: string
-          enum: [openai, anthropic]
+          enum: [openai, anthropic, responses]
         note:
           type: string
         website_url:
@@ -4682,7 +4682,7 @@ components:
           type: string
         protocol:
           type: string
-          enum: [openai, anthropic]
+          enum: [openai, anthropic, responses]
         provider_type:
           type: string
           description: 旧客户端回退字段,protocol 缺省时使用

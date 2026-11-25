@@ -767,7 +767,7 @@ fn validate_candidate(cand: &ProviderCandidate) -> Result<ProviderConfig, Proble
             if !has_defaultable_protocol(list) {
                 return Err(bad(
                     "invalid_protocols",
-                    "responses 为附加协议，需同时勾选 openai 或 anthropic",
+                    "protocols 不能为空，且仅支持 openai / anthropic / responses",
                 ));
             }
             list.clone()
@@ -779,7 +779,7 @@ fn validate_candidate(cand: &ProviderCandidate) -> Result<ProviderConfig, Proble
         Some(_) => {
             return Err(bad(
                 "invalid_default_protocol",
-                "default_protocol 必须是已勾选的 openai / anthropic 协议之一",
+                "default_protocol 必须是已勾选的 openai / anthropic / responses 之一",
             ));
         }
         None => first_defaultable_protocol(&protocols),
@@ -787,10 +787,13 @@ fn validate_candidate(cand: &ProviderCandidate) -> Result<ProviderConfig, Proble
     // Legacy provider_type 列与默认协议保持同步,旧回退路径不漂移。
     // (白名单本身已由 schema enum openai/anthropic/custom 在生成层拦下;
     // 历史 azure 只在库中,不可能经 API 写入。)
-    let provider_type = cand
-        .provider_type
-        .clone()
-        .unwrap_or_else(|| default_protocol.clone());
+    let provider_type = cand.provider_type.clone().unwrap_or_else(|| {
+        if default_protocol == "responses" {
+            "openai".to_string()
+        } else {
+            default_protocol.clone()
+        }
+    });
     let priority = cand.priority.unwrap_or(0);
     let weight = cand.weight.unwrap_or(1.0);
     let max_retries = cand.max_retries.unwrap_or(3);
@@ -1260,7 +1263,7 @@ impl AdminProvidersService {
                     if !has_defaultable_protocol(&list) {
                         return bad(
                             "invalid_protocols",
-                            "responses 为附加协议，需同时勾选 openai 或 anthropic",
+                            "protocols 不能为空，且仅支持 openai / anthropic / responses",
                         );
                     }
                     list
@@ -1273,7 +1276,7 @@ impl AdminProvidersService {
                     if !valid_default_protocol(d, &protocols) {
                         return bad(
                             "invalid_default_protocol",
-                            "default_protocol 必须是已勾选的 openai / anthropic 协议之一",
+                            "default_protocol 必须是已勾选的 openai / anthropic / responses 之一",
                         );
                     }
                     d.to_string()
@@ -2117,10 +2120,11 @@ mod tests {
 
     #[test]
     fn candidate_rejects_cross_field_violations() {
-        // responses 单独成渠道
+        // responses 可单独成渠道
         let mut c = candidate();
         c.protocols = Some(vec!["responses".to_string()]);
-        assert_eq!(err_code(c), "invalid_protocols");
+        c.default_protocol = Some("responses".to_string());
+        assert!(validate_candidate(&c).is_ok());
         // 勾选 openai 但地址空白
         let mut c = candidate();
         c.openai_base_url = Some("   ".to_string());

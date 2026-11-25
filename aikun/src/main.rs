@@ -1717,8 +1717,8 @@ impl providers_port::ProviderProbes for GatewayProbes {
         use aikun_protocol::Protocol;
         // URL 与鉴权头由渠道适配器决定(与对话/健康检查同口径)。
         let protocol = match Protocol::parse(&probe.protocol) {
-            Some(p @ (Protocol::OpenAi | Protocol::Anthropic)) => p,
-            _ => {
+            Some(p) => p,
+            None => {
                 return Err(providers_port::FetchModelsError::Connect {
                     message: "invalid protocol".to_string(),
                 });
