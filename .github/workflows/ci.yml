@@ -108,7 +108,9 @@ jobs:
 
   # 完整走一遍 release 的 docker 路径(metadata-action → build-push),
   # 但不推送,只验证 Dockerfile 与元数据输出在 CI 环境中可用。
+  # 只在 main（含指向 main 的 PR）跑；dev 只做编译和单元测试。
   docker-build-check:
+    if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
