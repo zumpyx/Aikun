@@ -38,7 +38,7 @@ md-5 = "0.10"
 rand = "0.9"
 
 # HTTP client(rustls 替代系统 OpenSSL,便于静态构建)
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "socks", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "socks", "rustls", "form"] }
 
 # Streaming (SSE)
 futures-util = "0.3"
